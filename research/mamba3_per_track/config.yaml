@@ -1,0 +1,31 @@
+# Mamba-3 Per-Track Adaptive Filter Bank config
+model:
+  d_model: 256
+  d_state: 32
+  n_layers: 6
+  d_conv: 4
+  expand: 2
+  use_fast_path: true
+
+audio:
+  sample_rate: 44100
+  hop_length: 512
+  n_fft: 2048
+  n_mels: 80
+
+training:
+  n_steps: 100000
+  batch_size: 16
+  lr: 3e-4
+  grad_clip: 1.0
+  grad_accum: 1
+  grad_ckpt: false
+  device: cuda
+  amp: true
+  val_split: 0.1
+  val_every: 2000
+  ckpt_every: 1000
+  log_every: 50
+  early_stop_patience: 10
+  num_workers: 8
+  cache_in_ram: false

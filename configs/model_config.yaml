@@ -1,0 +1,69 @@
+# NeMo ModelPT Config: Stem+MIDI Pro v1.0
+name: "stem_midi_mamba_v1"
+restore_from_path: null  # For fine-tuning
+
+# Audio I/O
+audio:
+  sample_rate: 44100
+  n_fft: 2048
+  hop_length: 512        # ~11.6ms @ 44.1kHz → target <5ms via CUDA graph
+  n_mels: 80
+  chunk_duration_sec: 2.0
+  overlap_ratio: 0.5     # 50% overlap-add for phase coherence
+
+# Mamba Separator Architecture
+separator:
+  d_model: 768
+  n_layer: 12
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  selective_scan_impl: "cuda"  # Use mamba_ssm selective_scan_fn
+  causal_conv1d_impl: "cuda"   # Custom causal conv kernel
+
+# Mamba Transcriber Architecture  
+transcriber:
+  d_model: 512
+  n_layer: 8
+  d_state: 12
+  onset_head_dim: 64
+  pitch_vocab_size: 128        # MIDI 0-127 + silence
+  velocity_bins: 128
+  expression_heads: ["bend", "vibrato", "slide"]
+  onset_threshold: 0.5
+
+# Mixed Precision & Distributed
+training:
+  precision: "fp8"             # Dynamic FP8 via TransformerEngine
+  gradient_checkpointing: true # Enable for 60s+ sequences
+  megatron_core:
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    distributed_timeout_minutes: 30
+
+# Loss Weights
+loss:
+  mr_stft_weight: 1.0
+  spectral_flatness_weight: 0.1
+  crest_factor_weight: 0.05
+  onset_f1_weight: 1.0
+  pitch_ce_weight: 0.8
+  velocity_mae_weight: 0.3
+  cross_modal_alignment_weight: 0.5
+
+# Quality Gates
+quality_gates:
+  studio_confidence_threshold: 0.85
+  draft_confidence_threshold: 0.70
+  min_confidence: 0.6
+  min_si_sdr: 20.0
+
+# TensorRT-LLM Export
+export:
+  max_batch_size: 1            # Streaming inference
+  max_seq_len: 264600          # 6s chunks @ 44.1kHz
+  custom_plugins:
+    - "causal_conv1d"
+    - "selective_scan_fn"
+  cuda_graph_capture: true
+  enable_kv_cache: false       # SSM state caching instead

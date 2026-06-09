@@ -1,0 +1,46 @@
+# Data Configuration for Mamba-3 Per-Track Adaptive Filter Bank (research path)
+# Used by: research/mamba3_per_track/train.py
+# Replace paths with actual locations of your datasets
+
+dataset_type: synthetic  # Options: 'musdb18hq', 'slakh2100_yourmt3', 'synthetic'
+root_dir: ./data  # Root directory containing dataset subdirectories
+
+# DataLoader parameters
+batch_size: 16             # Adjust based on available memory (CPU target: 4-8 GB)
+num_workers: 8             # Number of subprocesses for data loading
+
+# Audio parameters
+sample_rate: 44100         # Target sample rate (Hz)
+segment_length: 4.0        # Segment length in seconds for training clips
+
+# Training parameters (for research/mamba3_per_track/train.py)
+train:
+  n_steps: 100000
+  lr: 3e-4
+  grad_clip: 1.0
+  device: cpu              # CPU-only target; CUDA path is experimental
+  amp: false               # AMP requires CUDA, leave off for CPU
+  val_split: 0.1
+  val_every: 2000
+  ckpt_every: 1000
+  log_every: 50
+  early_stop_patience: 10
+
+# MUSDB18-HQ path:
+# root_dir/
+#   musdb18hq/
+#     train/
+#       Track00001/
+#         bass.wav drums.wav vocals.wav other.wav
+#         bass.crepe.npy bass.pitched.npy ...
+
+# Slakh2100-YourMT3-16k path:
+# root_dir/
+#   slakh2100_yourmt3/
+#     train/
+#       Track00001/
+#         mix.wav
+#         stems/
+#           bass.wav drums.wav vocals.wav guitar.wav ...
+#     val/
+#     test/

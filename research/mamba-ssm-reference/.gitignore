@@ -1,0 +1,10 @@
+# Ignore the vendored clone's own git history and build artifacts.
+mamba/.git/
+mamba/.github/
+mamba/build/
+mamba/dist/
+mamba/*.egg-info/
+mamba/mamba_ssm/_*.so
+mamba/mamba_ssm/*.so
+mamba/csrc/build/
+mamba/csrc/*_generated.cpp

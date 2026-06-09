@@ -1,0 +1,25 @@
+# Example Data Configuration for Canadian Artist Datasets
+# Replace paths with actual locations of your datasets
+
+dataset_type: synthetic  # Options: 'slakh2100_ca', 'musdb_indie', 'synthetic'
+root_dir: ./data/canadian  # Root directory containing dataset
+
+# DataLoader parameters
+batch_size: 8              # Adjust based on GPU memory
+num_workers: 4             # Number of subprocesses for data loading
+
+# Audio parameters
+sample_rate: 44100         # Target sample rate (Hz)
+segment_length: 6.0        # Segment length in seconds for training
+
+# For real datasets, you would organize your data like:
+# root_dir/
+#   train/
+#     mixture.wav
+#     stems/
+#       guitar.wav
+#       bass.wav
+#   val/
+#     ...
+#   test/
+#     ...
