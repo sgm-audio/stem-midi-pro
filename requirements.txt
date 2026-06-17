@@ -17,6 +17,19 @@ pretty-midi>=0.2.9
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 python-multipart>=0.0.6
+pydantic>=2.0.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Redis (for background tasks result backend)
+redis>=5.0.0
+
+# Square Payments SDK
+squareup>=2024.0.0
+
+# Email (Resend)
+resend>=0.5.0
 
 # Configuration & Utilities
 pyyaml>=6.0

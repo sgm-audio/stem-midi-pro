@@ -146,6 +146,156 @@ Retrieve information about the currently loaded model.
 - `200 OK`: Model information returned
 - `503 Service Unavailable`: Model not loaded
 
+### List Credit Packages
+
+```
+GET /api/v1/payments/packages
+```
+
+Retrieve available credit packages for purchase.
+
+**Response:**
+```json
+{
+  "packages": [
+    {
+      "id": "starter",
+      "name": "Starter Pack",
+      "price_cents": 500,
+      "price_formatted": "$5.00",
+      "credits": 10,
+      "badge": null,
+      "description": "10 credits - $5.00",
+      "value_per_credit": "$0.50"
+    },
+    {
+      "id": "popular",
+      "name": "Popular Pack",
+      "price_cents": 2000,
+      "price_formatted": "$20.00",
+      "credits": 50,
+      "badge": "Most Popular",
+      "description": "50 credits - $20.00",
+      "value_per_credit": "$0.40"
+    },
+    {
+      "id": "best_value",
+      "name": "Best Value Pack",
+      "price_cents": 5000,
+      "price_formatted": "$50.00",
+      "credits": 150,
+      "badge": "Best Deal",
+      "description": "150 credits - $50.00 (3x value)",
+      "value_per_credit": "$0.33"
+    }
+  ]
+}
+```
+
+### Create Payment Order
+
+```
+POST /api/v1/payments/create-order
+```
+
+Create a Square checkout session for purchasing credits.
+
+**Request:**
+```json
+{
+  "package_id": "starter",
+  "user_id": "user_abc123",
+  "user_email": "user@example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "checkout_url": "https://squareup.com/checkout/...",
+  "checkout_id": "LWDXK...",
+  "package_id": "starter",
+  "credits": 10,
+  "amount_cents": 500
+}
+```
+
+**Credit Package Pricing:**
+
+| Package | Price | Credits | Value/Credit |
+|---------|-------|--------|--------------|
+| Starter Pack | $5.00 | 10 | $0.50 |
+| Popular Pack | $20.00 | 50 | $0.40 |
+| Best Value Pack | $50.00 | 150 | $0.33 |
+
+### Square Webhook
+
+```
+POST /api/v1/payments/square/webhook
+```
+
+Square calls this endpoint after payment completion. Credits are automatically added to the user's account.
+
+**Headers:**
+- `x-square-hmacsha256-signature`: Webhook signature for verification
+
+**Processing:**
+1. Verifies payment signature
+2. Looks up order details from Square
+3. Credits user account (idempotent - same payment won't double-credit)
+4. Sends receipt email via Resend
+
+### Get User Credits
+
+```
+GET /api/v1/users/me/credits
+```
+
+Get current user's credit balance and available packages.
+
+**Headers:**
+- `X-User-ID`: User's external ID
+
+**Response:**
+```json
+{
+  "balance": 25,
+  "packages": [...]
+}
+```
+
+### Get User Transactions
+
+```
+GET /api/v1/users/me/transactions?limit=50&offset=0
+```
+
+Get user's transaction history.
+
+**Headers:**
+- `X-User-ID`: User's external ID
+
+**Response:**
+```json
+{
+  "transactions": [
+    {
+      "id": 1,
+      "amount": 50,
+      "balance_after": 75,
+      "description": "Purchased popular package",
+      "transaction_type": "purchase",
+      "payment_id": "LWDXK...",
+      "job_id": null,
+      "created_at": "2024-01-15T10:30:00"
+    }
+  ],
+  "total": 1,
+  "limit": 50,
+  "offset": 0
+}
+```
+
 ## Data Models
 
 ### Processing Report
@@ -176,6 +326,44 @@ The service uses a three-tier quality system:
 3. **Complex Material** (`confidence < 0.70` OR artifact flags present)
    - Challenging material requiring special handling
    - Offers options: raw download, human review, or refund
+
+### Credit Packages
+
+| Package | Price | Credits | Best For |
+|---------|-------|--------|----------|
+| Starter Pack | $5.00 | 10 | Trial |
+| Popular Pack | $20.00 | 50 | Most users |
+| Best Value Pack | $50.00 | 150 | Power users |
+
+**Credit Costs:**
+- ≤10 min audio: 1 credit
+- 10-20 min: 2 credits
+- 20-30 min: 3 credits
+- 30+ min: `floor(duration / 600) + 1` credits
+
+**Credits never expire.**
+
+### Database Schema
+
+For PIPEDA-compliant audit trail:
+
+```sql
+-- Users table (additions)
+ALTER TABLE users ADD COLUMN credit_balance INT NOT NULL DEFAULT 0;
+
+-- Credit transactions table
+CREATE TABLE credit_transactions (
+    id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id),
+    amount INT NOT NULL,  -- positive=purchase, negative=spend
+    balance_after INT NOT NULL,
+    payment_id VARCHAR(255) UNIQUE,  -- for purchases
+    job_id VARCHAR(255),  -- for spends
+    description VARCHAR(500),
+    transaction_type VARCHAR(50) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
 
 ## Error Responses
 
@@ -290,6 +478,14 @@ The API follows semantic versioning. Backward-incompatible changes will incremen
 Current version: `1.0.0`
 
 ## Changelog
+
+### v1.1.0
+- Square payment integration for credit purchases
+- Credit packages: $5/10cr, $20/50cr, $50/150cr
+- Square webhook handler with idempotency
+- User credit ledger with transaction history
+- Resend email integration for receipts
+- Credit deduction when submitting jobs
 
 ### v1.0.0
 - Initial release
