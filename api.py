@@ -17,7 +17,7 @@ from typing import Optional, Dict, Any
 import torch
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import Depends, FastAPI, File, Header, UploadFile, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -36,12 +36,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware
-origins = os.getenv("CORS_ORIGINS", "*").split(",")
+# CORS: browsers reject Access-Control-Allow-Origin: * with credentials.
+# Default to localhost origins + credentials; CORS_ORIGINS=* disables credentials.
+_raw_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",") if o.strip()]
+if not _raw_origins or _raw_origins == ["*"] or "*" in _raw_origins:
+    _cors_origins = ["*"]
+    _cors_credentials = False
+else:
+    _cors_origins = _raw_origins
+    _cors_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -53,8 +61,18 @@ model_config: Optional[Dict] = None
 # Supported audio formats and constraints
 SUPPORTED_FORMATS = {".wav", ".flac", ".mp3"}
 MAX_DURATION_SECONDS = 600  # 10 minutes
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))  # 50 MiB
+API_KEY = os.getenv("API_KEY", "").strip()  # optional; if set, require X-API-Key
 SUPPORTED_SAMPLE_RATES = {44100, 48000}
 SUPPORTED_BIT_DEPTHS = {16, 24}  # Note: soundfile doesn't directly give bit depth, we'll infer
+
+
+async def require_api_key_if_configured(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+    """When API_KEY is set, require a matching X-API-Key header."""
+    if not API_KEY:
+        return
+    if not x_api_key or x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
 def load_model() -> StemMidiModel:
@@ -258,7 +276,9 @@ def create_placeholder_midi(midi_data: Dict, stem_type: str) -> bytes:
 
 @app.post("/process")
 async def process_audio(
-    file: UploadFile = File(...)
+    request: Request,
+    file: UploadFile = File(...),
+    _: None = Depends(require_api_key_if_configured),
 ):
     """
     Process an audio file to extract stems and generate MIDI.
@@ -273,22 +293,48 @@ async def process_audio(
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
+    # Early reject oversized Content-Length when present
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
+                )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+
     # Validate file extension
-    file_ext = Path(file.filename).suffix.lower()
+    file_ext = Path(file.filename or "").suffix.lower()
     if file_ext not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file format {file_ext}. Supported: {SUPPORTED_FORMATS}"
         )
     
+    # Stream upload with hard byte cap (no auth still gets size limit)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            await file.close()
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    await file.close()
+
     # Save uploaded file to temporary location
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-        try:
-            content = await file.read()
-            tmp_file.write(content)
-            tmp_file_path = tmp_file.name
-        finally:
-            await file.close()
+        tmp_file.write(content)
+        tmp_file_path = tmp_file.name
     
     try:
         # Validate audio properties
@@ -302,7 +348,7 @@ async def process_audio(
         zip_buffer = create_response_zip(outputs)
         
         # Prepare filename for download
-        base_filename = Path(file.filename).stem
+        base_filename = Path(file.filename or "audio").stem
         download_filename = f"{base_filename}_stem-midi-package.zip"
         
         # Return ZIP file
@@ -325,17 +371,21 @@ async def process_audio(
         # Clean up temporary file
         try:
             os.unlink(tmp_file_path)
-        except:
+        except Exception:
             pass
 
 
 @app.get("/templates")
-async def get_templates():
+async def get_templates(_: None = Depends(require_api_key_if_configured)):
     """List available user-facing content templates."""
     return {"templates": list_templates()}
 
 @app.post("/render-template")
-async def render_template_endpoint(template_name: str, variables: Optional[Dict[str, str]] = None):
+async def render_template_endpoint(
+    template_name: str,
+    variables: Optional[Dict[str, str]] = None,
+    _: None = Depends(require_api_key_if_configured),
+):
     """
     Render a user-facing content template with the given variables.
 

@@ -9,6 +9,28 @@ from pathlib import Path
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "user_content"
 
+
+def _safe_template_path(template_name: str) -> Path:
+    """Resolve template_name under TEMPLATE_DIR; reject path traversal."""
+    if not template_name or not isinstance(template_name, str):
+        raise FileNotFoundError("Template not found")
+    # Basename-only: reject ../, absolute paths, nested separators
+    if template_name != Path(template_name).name:
+        raise FileNotFoundError(f"Template not found: {template_name}")
+    if ".." in template_name or "/" in template_name or "\\" in template_name:
+        raise FileNotFoundError(f"Template not found: {template_name}")
+
+    root = TEMPLATE_DIR.resolve()
+    template_path = (root / template_name).resolve()
+    try:
+        template_path.relative_to(root)
+    except ValueError as exc:
+        raise FileNotFoundError(f"Template not found: {template_name}") from exc
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Template not found: {template_path}")
+    return template_path
+
+
 def render_template(template_name: str, variables: Optional[Dict[str, str]] = None) -> str:
     """
     Render a template file from user_content/ with the given variables.
@@ -21,11 +43,9 @@ def render_template(template_name: str, variables: Optional[Dict[str, str]] = No
         Rendered string with {{ placeholders }} replaced
 
     Raises:
-        FileNotFoundError: If template doesn't exist
+        FileNotFoundError: If template doesn't exist or path escapes TEMPLATE_DIR
     """
-    template_path = TEMPLATE_DIR / template_name
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template not found: {template_path}")
+    template_path = _safe_template_path(template_name)
 
     content = template_path.read_text(encoding='utf-8')
     variables = variables or {}
