@@ -14,10 +14,9 @@ def _safe_template_path(template_name: str) -> Path:
     """Resolve template_name under TEMPLATE_DIR; reject path traversal."""
     if not template_name or not isinstance(template_name, str):
         raise FileNotFoundError("Template not found")
-    # Basename-only: reject ../, absolute paths, nested separators
+    # Basename-only: Path.name rejects ../, absolute paths, nested separators
+    # (do not reject substring ".." — names like foo..bar.md are valid basenames)
     if template_name != Path(template_name).name:
-        raise FileNotFoundError(f"Template not found: {template_name}")
-    if ".." in template_name or "/" in template_name or "\\" in template_name:
         raise FileNotFoundError(f"Template not found: {template_name}")
 
     root = TEMPLATE_DIR.resolve()

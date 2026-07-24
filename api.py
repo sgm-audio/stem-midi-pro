@@ -293,11 +293,14 @@ async def process_audio(
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    # Early reject oversized Content-Length when present
+    # Early reject clearly oversized requests. Content-Length is the whole
+    # multipart body; allow a small overhead so near-limit files are not 413'd
+    # before the streamed file-byte cap below.
+    _multipart_overhead = 1024 * 1024  # 1 MiB for multipart boundaries/headers
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
-            if int(content_length) > MAX_UPLOAD_BYTES:
+            if int(content_length) > MAX_UPLOAD_BYTES + _multipart_overhead:
                 raise HTTPException(
                     status_code=413,
                     detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
