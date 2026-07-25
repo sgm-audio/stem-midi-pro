@@ -293,46 +293,47 @@ async def process_audio(
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    # Early reject clearly oversized requests. Content-Length is the whole
-    # multipart body; allow a small overhead so near-limit files are not 413'd
-    # before the streamed file-byte cap below.
-    _multipart_overhead = 1024 * 1024  # 1 MiB for multipart boundaries/headers
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > MAX_UPLOAD_BYTES + _multipart_overhead:
+    # Validate + stream under try/finally so UploadFile is always closed
+    # (Content-Length reject, bad extension, or size cap).
+    try:
+        # Early reject clearly oversized requests. Content-Length is the whole
+        # multipart body; allow a small overhead so near-limit files are not 413'd
+        # before the streamed file-byte cap below.
+        _multipart_overhead = 1024 * 1024  # 1 MiB for multipart boundaries/headers
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_UPLOAD_BYTES + _multipart_overhead:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
+                    )
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+
+        file_ext = Path(file.filename or "").suffix.lower()
+        if file_ext not in SUPPORTED_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format {file_ext}. Supported: {SUPPORTED_FORMATS}"
+            )
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
                 raise HTTPException(
                     status_code=413,
                     detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
                 )
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid Content-Length header")
-
-    # Validate file extension
-    file_ext = Path(file.filename or "").suffix.lower()
-    if file_ext not in SUPPORTED_FORMATS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file format {file_ext}. Supported: {SUPPORTED_FORMATS}"
-        )
-    
-    # Stream upload with hard byte cap (no auth still gets size limit)
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_UPLOAD_BYTES:
-            await file.close()
-            raise HTTPException(
-                status_code=413,
-                detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
-            )
-        chunks.append(chunk)
-    content = b"".join(chunks)
-    await file.close()
+            chunks.append(chunk)
+        content = b"".join(chunks)
+    finally:
+        await file.close()
 
     # Save uploaded file to temporary location
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
