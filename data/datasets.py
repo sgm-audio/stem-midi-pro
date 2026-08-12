@@ -131,17 +131,20 @@ class AudioDataset(Dataset):
         # Generate synthetic onset targets at regular intervals
         target_onsets = torch.zeros((1, n_frames, 1))
         target_pitch = torch.zeros((1, n_frames, 128))
+        target_velocity = torch.zeros((1, n_frames, 1))
         onset_interval_frames = int(0.5 * self.sample_rate / hop_length)
         for f in range(0, n_frames, onset_interval_frames):
             target_onsets[0, f, 0] = 1.0
             target_pitch[0, f, 45] = 1.0  # MIDI note 45 (A2 ~ 110Hz)
+            target_velocity[0, f, 0] = 0.7
         
         return {
             'audio': mixture,
             'target_guitar': guitar,
             'target_bass': bass,
             'target_onsets': target_onsets,
-            'target_pitch': target_pitch
+            'target_pitch': target_pitch,
+            'target_velocity': target_velocity,
         }
     
     def _get_real_item(self, idx: int) -> Dict[str, torch.Tensor]:

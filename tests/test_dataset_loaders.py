@@ -46,6 +46,23 @@ def test_dataset_getitem_shape():
     assert item['target_bass'].shape[-1] == expected_samples
 
 
+def test_synthetic_item_has_velocity_label():
+    """Synthetic items must expose target_velocity aligned with onsets."""
+    pytest.importorskip("torch")
+    from data.datasets import AudioDataset
+
+    dataset = AudioDataset(
+        root_dir="/nonexistent/path",
+        sample_rate=44100,
+        segment_length=1.0,
+        augment=False,
+    )
+
+    item = dataset[0]
+    assert 'target_velocity' in item
+    assert item['target_velocity'].shape == item['target_onsets'].shape
+
+
 def test_data_loader_config_keys():
     """get_data_loaders should return correct structure for synthetic type."""
     pytest.importorskip("torch")

@@ -110,6 +110,7 @@ def main():
                 "target_bass": batch["target_bass"],
                 "target_onsets": batch["target_onsets"],
                 "target_pitch": batch["target_pitch"],
+                "target_velocity": batch.get("target_velocity"),
             }
 
             # CPU AMP: bfloat16
@@ -140,6 +141,7 @@ def main():
                     "target_bass": batch["target_bass"],
                     "target_onsets": batch["target_onsets"],
                     "target_pitch": batch["target_pitch"],
+                    "target_velocity": batch.get("target_velocity"),
                 }
                 with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
                     outputs = model(audio, **targets)
@@ -178,6 +180,7 @@ def main():
                 "target_bass": batch["target_bass"],
                 "target_onsets": batch["target_onsets"],
                 "target_pitch": batch["target_pitch"],
+                "target_velocity": batch.get("target_velocity"),
             }
             with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
                 outputs = model(audio, **targets)

@@ -60,6 +60,7 @@ class StemMidiModel(nn.Module):
         target_bass: Optional[torch.Tensor] = None,
         target_onsets: Optional[torch.Tensor] = None,
         target_pitch: Optional[torch.Tensor] = None,
+        target_velocity: Optional[torch.Tensor] = None,
     ) -> Dict:
         """Full forward pass: audio → stems → MIDI (guitar+bass) → report → routing."""
         B, C, T = audio.shape
@@ -140,14 +141,20 @@ class StemMidiModel(nn.Module):
             "routing_decision": routing,
         }
 
-        # 7. Loss (training only — uses guitar onset path)
+        # 7. Loss (training only — uses guitar transcription path)
         onset_logits = guitar_tr.get("onset_logits")
+        pitch_logits = guitar_tr.get("pitch_logits")
+        velocity = guitar_tr.get("velocity")
         if target_guitar is not None and target_bass is not None:
             loss, loss_dict = self.loss_fn(
                 pred_stems=[guitar_stem, bass_stem],
                 target_stems=[target_guitar, target_bass],
                 pred_onsets=onset_logits,
                 target_onsets=target_onsets,
+                pred_pitch=pitch_logits,
+                target_pitch=target_pitch,
+                pred_velocity=velocity,
+                target_velocity=target_velocity,
             )
             outputs["loss"] = loss
             outputs["loss_dict"] = loss_dict
