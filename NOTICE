@@ -1,0 +1,23 @@
+# Third-Party Attributions — Stem+MIDI Pro
+
+This product includes software developed by third parties:
+
+| Package | License | URL |
+|---------|---------|-----|
+| mamba-ssm | Apache-2.0 | https://github.com/state-spaces/mamba |
+| torch | BSD-3-Clause | https://pytorch.org |
+| torchaudio | BSD-2-Clause | https://pytorch.org/audio |
+| librosa | ISC | https://librosa.org |
+| soundfile | LGPL-2.1 | https://pypi.org/project/soundfile |
+| mido | MIT | https://mido.readthedocs.io |
+| fastapi | MIT | https://fastapi.tiangolo.com |
+| pydantic | MIT | https://docs.pydantic.dev |
+| uvicorn | BSD-3-Clause | https://www.uvicorn.org |
+| pyyaml | MIT | https://pyyaml.org |
+| numpy | BSD-3-Clause | https://numpy.org |
+| auraloss | MIT | https://github.com/csteinmetz1/auraloss |
+| prometheus-client | Apache-2.0 | https://github.com/prometheus/client_python |
+| structlog | Apache-2.0 / MIT | https://www.structlog.org |
+| opentelemetry-python | Apache-2.0 | https://opentelemetry.io |
+| tqdm | MIT | https://tqdm.github.io |
+| python-multipart | Apache-2.0 | https://github.com/Kludex/python-multipart |

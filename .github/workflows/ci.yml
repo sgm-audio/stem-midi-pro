@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff black mypy
+      - name: Lint
+        run: |
+          ruff check .
+          black --check .
+          mypy . --ignore-missing-imports
+
+  test-cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests (CPU only)
+        run: |
+          pytest -m "not cuda" --cov=. --cov-fail-under=70
+
+  structure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify structure
+        run: python verify_structure.py
+      - name: Check syntax
+        run: python check_syntax.py
+
+  license:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SPDX headers
+        run: |
+          missing=$(find . -name "*.py" -not -path "./research/*" -not -path "./venv/*" -not -path "./.venv/*" | xargs grep -L "SPDX-License-Identifier" || true)
+          if [ -n "$missing" ]; then
+            echo "Files missing SPDX-License-Identifier header:"
+            echo "$missing"
+            exit 1
+          fi
+
+  cuda:
+    runs-on: self-hosted
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run CUDA tests
+        run: pytest -m "cuda" --cov=. --cov-report=term-missing

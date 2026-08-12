@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stem-midi-pro"
+version = "1.0.0"
+description = "Mamba-SSM-based guitar/bass stem separation + MIDI transcription (CPU-only)"
+license = { text = "PolyForm-Small-Business-1.0.0" }
+requires-python = ">=3.13,<3.14"
+authors = [{ name = "Stem+MIDI Pro" }]
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+
+dependencies = [
+    "torch>=2.4.0,<2.7.0",
+    "torchaudio>=2.4.0,<2.7.0",
+    "mamba-ssm>=2.0.0",
+    "librosa>=0.10.0,<0.11.0",
+    "soundfile>=0.12.0",
+    "mido>=1.2.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0.1",
+    "tqdm>=4.65.0",
+    "numpy>=1.26.0,<2.1.0",
+    "auraloss>=0.4.0",
+    "structlog>=24.1.0",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "black>=23.10.0",
+    "ruff>=0.6.0",
+    "mypy>=1.7.0",
+    "types-PyYAML",
+    "types-requests",
+    "responses>=0.24.0",
+]
+
+[project.scripts]
+stem-midi-api = "api:app"
+stem-midi-cli = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["models*", "utils*", "data*", "audio*"]
+exclude = ["research*", "tests*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["research", "venv", "mamba", ".venv"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_configs = true

@@ -1,0 +1,26 @@
+name: Feature Request
+description: Propose a new feature for Stem+MIDI Pro
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature description
+      description: What should this feature do?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this feature needed? What problem does it solve?
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0 (blocks production)
+        - P1 (next sprint)
+        - P2 (post-MVP)
+        - P3 (research)

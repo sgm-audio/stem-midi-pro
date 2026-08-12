@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# Stem+MIDI Pro v1.0 — CPU-tuned config (bare-metal i5, 4-8 GB DDR4)
+# Smaller dims to fit in RAM with 1-min audio segments
+name: "stem_midi_mamba_v1_cpu"
+restore_from_path: null
+
+audio:
+  sample_rate: 44100
+  n_fft: 2048
+  hop_length: 512
+  n_mels: 80
+  chunk_duration_sec: 2.0
+  overlap_ratio: 0.5
+
+separator:
+  d_model: 256
+  n_layer: 6
+  d_state: 12
+  d_conv: 4
+  expand: 2
+
+transcriber:
+  d_model: 256
+  n_layer: 4
+  d_state: 12
+  onset_head_dim: 64
+  pitch_vocab_size: 128
+  velocity_bins: 128
+  expression_heads: ["bend", "vibrato", "slide"]
+  onset_threshold: 0.5
+
+training:
+  precision: "fp32"
+  gradient_checkpointing: true
+
+loss:
+  mr_stft_weight: 1.0
+  spectral_flatness_weight: 0.1
+  crest_factor_weight: 0.05
+  onset_f1_weight: 1.0
+  pitch_ce_weight: 0.8
+  velocity_mae_weight: 0.3
+  cross_modal_alignment_weight: 0.5
+
+quality_gates:
+  studio_confidence_threshold: 0.85
+  draft_confidence_threshold: 0.70
+  min_confidence: 0.6
+  min_si_sdr: 20.0

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# Docker build context exclusions
+research/
+venv/
+.venv/
+__pycache__/
+.git/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+outputs/
+*.nemo
+*.pt
+*.ckpt
+*.safetensors
+datasets/
+tests/
+*.egg-info/
+dist/
+build/
+htmlcov/
+.coverage
+Dockerfile
+.dockerignore

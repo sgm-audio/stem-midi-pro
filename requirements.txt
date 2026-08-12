@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# Stem+MIDI Pro — Production Dependencies (CPU-only, bare-metal i5 target)
+# Python 3.13
+
+# Core ML (CPU-only — no CUDA)
+torch>=2.4.0,<2.7.0
+torchaudio>=2.4.0,<2.7.0
+mamba-ssm>=2.0.0
+
+# Audio Processing
+librosa>=0.10.0,<0.11.0
+soundfile>=0.12.0
+
+# MIDI Processing
+mido>=1.2.0
+
+# Web/API
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic>=2.6.0
+
+# Configuration & Utilities
+pyyaml>=6.0.1
+tqdm>=4.65.0
+numpy>=1.26.0,<2.1.0
+
+# Loss functions
+auraloss>=0.4.0
+
+# Observability
+structlog>=24.1.0
+prometheus-client>=0.20.0
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-instrumentation-fastapi>=0.48b0
