@@ -1,8 +1,17 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 # Stem+MIDI Pro v1.0 — CPU-tuned config (bare-metal i5, 4-8 GB DDR4)
-# Smaller dims to fit in RAM with 1-min audio segments
-name: "stem_midi_mamba_v1_cpu"
+# Default backends: pretrained Demucs + Basic Pitch (no mamba_ssm required)
+name: "stem_midi_pro_v1_cpu"
 restore_from_path: null
+
+backends:
+  separator: demucs
+  transcriber: basic_pitch
+  device: cpu
+  demucs_model: htdemucs
+  demucs_shifts: 1
+  demucs_split: true
+  demucs_progress: false
 
 audio:
   sample_rate: 44100

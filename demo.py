@@ -27,12 +27,49 @@ def main():
     print("Stem+MIDI Pro Demo")
     print("=" * 50)
     
-    # Load configuration
-    with open("configs/model_config.yaml", 'r') as f:
-        config = yaml.safe_load(f)
-    
-    print(f"Loaded config: {config['name']}")
-    
+    # Prefer fake backends for a fast smoke test without demucs/basic-pitch/mamba.
+    # Use configs/model_config.cpu.yaml for real pretrained backends.
+    config = {
+        "name": "demo_fake",
+        "backends": {"separator": "fake", "transcriber": "fake", "device": "cpu"},
+        "audio": {
+            "sample_rate": 44100,
+            "n_fft": 2048,
+            "hop_length": 512,
+            "n_mels": 80,
+            "chunk_duration_sec": 2.0,
+            "overlap_ratio": 0.5,
+        },
+        "separator": {"d_model": 64, "n_layer": 1, "d_state": 8, "d_conv": 4, "expand": 2},
+        "transcriber": {
+            "d_model": 64,
+            "n_layer": 1,
+            "d_state": 8,
+            "onset_head_dim": 32,
+            "pitch_vocab_size": 128,
+            "velocity_bins": 128,
+            "expression_heads": ["bend", "vibrato", "slide"],
+            "onset_threshold": 0.5,
+        },
+        "training": {"precision": "fp32", "gradient_checkpointing": False},
+        "loss": {
+            "mr_stft_weight": 1.0,
+            "spectral_flatness_weight": 0.1,
+            "crest_factor_weight": 0.05,
+            "onset_f1_weight": 1.0,
+            "pitch_ce_weight": 0.8,
+            "velocity_mae_weight": 0.3,
+            "cross_modal_alignment_weight": 0.5,
+        },
+        "quality_gates": {
+            "studio_confidence_threshold": 0.85,
+            "draft_confidence_threshold": 0.70,
+            "min_confidence": 0.6,
+            "min_si_sdr": 20.0,
+        },
+    }
+    print(f"Loaded config: {config['name']} (fake backends — no heavy deps)")
+
     # Initialize model
     print("\nInitializing model...")
     model = StemMidiModel(config)
@@ -73,7 +110,9 @@ def main():
     routing = outputs['routing_decision']
     print(f"\nRouting Decision:")
     print(f"  Action: {routing['action']}")
-    print(f"  Badge: {routing['badge']}")
+    # Strip non-ASCII (emoji badges break Windows cp1252 consoles)
+    badge = routing["badge"].encode("ascii", "ignore").decode("ascii").strip()
+    print(f"  Badge: {badge}")
     print(f"  Message: {routing['message']}")
     
     # MIDI metadata sample

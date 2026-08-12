@@ -1,30 +1,16 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
-"""Tests for the streaming inference path.
-
-Tests that process_audio_streaming correctly counts chunks and merges outputs.
-Requires mamba_ssm (CUDA). Marked cuda and skipped when mamba_ssm unavailable.
-"""
+"""Tests for the streaming inference path (fake backends — no heavy deps)."""
 from __future__ import annotations
 
 import pytest
 import torch
 
-pytestmark = pytest.mark.cuda
-
-try:
-    import yaml
-
-    from main import StemMidiModel
-
-except ModuleNotFoundError as e:
-    pytest.skip(f"mamba_ssm not available: {e}", allow_module_level=True)
+from main import StemMidiModel
 
 
-@pytest.fixture(scope="module")
-def model():
-    with open("configs/model_config.yaml") as f:
-        cfg = yaml.safe_load(f)
-    return StemMidiModel(cfg)
+@pytest.fixture
+def model(mock_config):
+    return StemMidiModel(mock_config)
 
 
 def _write_audio(path, duration_s: float, sr: int = 44100):

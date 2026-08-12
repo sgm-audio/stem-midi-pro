@@ -1,21 +1,13 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
-# Stem+MIDI Pro v1.0 — production inference config (CPU-capable)
-name: "stem_midi_pro_v1"
+# Mamba-SSM backends (requires mamba-ssm). Untrained weights = garbage output.
+name: "stem_midi_mamba_v1"
 restore_from_path: null
 
-# Pluggable backends (Phase 1)
-# separator: demucs | mamba | fake
-# transcriber: basic_pitch | mamba | fake
 backends:
-  separator: demucs
-  transcriber: basic_pitch
-  device: null  # null → cuda if available else cpu; override with INFERENCE_DEVICE
-  demucs_model: htdemucs
-  demucs_shifts: 1
-  demucs_split: true
-  demucs_progress: false
+  separator: mamba
+  transcriber: mamba
+  device: null
 
-# Audio I/O
 audio:
   sample_rate: 44100
   n_fft: 2048
@@ -24,7 +16,6 @@ audio:
   chunk_duration_sec: 2.0
   overlap_ratio: 0.5
 
-# Mamba Separator Architecture
 separator:
   d_model: 768
   n_layer: 12
@@ -32,7 +23,6 @@ separator:
   d_conv: 4
   expand: 2
 
-# Mamba Transcriber Architecture
 transcriber:
   d_model: 512
   n_layer: 8
@@ -43,12 +33,10 @@ transcriber:
   expression_heads: ["bend", "vibrato", "slide"]
   onset_threshold: 0.5
 
-# Training (CPU-only, fp32)
 training:
-  precision: "fp32"  # CPU target — no FP8/FP16
+  precision: "fp32"
   gradient_checkpointing: true
 
-# Loss Weights
 loss:
   mr_stft_weight: 1.0
   spectral_flatness_weight: 0.1
@@ -58,12 +46,8 @@ loss:
   velocity_mae_weight: 0.3
   cross_modal_alignment_weight: 0.5
 
-# Quality Gates
 quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
   min_si_sdr: 20.0
-
-# [REMOVED: TensorRT-LLM export — requires CUDA, not applicable to CPU target]
-# [REMOVED: selective_scan_impl / causal_conv1d_impl — invalid kwargs for Mamba-1.x]

@@ -1,34 +1,17 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
-"""Tests for INT8 dynamic quantization on the inference path.
-
-Requires mamba_ssm (CUDA) — the model construction imports MambaSeparator
-which imports mamba_ssm. Skipped on CPU-only environments.
-"""
+"""Tests for INT8 dynamic quantization on the inference path (fake backends)."""
 from __future__ import annotations
 
 import pytest
 import torch
 
-pytestmark = pytest.mark.cuda
-
-try:
-    import yaml
-
-    with open("configs/model_config.yaml") as f:
-        _cfg = yaml.safe_load(f)
-    from main import StemMidiModel
-
-    _model = None  # Lazy
-except ModuleNotFoundError as e:
-    pytest.skip(f"model deps unavailable: {e}", allow_module_level=True)
+from main import StemMidiModel
 
 
-@pytest.fixture(scope="module")
-def model():
-    """Build a small StemMidiModel for quantization tests."""
-    with open("configs/model_config.yaml") as f:
-        config = yaml.safe_load(f)
-    return StemMidiModel(config)
+@pytest.fixture
+def model(mock_config):
+    """Build StemMidiModel with fake backends for quantization tests."""
+    return StemMidiModel(mock_config)
 
 
 def test_process_audio_file_quantize_returns_same_shapes(tmp_path, model):

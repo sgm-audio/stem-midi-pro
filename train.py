@@ -22,7 +22,12 @@ log = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description="Train Stem+MIDI Pro model")
-    parser.add_argument("--config", type=str, default="configs/model_config.yaml")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/model_config.mamba.yaml",
+        help="Model config (use mamba backends for training)",
+    )
     parser.add_argument("--data-config", type=str, default="example_data_config.yaml")
     parser.add_argument("--output-dir", type=str, default="./outputs")
     parser.add_argument("--max-epochs", type=int, default=100)

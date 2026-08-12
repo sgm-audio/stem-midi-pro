@@ -73,6 +73,12 @@ def mock_config():
             "min_confidence": 0.6,
             "min_si_sdr": 20.0,
         },
+        # Default test backends: no mamba_ssm / demucs / basic-pitch required
+        "backends": {
+            "separator": "fake",
+            "transcriber": "fake",
+            "device": "cpu",
+        },
     }
 
 

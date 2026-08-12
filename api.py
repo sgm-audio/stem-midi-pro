@@ -401,10 +401,11 @@ def create_response_zip(outputs: Dict) -> io.BytesIO:
         sf.write(bass_buf, bass_stem, model_config["audio"]["sample_rate"], format="WAV")
         zip_file.writestr("bass_stem.wav", bass_buf.getvalue())
 
-        # MIDI files
-        midi_data = outputs["midi"]
-        zip_file.writestr("guitar.mid", build_midi_from_events(midi_data, "guitar"))
-        zip_file.writestr("bass.mid", build_midi_from_events(midi_data, "bass"))
+        # MIDI files (per-stem when available)
+        midi_guitar = outputs.get("midi_guitar") or outputs.get("midi") or {}
+        midi_bass = outputs.get("midi_bass") or {"midi_events": [], "summary": {}}
+        zip_file.writestr("guitar.mid", build_midi_from_events(midi_guitar, "guitar"))
+        zip_file.writestr("bass.mid", build_midi_from_events(midi_bass, "bass"))
 
         # Processing report
         report = {
