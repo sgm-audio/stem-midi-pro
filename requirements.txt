@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 # Stem+MIDI Pro — Production Dependencies (CPU-only, bare-metal i5 target)
 # Python 3.13
+#
+# NOTE on Py3.13: torch/torchaudio/numpy/librosa pins below are the FIRST versions
+# with CPython 3.13 wheels. Older pins in docs (torch<2.7, numpy<2.1, librosa<0.11)
+# are stale — librosa 0.10 depends on numba, which does NOT support 3.13.
 
 # Core ML (CPU-only — no CUDA)
-torch>=2.4.0,<2.7.0
-torchaudio>=2.4.0,<2.7.0
+torch>=2.11.0
+torchaudio>=2.11.0
 # mamba-ssm is OPTIONAL — only needed for backends.separator/transcriber: mamba
 # mamba-ssm>=2.0.0
 
-# Pretrained production backends (Phase 1 default)
+# Pretrained separator (Phase 1 default)
 demucs>=4.0.0
-basic-pitch>=0.3.0
+# basic-pitch is NOT listed here: its metadata pins tensorflow<2.15.1 on
+# Windows/Linux + Py3.11+, which has no Py3.13 wheels → pip ResolutionImpossible.
+# Install the ONNX path via:  python scripts/install_pretrained.py
+#   (basic-pitch==0.4.0 --no-deps + onnxruntime + pretty-midi + resampy + ...)
 
 # Audio Processing
-librosa>=0.10.0,<0.11.0
+librosa>=0.11.0
 soundfile>=0.12.0
 
 # MIDI Processing
@@ -28,7 +35,7 @@ pydantic>=2.6.0
 # Configuration & Utilities
 pyyaml>=6.0.1
 tqdm>=4.65.0
-numpy>=1.26.0,<2.1.0
+numpy>=2.0,<2.3
 
 # Loss functions
 auraloss>=0.4.0

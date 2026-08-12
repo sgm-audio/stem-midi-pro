@@ -26,7 +26,8 @@ Stem+MIDI Pro — **CPU-capable** guitar/bass stem separation + MIDI transcripti
 ## Gotchas
 
 - **Backends are config-driven** (`backends.separator` / `backends.transcriber`): `demucs` \| `mamba` \| `fake` and `basic_pitch` \| `mamba` \| `fake`. Factory: `models/backends/factory.py`. Tests + `demo.py` use **fake** (no heavy deps).
-- **Default production config is Demucs + Basic Pitch** (`configs/model_config.yaml` and `.cpu.yaml`). Install: `pip install demucs basic-pitch` or `pip install -e ".[pretrained]"`. First Demucs run downloads weights to torch hub cache.
+- **Default production config is Demucs + Basic Pitch** (`configs/model_config.yaml` and `.cpu.yaml`). Install via `python scripts/install_pretrained.py` — basic-pitch MUST be installed `--no-deps` (its TF pin has no Py3.13 wheels; ONNX path works). First Demucs run downloads weights to torch hub cache.
+- **Py3.13 pins**: torch>=2.11, torchaudio>=2.11, numpy>=2.0,<2.3, librosa>=0.11. Older pins (torch<2.7, numpy<2.1, librosa<0.11) are stale — numba/librosa 0.10 have no 3.13 wheels.
 - **`mamba_ssm` is optional** — only required when a backend is `mamba` (`models/mamba_*.py`). Training defaults to `configs/model_config.mamba.yaml`.
 - **Both guitar and bass are transcribed** (Phase 1). ZIP / `process_audio_file` expose `midi_guitar` + `midi_bass`; flat `midi` remains guitar-primary for compat.
 - **Checkpoint load**: `main.load_from_checkpoint(path, config_path)` — not an instance method. API uses this for `MODEL_CHECKPOINT_PATH`. Only meaningful for Mamba `nn.Module` backends.

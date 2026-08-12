@@ -13,9 +13,8 @@ Large binaries are **gitignored** (`*.pt`, `*.ckpt`, `*.safetensors`, `*.nemo`).
 Config `backends.separator: demucs` + `backends.transcriber: basic_pitch` downloads weights on first run via the respective libraries.
 
 ```bash
-pip install -e ".[pretrained]"
-# or: pip install demucs basic-pitch
-python scripts/download_pretrained.py   # optional warm cache
+python scripts/install_pretrained.py     # demucs + basic-pitch (ONNX, no TF)
+python scripts/download_pretrained.py    # optional warm cache
 python main.py --config configs/model_config.cpu.yaml --audio path/to/mix.wav
 ```
 

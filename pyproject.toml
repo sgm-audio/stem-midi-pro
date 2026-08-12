@@ -19,10 +19,9 @@ classifiers = [
 ]
 
 dependencies = [
-    "torch>=2.4.0,<2.7.0",
-    "torchaudio>=2.4.0,<2.7.0",
-    "mamba-ssm>=2.0.0",
-    "librosa>=0.10.0,<0.11.0",
+    "torch>=2.11.0",
+    "torchaudio>=2.11.0",
+    "librosa>=0.11.0",
     "soundfile>=0.12.0",
     "mido>=1.2.0",
     "fastapi>=0.110.0",
@@ -31,7 +30,7 @@ dependencies = [
     "pydantic>=2.6.0",
     "pyyaml>=6.0.1",
     "tqdm>=4.65.0",
-    "numpy>=1.26.0,<2.1.0",
+    "numpy>=2.0,<2.3",
     "auraloss>=0.4.0",
     "structlog>=24.1.0",
     "prometheus-client>=0.20.0",
@@ -53,10 +52,10 @@ dev = [
     "types-requests",
     "responses>=0.24.0",
 ]
-# Production pretrained backends (no mamba_ssm required for inference)
+# Pretrained backends. NOTE: basic-pitch is NOT in this extra — its TF pin
+# breaks Py3.13 resolution. Use `python scripts/install_pretrained.py` instead.
 pretrained = [
     "demucs>=4.0.0",
-    "basic-pitch>=0.3.0",
 ]
 
 [project.scripts]

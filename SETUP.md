@@ -23,9 +23,15 @@ pip install --upgrade pip
 pip install -r requirements.txt -r requirements-dev.txt
 pip install -e .
 
-# 4. Verify
+# 4. Install pretrained backends (Demucs + Basic Pitch)
+#    NOTE: basic-pitch must be installed --no-deps (its TensorFlow pin has no
+#    Py3.13 wheels; we use the ONNX runtime path instead).
+python scripts/install_pretrained.py
+
+# 5. Verify
 python check_syntax.py
 python verify_structure.py
+python scripts/download_pretrained.py   # warm weight caches
 ```
 
 ## Quick Start
