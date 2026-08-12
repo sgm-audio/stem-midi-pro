@@ -7,6 +7,11 @@ import argparse
 import sys
 from pathlib import Path
 
+# Prefer repo root over any site-packages module named ``main``
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import yaml
 
 
@@ -20,7 +25,8 @@ def main() -> int:
         print(f"Audio not found: {args.audio}", file=sys.stderr)
         return 2
 
-    with open(args.config, encoding="utf-8") as f:
+    cfg_path = args.config if args.config.is_absolute() else _ROOT / args.config
+    with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     from main import StemMidiModel
