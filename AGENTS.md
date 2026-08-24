@@ -39,6 +39,14 @@ Stem+MIDI Pro — **CPU-capable** guitar/bass stem separation + MIDI transcripti
 - **API**: concurrency 1, Bearer `API_KEYS`, wav/flac/mp3, 44.1/48 kHz, ≤600 s, ≤500 MB.
 - **Git:** local `main` only until remote added.
 - **NeMo import adapter** not implemented yet (Phase 1.4 deferred) — use Demucs/Basic Pitch or export weights offline to `.pt` for Mamba.
+- **Phase 2 Path A — Demucs fine-tune only** (new in v1.1):
+  - Fine-tunes Demucs separator on MUSDB18HQ with guitar/bass emphasis
+  - Basic Pitch transcription frozen at Phase 1 weights — no Mamba/SSM required
+  - Scripts: `scripts/fine_tune_demucs.py`, `scripts/export_fine_tuned.py`, `scripts/runpod_deploy.py`
+  - Docker: `Dockerfile.gpu` for cloud GPU (RunPod/AWS) with CUDA 12.3
+  - Exported model usable with `model_config.cpu.yaml` + `restore_from_path` — same API surface
+  - Effort: Medium (vs High for full Mamba training, vs ~zero for no fine-tune)
+  - Result: improved guitar/bass stem separation while keeping proven Basic Pitch MIDI pipeline
 
 ## Architecture
 

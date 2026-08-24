@@ -14,10 +14,12 @@ Stem+MIDI Pro is an audio AI prototype that provides:
 ## Features
 
 ### Audio Processing
-- **Phase-coherent separation** using Mamba-SSM with overlap-add processing
-- **Transient preservation** through crest factor and spectral flatness losses
+- **Demucs separator** (Phase 2 Path A): High-fidelity guitar/bass stem separation using pretrained Demucs, fine-tunable on MUSDB18HQ with guitar/bass emphasis
+- **Mamba-SSM separator** (Phase 2 Path B): Optional Mamba-SSM architecture for research/advanced use
+- **Transcriber**: Basic Pitch (production) or Mamba-SSM (research) for polyphonic audio-to-MIDI transcription
 - **Expression detection** (bends, vibrato, slides) via dedicated neural heads
 - **Cross-modal alignment** ensuring MIDI notes match stem energy peaks
+- **Confidence-aware** routing and quality gating
 
 ### Quality & Trust
 - **Confidence scoring** per note with CC#127 MIDI tagging for DAW visualization
@@ -117,19 +119,23 @@ docker run -p 8000:8000 stem-midi-pro
 
 ## Technical Specifications
 
-### Architecture
-- **Separator**: 12-layer Mamba-SSM (d_model=768) with selective scan
-- **Transcriber**: 8-layer Mamba-SSM (d_model=512) with multi-task heads
-- **Precision**: FP8 dynamic (training), FP16/FP8 (inference)
-- **Sequence Length**: Up to 60 seconds with state caching
-- **Latency**: <5ms hop, <2s total separation, <4s MIDI transcription (3-min track)
+### Separator Options
+- **Demucs** (Phase 2 Path A, production default): Pretrained separator, fine-tunable on MUSDB18HQ; CPU-compatible; no Mamba-SSM required
+- **Mamba-SSM** (Phase 2 Path B, research): 12-layer Mamba-SSM (d_model=768) with selective scan; optional dependency
+
+### Transcriber Options
+- **Basic Pitch** (production): ONNX-based, no TensorFlow pins on Py3.13
+- **Mamba-SSM** (research): 8-layer Mamba-SSM (d_model=512) with multi-task heads
+
+### Precision
+- **CPU-only**: FP32 (training), FP32 (inference)
+- **GPU**: FP16/FP8 with TensorRT-LLM (aspirational, not required)
 
 ### Loss Functions
-- Multi-Resolution STFT (6 resolutions)
+- Multi-Resolution STFT (3 resolutions for Path A)
 - Spectral Flatness preservation
 - Crest Factor preservation (transient detail)
-- Onset F1 + Pitch Cross-Entropy
-- Velocity MAE + Duration IoU
+- Onset F1 + Pitch Cross-Entropy + Velocity MAE (Phase 2 foundation)
 - Cross-modal alignment (MIDI ↔ stem energy)
 
 ### Quality Gates
@@ -147,19 +153,23 @@ As specified in the mission, this implementation prioritizes:
 
 ## Next Steps
 
-1. **Prepare real datasets**: Place Canadian artist audio data in the specified directory structure
-2. **Modify data configuration**: Update `example_data_config.yaml` with actual paths
-3. **Start training**: Run the training script with appropriate hardware
-4. **Export for deployment**: Use TensorRT-LLM export for accelerated inference
-5. **Deploy**: Containerize and deploy as needed
+1. **Prepare real datasets**: Place Canadian artist audio data in the specified directory structure (or use `scripts/prepare_musdb.py` to download MUSDB18HQ)
+2. **Phase 2 Path A — Fine-tune Demucs separator**:
+   - Run: `python scripts/fine_tune_demucs.py --musdb-path ./data/musdb18hq --epochs 50`
+   - Export: `python scripts/export_fine_tuned.py --checkpoint ./outputs/checkpoints/best.pt`
+   - Inference: Use `model_config.cpu.yaml` with `restore_from_path` pointing to exported checkpoint
+3. **Modify data configuration**: Update `example_data_config.yaml` with actual paths
+4. **Start training**: Run the training script with appropriate hardware
+5. **Export for deployment**: Use exported checkpoint with `model_config.cpu.yaml`
+6. **Deploy**: Containerize with `Dockerfile.cpu` for self-host or `Dockerfile.gpu` for cloud GPU
 
 ## Acknowledgements
 
 Built with:
-- NVIDIA NeMo Framework
-- Mamba-SSM State Space Models
-- PyTorch Lightning
-- TensorRT-LLM for accelerated inference
+- Demucs stem separation (Phase 2 Path A production default)
+- Basic Pitch audio-to-MIDI transcription (ONNX, Py3.13-compatible)
+- Mamba-SSM optional for research backends (Phase 2 Path B)
+- PyTorch (CPU-only target)
 - Librosa/Ruby for audio processing
 
 ---
