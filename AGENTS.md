@@ -72,3 +72,13 @@ torch/torchaudio → demucs + basic-pitch   # production default
 optional: mamba-ssm                       # mamba backends only
 librosa → soundfile → mido → fastapi → prometheus-client → structlog
 ```
+
+## Session Persistence
+
+A `SESSION_LOG.md` file is maintained in the project root. It is an append-only log
+of every OpenCode session. Use it to reconstruct context when starting a new session:
+- Read the last entry for "Next Steps" and "Blockers"
+- Scroll back further for architecture decisions and key commands
+- Look at "Environment" for current state of datasets, checkpoints, etc.
+
+This file is maintained by the `session-log` skill at session close.
