@@ -60,7 +60,7 @@ cd ~/mamba3
 source venv/bin/activate
 
 # First run (100k steps, batch 16, A100/H100)
-python train_mamba3.py \
+python train.py \
   --data ./datasets/musdb18hq/train \
   --save ./checkpoints \
   --steps 100000 \
@@ -78,16 +78,16 @@ htop  # CPU worker load
 
 ```bash
 # By alias (auto-detects in --save dir):
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume last
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume best
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume latest
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume interrupt
+python train.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume last
+python train.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume best
+python train.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume latest
+python train.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume interrupt
 
 # By exact filename:
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume checkpoint_042000.pt
+python train.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume checkpoint_042000.pt
 
 # By full path:
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume /absolute/path/to/model.pt
+python train.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume /absolute/path/to/model.pt
 ```
 
 ## 8. Common flags
@@ -116,5 +116,5 @@ python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --
 
 ```bash
 # Dry run with synthetic data (no GPU needed)
-python train_mamba3.py --data /tmp/fake --save /tmp/test --steps 50 --batch 2 --device cpu --no-amp
+python train.py --data /tmp/fake --save /tmp/test --steps 50 --batch 2 --device cpu --no-amp
 ```

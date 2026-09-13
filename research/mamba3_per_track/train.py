@@ -54,7 +54,8 @@ except ImportError:
     HAS_AURALOSS = False
     print("WARNING: auraloss not found. Install: pip install auraloss")
 
-from model import PerTrackProcessor, TrackProcessorConfig
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from per_track_processor import PerTrackProcessor, TrackProcessorConfig
 
 
 # ---------------------------------------------------------------------------
