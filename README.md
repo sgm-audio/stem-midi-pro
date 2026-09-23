@@ -1,5 +1,8 @@
 # Stem+MIDI Pro
 
+[![CodeQL](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Audio AI prototype for guitar/bass stem separation and MIDI transcription using Mamba-SSM.
 
 ## Overview
