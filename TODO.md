@@ -4,7 +4,7 @@
 > **Source-of-truth architecture:** `ARCHITECTURE.md` (every `[PLANNED]` feature in there is a TODO below)
 > **Target hardware:** Bare-metal i5 / 4–8 GB DDR4 (CPU-only)
 > **Python:** 3.13
-> **License:** Polyform Small Business License 1.0.0
+> **License:** Apache License 2.0
 > **Repo structure decision:** Consolidate on the **v1 production path** (`main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py` Slakh+MUSDB loaders). Mamba-3 research work moves to `/research/`.
 
 ---
@@ -25,7 +25,7 @@
 - [x] **D-STRAT-3** · `decision` · **CPU-only** — drop all CUDA-only paths, downsize models, INT8-ready where possible. Mamba-SSM 1.x supports CPU via the pure-PyTorch reference impl (slower but functional).
 - [x] **D-STRAT-4** · `decision` · **Python 3.13** — pin in pyproject, Dockerfile, CI.
 - [x] **D-STRAT-5** · `decision` · **`mamba-ssm` from PyPI**; **no `causal-conv1d`** (CUDA-only, not needed for CPU).
-- [x] **D-STRAT-6** · `decision` · **License: Polyform Small Business License 1.0.0** — fits the indie pricing framing (free for individuals + small companies, paid above $1M revenue / 50 employees). Place at `/LICENSE`.
+- [x] **D-STRAT-6** · `decision` · **License: Apache License 2.0** — permissive open source with explicit patent grant and contributor terms; owner retains copyright. Place at `/LICENSE`.
 
 ---
 
@@ -157,7 +157,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 # SECTION 5 — LICENSE (P0)
 
-- [ ] **LIC-5.1** · `infra` · M · P0 · Add `/LICENSE` with full Polyform Small Business License 1.0.0 text (verbatim from `https://polyformproject.org/licenses/small-business/1.0.0`).
+- [x] **LIC-5.1** · `infra` · M · P0 · Add `/LICENSE` with full Apache License 2.0 text (verbatim from `https://www.apache.org/licenses/LICENSE-2.0.txt`).
 - [ ] **LIC-5.2** · `docs` · S · P0 · Add a `LICENSE_NOTICE.md` at root that summarizes in plain English:
   - Free for individuals
   - Free for companies with < $1M annual revenue AND < 50 employees
@@ -301,7 +301,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 - [ ] **DOC-10.1.1** · `docs` · L · P1 · `AGENTS.md` — regenerate. Reflect: tests exist, real datasets, real audio loading, real MIDI generation, CPU target, license.
 - [ ] **DOC-10.1.2** · `docs` · L · P1 · `README.md` — rewrite. Remove "TensorRT-LLM", "Librosa/Ruby", "FP8 precision" claims. Add bare-metal i5 install instructions. Add license summary. Add CPU performance numbers.
 - [ ] **DOC-10.1.3** · `docs` · L · P1 · `SUMMARY.md` — regenerate. Mark every feature as `[IMPLEMENTED]` or `[PLANNED]` per architecture.md. Drop the stale references to `Slakh2100CADataset` / `MUSDBIndieDataset`.
-- [ ] **DOC-10.1.4** · `docs` · L · P1 · `ARCHITECTURE.md` — annotate every section with `[IMPLEMENTED]` / `[PARTIAL]` / `[PLANNED]` / `[REMOVED]`. Document the CPU-only target. Reference the Polyform license.
+- [ ] **DOC-10.1.4** · `docs` · L · P1 · `ARCHITECTURE.md` — annotate every section with `[IMPLEMENTED]` / `[PARTIAL]` / `[PLANNED]` / `[REMOVED]`. Document the CPU-only target. Reference the Apache-2.0 license.
 - [ ] **DOC-10.1.5** · `docs` · M · P1 · `API_DOCUMENTATION.md` — add auth section, error codes, rate-limit responses, metrics endpoint, CORS docs. Drop the `/api/v1` base URL claim.
 - [ ] **DOC-10.1.6** · `docs` · M · P1 · `USER_GUIDE.md` — strip unimplemented features: tuning detection, tempo detection, palm-mute detection, harmonics detection, slap/pop. Replace with what actually works.
 - [ ] **DOC-10.1.7** · `docs` · M · P1 · `DEVELOPMENT_GUIDE.md` — update paths (no `stem_midi_pro/` subdir), `torch.jit.trace` example, CI commands, `make` targets.
@@ -314,7 +314,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 - [ ] **DOC-10.2.1** · `docs` · S · P1 · Audit all 7 templates in `user_content/`: `upload_confirmation.md`, `progress_updates.md`, `completion_delivery.md`, `rights_usage_prompt.md`, `feedback_refinement.md`, `implicit_feedback.md`, `landing_page.md`. Verify every `{{ variable }}` resolves to a field in the processing report or is fed by `/render-template` callers.
 - [ ] **DOC-10.2.2** · `docs` · S · P1 · `landing_page.md` — add license statement (LIC-5.6) and bare-metal CPU performance note ("runs on a $200 i5 laptop").
 - [ ] **DOC-10.2.3** · `docs` · S · P1 · `completion_delivery.md` — verify `{{ filename }}`, `{{ si_sdr }}`, `{{ phase_coherence }}`, `{{ avg_confidence }}` all match `create_response_zip:processing_report.json` keys.
-- [ ] **DOC-10.2.4** · `docs` · S · P1 · `rights_usage_prompt.md` — add a clause about the Polyform license: "Output is licensed under the same Polyform Small Business License as the model. Commercial use above $1M revenue requires a paid license."
+- [ ] **DOC-10.2.4** · `docs` · S · P1 · `rights_usage_prompt.md` — add a clause noting the Apache-2.0 license: "This software is Apache-2.0; attribution required, no warranty."
 - [ ] **DOC-10.2.5** · `docs` · S · P1 · `progress_updates.md` — adjust latency claims to bare-metal CPU numbers (~30–60s per minute of audio).
 - [ ] **DOC-10.2.6** · `docs` · S · P1 · `feedback_refinement.md` — replace the "Web MIDI editor" claim with "DAW-based refinement (MIDI files have CC#127 confidence)".
 
@@ -410,7 +410,7 @@ These are the features called out in `ARCHITECTURE.md` as designed but not yet b
 
 ## 11.13 From "Canadian Artist Dataset Integration"
 
-- [ ] **ARCH-11.13.1** · `docs` · S · P0 · Document that Slakh/MUSDB datasets are open-license (CC-BY) but the *trained model weights* are under Polyform Small Business License.
+- [ ] **ARCH-11.13.1** · `docs` · S · P0 · Document that Slakh/MUSDB datasets are open-license (CC-BY) but the *trained model weights* are under Apache License 2.0.
 - [ ] **ARCH-11.13.2** · `feature` · M · P2 · Add a `data/canadian_artist_specific.py` loader for artists in the Canadian indie scene (e.g., Six Shooter Records, Arts & Crafts label rosters) — public-domain / CC-licensed recordings only. Document provenance per file.
 
 ## 11.14 From "Monitoring and Observability"
@@ -531,6 +531,6 @@ When all `[ ]` items above are `[x]`, run a final audit:
 
 ---
 
-*This TODO.md is the source of truth for the Stem+MIDI Pro production-readiness effort. It is intentionally large. The Polyform Small Business License 1.0.0 applies to all code produced under it. Contributions are accepted under the same license via signed-off commits.*
+*This TODO.md is the source of truth for the Stem+MIDI Pro production-readiness effort. It is intentionally large. The Apache License 2.0 applies to all code produced under it. Contributions are accepted under the same license via signed-off commits.*
 
 *Last updated: 2026-06-02*
