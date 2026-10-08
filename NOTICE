@@ -1,0 +1,31 @@
+NOTICE
+======
+
+Stem+MIDI Pro
+Copyright (c) 2026 Scott Mills
+
+Licensed under the Polyform Small Business License 1.0.0 (see LICENSE).
+
+Third-Party Attributions
+------------------------
+
+The attributions below are for the dependencies declared in
+requirements.txt / requirements-dev.txt. Actual bundled or installed
+components may vary by environment.
+
+- mamba-ssm            Apache-2.0
+- librosa              ISC
+- soundfile            LGPL-2.1
+- mido                 MIT
+- fastapi              MIT
+- pydantic             MIT
+- numpy                BSD-3-Clause
+- torch                BSD-3-Clause
+- auraloss             MIT
+- prometheus-client    Apache-2.0
+- structlog            Apache-2.0
+- opentelemetry-*      Apache-2.0
+
+Each dependency remains under its own license as provided by its
+upstream authors. Copies of those licenses are available from the
+respective projects' repositories and package distributions.
