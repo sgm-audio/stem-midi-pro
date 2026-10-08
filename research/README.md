@@ -79,3 +79,13 @@ If you need a fresh snapshot of state-spaces/mamba:
 rm -rf research/mamba-ssm-reference/mamba
 git clone --depth 1 https://github.com/state-spaces/mamba.git research/mamba-ssm-reference/mamba
 ```
+
+---
+
+## License
+
+The research code in this directory (`mamba3_per_track/`, excluding the
+vendored `mamba-ssm-reference/` clone, which retains its own upstream
+license) is under the same **Apache License 2.0** as the
+production code (see `/LICENSE`). It is provided **as-is**, with **no
+support** and no warranty of any kind.

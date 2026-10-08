@@ -3,167 +3,120 @@
 [![CodeQL](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI prototype for guitar/bass stem separation and MIDI transcription using Mamba-SSM.
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4–8 GB RAM is the reference target. Python **3.13**.
 
-## Overview
+> **Status:** Active development toward production readiness. See [TODO.md](TODO.md) for the tracked work items and current state. Some features documented in [ARCHITECTURE.md](ARCHITECTURE.md) are still `[PLANNED]`; [SUMMARY.md](SUMMARY.md) marks exactly what works today.
 
-Stem+MIDI Pro is an audio AI prototype that provides:
-- High-fidelity guitar/bass stem separation using Mamba-SSM architecture
-- Polyphonic audio-to-MIDI transcription with expression detection
-- Confidence-aware routing and quality gating
-- DAW-ready output with tempo sync, tuning detection, and metadata tagging
-- Canadian artist dataset alignment for training data
+## License
 
-## Features
+Stem+MIDI Pro is licensed under the **Apache License 2.0** (see [LICENSE](LICENSE)).
 
-### Audio Processing
-- **Phase-coherent separation** using Mamba-SSM with overlap-add processing
-- **Transient preservation** through crest factor and spectral flatness losses
-- **Expression detection** (bends, vibrato, slides) via dedicated neural heads
-- **Cross-modal alignment** ensuring MIDI notes match stem energy peaks
+In plain English:
 
-### Quality & Trust
-- **Confidence scoring** per note with CC#127 MIDI tagging for DAW visualization
-- **Quality-based routing** (studio/draft/complex tiers) with clear user communication
-- **Fallback options** including human-reviewed refinement for challenging material
-- **Transparent reporting** with SI-SDR, phase coherence, and artifact detection
+- **Free for everyone** — individuals, companies, and commercial use, including modification and redistribution.
+- You must keep the license notice and attribute third-party components ([NOTICE](NOTICE)).
+- Explicit patent grant from contributors; trademark rights are not granted.
 
-### Technical Excellence
-- **Linear-time complexity** Mamba-SSM architecture (8x less VRAM than Transformers)
-- **FP8 precision** support with dynamic scaling
-- **Streaming inference** with state caching and CUDA graph capture
-- **Sub-5ms hop latency** targeting on NVIDIA H100/A100 GPUs
+> History: previously PolyForm Small Business 1.0.0; relicensed to Apache-2.0 on 2026-10-08 to align with upstream (see [docs/architecture-decision-records/0006-relicense-apache-2.0.md](docs/architecture-decision-records/0006-relicense-apache-2.0.md)).
 
-### Mission Alignment
-- **Canadian artist focus** with specialized dataset loaders
-- **Indie pricing tiers** and local success story highlights
-- **Training data prioritization** from Canadian artists
+Third-party attributions are in [NOTICE](NOTICE).
+
+## What It Does
+
+- **Stem separation** — splits a mixed recording into guitar and bass WAV stems using a Mamba-SSM separator (`models/mamba_separator.py`).
+- **MIDI transcription** — converts the stems to MIDI with onset, pitch, velocity, expression (bend/vibrato/slide), and per-note confidence (`models/mamba_transcriber.py`).
+- **Confidence metadata** — each MIDI note carries its confidence as CC#127 so your DAW can flag uncertain notes (`models/confidence_injector.py`).
+- **Quality gates** — routes each result into a `studio` / `draft` / `complex` tier with a transparent processing report (`utils/quality_gates.py`).
+
+Everything runs locally. No GPU, no cloud, no CUDA required.
+
+## Requirements
+
+- Python **3.13**
+- 4–8 GB RAM, x86-64 CPU (bare-metal Intel i5 is the reference target)
+- OS: Linux, macOS, or Windows
+- No CUDA. The CUDA/TensoRT path was removed; see `docs/architecture-decision-records/0002-cpu-only-target.md`.
+
+## Quickstart
+
+```bash
+# 1. Create an environment
+python3.13 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Smoke test with synthetic audio (no input file needed)
+python demo.py
+
+# 4. Process a real audio file from the CLI
+python main.py --audio /path/to/song.wav --config configs/model_config.yaml
+
+# 5. Run the HTTP API
+uvicorn api:app --reload
+# Interactive API docs: http://localhost:8000/docs
+```
+
+See [SETUP.md](SETUP.md) for detailed installation, and [USER_GUIDE.md](USER_GUIDE.md) for end-user documentation.
+
+## CPU Performance Expectations
+
+This project targets **bare-metal CPU**, not GPUs. Honest numbers on the reference i5 target:
+
+- **~30–60 seconds of processing per 1 minute of audio** (separation + transcription, combined).
+- A 3-minute song takes roughly **1.5–3 minutes**; a 10-minute song (the maximum) takes **5–10 minutes**.
+- One concurrent request on the reference hardware. Scale up CPU/RAM for more.
+
+`mamba-ssm` runs its pure-PyTorch reference implementation on CPU — functional, but slower than the CUDA kernels the upstream project benchmarks with.
 
 ## Project Structure
 
 ```
-stem_midi_pro/
-├── main.py                 # NeMo ModelPT wrapper (entry point)
-├── demo.py                 # Usage demonstration
-├── requirements.txt        # Python dependencies
-├── Dockerfile              # Container build file
-├── verify_structure.py     # File validation script
-├── README.md               # This file
-│
-├── configs/
-│   └── model_config.yaml   # Model architecture and training config
-│
-├── data/
-│   ├── datasets.py         # Slakh2100 / MUSDB18-HQ loaders
-│   ├── example_data_config.yaml # Example data configuration
-│   └── train.py            # Training script
-│
-├── models/
-│   ├── mamba_separator.py  # Mamba-SSM source separation block
-│   ├── mamba_transcriber.py # Polyphonic audio-to-MIDI head
-│   ├── confidence_injector.py # Metadata tagging pipeline
-│   └── losses.py           # Perceptual loss functions (MR-STFT, etc.)
-│
-├── utils/
-│   └── quality_gates.py    # Confidence-based routing logic
-│
-└── user_content/           # All user-facing prompt templates
-    ├── upload_confirmation.md
-    ├── progress_updates.md
-    ├── completion_delivery.md
-    ├── rights_usage_prompt.md
-    ├── feedback_refinement.md
-    ├── implicit_feedback.md
-    └── landing_page.md
+main.py                  # StemMidiModel + CLI entry point
+api.py                   # FastAPI service (uvicorn api:app)
+demo.py                  # Synthetic-audio smoke test
+train.py                 # Training script
+configs/model_config.yaml
+models/                  # separator, transcriber, confidence injector, losses
+data/datasets.py         # Slakh2100 (YourMT3 layout) + MUSDB18-HQ loaders, synthetic fallback
+utils/                   # quality gates, template engine
+user_content/            # user-facing message templates
+tests/                   # pytest suite
+research/                # Mamba-3 per-track experiments (as-is, no support)
+docs/                    # ADRs and operations docs
 ```
 
-## Installation
+## Mission: Canadian Artists
 
-```bash
-# Clone repository
-git clone <repository-url>
-# <repository-root> is the project root — no subdirectory to cd into
+The mission behind Stem+MIDI Pro is to serve the Canadian independent-music community:
 
-# Install dependencies
-pip install -r requirements.txt
+1. **Training-data prioritization** for Canadian artists — curation weights and provenance live in `data/datasets.py` and [PRD_AND_ARD.md](PRD_AND_ARD.md).
+2. **Indie-friendly licensing** — Apache-2.0: free for everyone, including small studios and commercial use.
+3. **Local success stories** in user-facing content (`user_content/`).
 
-# For GPU support with TensorRT-LLM (optional)
-# Install NVIDIA drivers, CUDA Toolkit, and TensorRT separately
-```
+The core datasets used for training (Slakh2100, MUSDB18-HQ) are open-license (CC-BY). The trained model weights and this codebase are under the Apache License 2.0.
 
-## Usage
+## Documentation
 
-### Quick Demo (with synthetic data)
-```bash
-python demo.py
-```
-
-### Training with Canadian Artist Data
-```bash
-# Prepare data configuration (see example_data_config.yaml)
-python train.py \
-  --config configs/model_config.yaml \
-  --data-config example_data_config.yaml \
-  --output-dir ./outputs \
-  --max-epochs 50 \
-  --gpus 1
-```
-
-### Docker Deployment
-```bash
-# Build Docker container
-docker build -t stem-midi-pro .
-
-# Run service (example)
-docker run -p 8000:8000 stem-midi-pro
-```
-
-## Technical Specifications
-
-### Architecture
-- **Separator**: 12-layer Mamba-SSM (d_model=768) with selective scan
-- **Transcriber**: 8-layer Mamba-SSM (d_model=512) with multi-task heads
-- **Precision**: FP8 dynamic (training), FP16/FP8 (inference)
-- **Sequence Length**: Up to 60 seconds with state caching
-- **Latency**: <5ms hop, <2s total separation, <4s MIDI transcription (3-min track)
-
-### Loss Functions
-- Multi-Resolution STFT (6 resolutions)
-- Spectral Flatness preservation
-- Crest Factor preservation (transient detail)
-- Onset F1 + Pitch Cross-Entropy
-- Velocity MAE + Duration IoU
-- Cross-modal alignment (MIDI ↔ stem energy)
-
-### Quality Gates
-- **Studio Tier**: Confidence ≥0.85, SI-SDR ≥20dB → Direct download
-- **Draft Tier**: 0.70 ≤ confidence < 0.85 → Editor launch prompt
-- **Complex Tier**: <0.70 confidence → Human review/refund options
-
-## Canadian Artist Alignment
-
-As specified in the mission, this implementation prioritizes:
-1. **Training data** from Canadian artists (Slakh2100-CA, MUSDB-Indie)
-2. **Local success stories** in marketing and case studies
-3. **Indie pricing tiers** for Canadian creators
-4. **Dataset loader utilities** in `data/datasets.py`
-
-## Next Steps
-
-1. **Prepare real datasets**: Place Canadian artist audio data in the specified directory structure
-2. **Modify data configuration**: Update `example_data_config.yaml` with actual paths
-3. **Start training**: Run the training script with appropriate hardware
-4. **Export for deployment**: Use TensorRT-LLM export for accelerated inference
-5. **Deploy**: Containerize and deploy as needed
+| Doc | Contents |
+|-----|----------|
+| [SETUP.md](SETUP.md) | Installing on bare-metal i5 / Python 3.13 |
+| [USER_GUIDE.md](USER_GUIDE.md) | End-user guide |
+| [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | HTTP API reference |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture (annotated with implementation status) |
+| [SUMMARY.md](SUMMARY.md) | Feature-by-feature implementation status |
+| [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) | Contributor guide |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [TODO.md](TODO.md) | Tracked work items |
+| [docs/architecture-decision-records/](docs/architecture-decision-records/) | ADRs 0001–0005 |
+| [docs/operations/](docs/operations/) | Runbook, monitoring, upgrading, rollback |
+| [research/README.md](research/README.md) | Mamba-3 research code (as-is) |
 
 ## Acknowledgements
 
-Built with:
-- NVIDIA NeMo Framework
-- Mamba-SSM State Space Models
-- PyTorch Lightning
-- TensorRT-LLM for accelerated inference
-- Librosa/Ruby for audio processing
+Built with PyTorch, [Mamba-SSM](https://github.com/state-spaces/mamba), librosa, soundfile, mido, and FastAPI.
 
 ---
-*Stem+MIDI Pro: Prototype stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*
+
+*Stem+MIDI Pro: stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*

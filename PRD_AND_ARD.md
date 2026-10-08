@@ -2,7 +2,7 @@
 
 > **Version:** 1.0-draft  
 > **Status:** Internal — for review and revision  
-> **Generated from:** codebase audit of prototype at `C:\Dev\stem_midi_pro`
+> **Generated from:** codebase audit of the Stem+MIDI Pro prototype repository
 
 ---
 

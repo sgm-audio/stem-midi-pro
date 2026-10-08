@@ -1,8 +1,14 @@
 # Stem+MIDI Pro Architecture
 
+> **Status legend (2026-06 audit):** each section is tagged `[IMPLEMENTED]`, `[PARTIAL]`, `[PLANNED]`, or `[REMOVED]`. `[PLANNED]` items are tracked in [TODO.md](TODO.md), Sections 2–12.
+>
+> **Target platform (locked):** CPU-only, bare-metal Intel i5, 4–8 GB RAM, Python 3.13. All CUDA-specific content below (TensorRT-LLM, CUDA graphs, GPU scaling, FP8) describes the original design and is retained for historical context only — it is not the production path.
+>
+> **License:** Apache License 2.0 — see [LICENSE](LICENSE).
+
 ## Overview
 
-Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-art source separation and audio-to-MIDI transcription using Mamba State Space Models (SSM). This document details the architectural decisions, components, and data flows.
+Stem+MIDI Pro is an audio AI service that combines source separation and audio-to-MIDI transcription using Mamba State Space Models (SSM). This document details the architectural decisions, components, and data flows.
 
 ## System Architecture
 
@@ -27,7 +33,7 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
 
 ## Component Details
 
-### 1. API Layer (`api.py`)
+### 1. API Layer (`api.py`) [PARTIAL]
 - **Framework**: FastAPI with asynchronous request handling
 - **Endpoints**:
   - `GET /health`: Health check
@@ -40,13 +46,15 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
   - CORS middleware
   - Background task support for cleanup
 
-### 2. Processing Orchestrator (Embedded in `main.py`)
+### 2. Processing Orchestrator (Embedded in `main.py`) [IMPLEMENTED]
 - Handles the end-to-end processing pipeline
 - Manages model state and inference mode
 - Coordinates between separation and transcription modules
 - Applies quality gating and routing logic
 
-### 3. Model Inference (`main.py` - StemMidiModel)
+### 3. Model Inference (`main.py` - StemMidiModel) [PARTIAL]
+
+> NeMo base class is slated for removal (TODO RF-3.1.7); FP8 does not apply on the CPU target.
 - **Base Class**: NeMo ModelPT for seamless integration with NeMo ecosystem
 - **Key Features**:
   - Training/validation step compatibility
@@ -54,7 +62,9 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
   - Checkpoint loading and saving
   - Mixed precision training support (FP8)
 
-### 4. Separation Module (`models/mamba_separator.py`)
+### 4. Separation Module (`models/mamba_separator.py`) [PARTIAL]
+
+> Known defects: TODO C-2.1 (invalid Mamba kwargs), C-2.5 (state cache is activations, not SSM state), C-2.6 (SI-SDR is a centroid proxy), C-2.8 (inverted phase-cancellation check).
 - **Architecture**: 12-layer Mamba-SSM
 - **Input**: Raw audio waveform (B, C, T)
 - **Processing**:
@@ -69,7 +79,9 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
   - SSM state cache for streaming
   - Metrics (SI-SDR estimate, phase coherence)
 
-### 5. Transcription Module (`models/mamba_transcriber.py`)
+### 5. Transcription Module (`models/mamba_transcriber.py`) [PARTIAL]
+
+> Known defects: TODO C-2.2 (missing `self.cfg`), C-2.9 (mel basis rebuilt per forward), C-2.10 (MC-dropout intent unclear). Expression head exists but is untrained (ARCH-11.4.4).
 - **Architecture**: 8-layer Mamba-SSM
 - **Input**: Separated guitar stem (could also process bass)
 - **Processing**:
@@ -89,7 +101,7 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
   - Expression predictions (B, T, 3)
   - Confidence scores (B, T)
 
-### 6. Confidence Injection (`models/confidence_injector.py`)
+### 6. Confidence Injection (`models/confidence_injector.py`) [IMPLEMENTED]
 - **Purpose**: Add metadata to MIDI events for user transparency
 - **Process**:
   - Align MIDI onsets with stem energy
@@ -98,7 +110,9 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
   - Generate DAW-friendly metadata (CC#127 values)
   - Suggest quantization strategy (grid vs human feel)
 
-### 7. Loss Functions (`models/losses.py`)
+### 7. Loss Functions (`models/losses.py`) [PARTIAL]
+
+> MR-STFT / flatness / crest losses implemented. Onset F1, pitch CE, velocity MAE, duration IoU are stubs (TODO ARCH-11.6).
 - **Multi-Resolution STFT Loss**: Perceptual fidelity across multiple resolutions
 - **Spectral Flatness Loss**: Preserve transient detail and natural spectral shape
 - **Crest Factor Loss**: Maintain peak-to-RMS ratio for transient preservation
@@ -107,7 +121,7 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
 - **Velocity MAE**: Accurate velocity prediction
 - **Cross-Modal Alignment Loss**: Ensure MIDI onsets align with stem energy peaks
 
-### 8. Quality Gates (`utils/quality_gates.py`)
+### 8. Quality Gates (`utils/quality_gates.py`) [IMPLEMENTED]
 - **Three-Tier System**:
   1. **Studio**: Confidence ≥0.85 AND SI-SDR ≥20dB → Direct download
   2. **Draft**: 0.70 ≤ confidence < 0.85 → Prompt for editing
@@ -117,14 +131,18 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
   - Noise floor estimation
   - Phase cancellation detection
 
-### 9. Streaming Inference Capabilities
+### 9. Streaming Inference Capabilities [PLANNED]
+
+> Current chunked path concatenates activations (TODO C-2.5). True SSM state passing is ARCH-11.8.1. CUDA graph capture is not applicable on the CPU-only target.
 - **Chunked Processing**: 2-second segments with 50% overlap
 - **State Caching**: Mamba SSM state maintained between chunks
 - **Overlap-Add**: Phase-coherent reconstruction at chunk boundaries
 - **CUDA Graph Capture**: Deterministic sub-5ms hop latency
 - **Async I/O**: Pinned memory transfers for minimal CPU-GPU overhead
 
-## Data Flow
+## Data Flow [IMPLEMENTED with caveats]
+
+> Steps match the current pipeline; the metrics in step 2 use the centroid-proxy SI-SDR (TODO C-2.6).
 
 1. **Input Validation**:
    - API validates file format, duration, sample rate
@@ -158,16 +176,20 @@ Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-
    - Create processing report JSON
    - Package all into ZIP response
 
-## Streaming Capabilities
+## Streaming Capabilities [PLANNED]
 
-The architecture supports true streaming inference with:
+> Not functional today — see TODO C-2.5 and ARCH-11.8. Historical design:
+
+The architecture targets true streaming inference with:
 
 - **Fixed memory footprint**: Constant regardless of input length
 - **Deterministic latency**: Fixed hop time via CUDA graphs
 - **State persistence**: SSM state carries context between chunks
 - **Boundary handling**: Overlap-add prevents artifacts at chunk boundaries
 
-## Scalability Considerations
+## Scalability Considerations [PLANNED]
+
+> Written for the original GPU deployment. The CPU-only target is single-process, ~1 concurrent request on a bare-metal i5 (see ARCH-11.9.2 for the revised vertical-scaling numbers). Content below is retained as design context.
 
 ### Horizontal Scaling
 - Stateless API layer (except for model weights)
@@ -185,7 +207,9 @@ The architecture supports true streaming inference with:
 - Can be extended to tensor/pipeline parallelism
 - NeMo Megatron-Core support built into ModelPT
 
-## Security Architecture
+## Security Architecture [PARTIAL]
+
+> Input sanitization, upload-size caps, ephemeral temp files, and optional API-key auth are implemented in `api.py`. Rate limiting and full hardening are TODO API-6.x / ARCH-11.10.
 
 ### Input Sanitization
 - File type validation by extension and content
@@ -209,7 +233,9 @@ The architecture supports true streaming inference with:
 - Processing occurs in ephemeral containers
 - Auditable through API logs
 
-## Deployment Architecture
+## Deployment Architecture [PLANNED]
+
+> The CUDA/Kubernetes material below describes the original GPU design and is not the current target. The actual deployment path is the CPU-only Dockerfile (TODO BLD-9.2.4) and bare-metal systemd unit (BLD-9.2.9); see `docs/operations/`. Content retained for reference.
 
 ### Containerized Service
 ```
@@ -280,7 +306,9 @@ spec:
   type: LoadBalancer
 ```
 
-## Performance Optimization
+## Performance Optimization [REMOVED]
+
+> CUDA kernels, FP8, pinned memory, and CUDA graphs below are GPU-only and were removed from the roadmap (TODO Section 7 defines the CPU-focused perf work instead). Retained for historical context.
 
 ### Computational
 - **Mamba-SSM Advantage**: O(n) complexity vs O(n²) for Transformers
@@ -301,7 +329,7 @@ spec:
 - **Optimized Block Sizes**: Fused operations where possible
 - **Kernel Fusion**: Reduce memory bandwidth usage
 
-## Extensibility Points
+## Extensibility Points [PLANNED]
 
 ### Adding New Instruments
 1. Extend separation mask heads
@@ -321,7 +349,9 @@ spec:
 3. Try different projection networks
 4. Explore quantization-aware training
 
-## Canadian Artist Dataset Integration
+## Canadian Artist Dataset Integration [PARTIAL]
+
+> Loaders for Slakh2100 (YourMT3 layout) and MUSDB18-HQ exist in `data/datasets.py` with a synthetic fallback; the Canadian-specific weighting is config-driven curation (see TODO R-1.3 and ARCH-11.13). "Slakh2100-CA"/"MUSDB-Indie" named classes no longer exist.
 
 The architecture supports Canadian artist data through:
 
@@ -344,7 +374,9 @@ The architecture supports Canadian artist data through:
 - Transfer learning from pre-trained checkpoints
 - Domain adaptation techniques for Canadian audio
 
-## Monitoring and Observability
+## Monitoring and Observability [PLANNED]
+
+> Tracked in TODO ARCH-11.14 / API-6.16–6.19. Operational guidance being added in `docs/operations/monitoring.md`. Content below is the design intent.
 
 ### Metrics Collected
 - Processing latency (end-to-end and per-stage)
@@ -365,7 +397,9 @@ The architecture supports Canadian artist data through:
 - Deep health check: Full pipeline test with synthetic data
 - Dependency validation: GPU, memory, disk space
 
-## Future Enhancements
+## Future Enhancements [PLANNED]
+
+> TensorRT-LLM and web-based MIDI editor entries below are superseded: TensorRT-LLM is removed (CPU target) and refinement is DAW-based via CC#127 confidence, not a web editor.
 
 ### Short Term
 - TensorRT-LLM export with custom kernel registration
