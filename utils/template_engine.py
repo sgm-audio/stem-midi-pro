@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Simple template engine for user-facing content.
 Replaces {{ variable }} placeholders with provided values.
 No external dependencies (no jinja2 needed).
 """
+
 import re
-from typing import Dict, Optional
 from pathlib import Path
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "user_content"
@@ -30,7 +31,7 @@ def _safe_template_path(template_name: str) -> Path:
     return template_path
 
 
-def render_template(template_name: str, variables: Optional[Dict[str, str]] = None) -> str:
+def render_template(template_name: str, variables: dict[str, str] | None = None) -> str:
     """
     Render a template file from user_content/ with the given variables.
 
@@ -46,14 +47,15 @@ def render_template(template_name: str, variables: Optional[Dict[str, str]] = No
     """
     template_path = _safe_template_path(template_name)
 
-    content = template_path.read_text(encoding='utf-8')
+    content = template_path.read_text(encoding="utf-8")
     variables = variables or {}
 
     def replacer(match):
         key = match.group(1).strip()
         return str(variables.get(key, match.group(0)))
 
-    return re.sub(r'\{\{\s*(\w+)\s*\}\}', replacer, content)
+    return re.sub(r"\{\{\s*(\w+)\s*\}\}", replacer, content)
+
 
 def list_templates() -> list[str]:
     """List all available template files."""

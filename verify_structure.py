@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """
 Simple verification script to check file structure and basic syntax
 """
 
+import contextlib
 import os
 import sys
 
-try:
+with contextlib.suppress(Exception):
     sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
 
 OK = "[OK]"
 MISSING = "[MISSING]"

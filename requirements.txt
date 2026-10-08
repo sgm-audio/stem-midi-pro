@@ -1,31 +1,37 @@
-# Core Dependencies
-torch>=2.0.0
-pytorch-lightning>=2.0.0
-nemo-toolkit[all]>=2.0.0
-mamba-ssm>=1.0.0  # Optional: requires NVIDIA GPU + CUDA
+# Core (DEP-4.1)
+# torch<2.4 pins were unsatisfiable on Python 3.13 (no wheels pre-2.5).
+# 2.5+ ships cp313 wheels; ROCm builds: pip --index-url https://download.pytorch.org/whl/rocm6.4
+torch>=2.5.0,<3.0.0
+torchaudio>=2.5.0,<3.0.0
+# mamba-ssm requires CUDA to BUILD (no CPU/ROCm wheels; needs nvcc at install).
+# Do NOT add as a hard dep: models/_mamba_compat.py falls back to a pure-PyTorch
+# Mamba when it is absent. Install manually only on CUDA machines.
 
-# Audio Processing
-librosa>=0.10.0
+# Audio processing
+librosa>=0.10.0,<0.11.0
 soundfile>=0.12.0
-torchaudio>=2.0.0
 
-# MIDI Processing
+# MIDI processing
 mido>=1.2.0
-pretty-midi>=0.2.9
 
-# Web/API (for production deployment)
-fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
-python-multipart>=0.0.6
+# Web / API
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic>=2.6.0
 
-# Configuration & Utilities
-pyyaml>=6.0
+# Configuration & utilities
+pyyaml>=6.0.1
+# numpy 2.1.0 is the first release with cp313 wheels
+numpy>=2.1.0,<3.0.0
 tqdm>=4.65.0
-numpy>=1.24.0
 
-# Development & Testing
-pytest>=7.0.0
-httpx>=0.24.0
-pytest-cov>=4.1.0
-black>=23.0.0
-flake8>=6.0.0
+# Audio loss functions
+auraloss>=0.4.0
+
+# Observability
+structlog>=24.1.0
+prometheus-client>=0.20.0
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-instrumentation-fastapi>=0.48b0

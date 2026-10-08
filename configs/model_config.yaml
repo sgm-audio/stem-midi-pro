@@ -12,19 +12,18 @@ audio:
   overlap_ratio: 0.5     # 50% overlap-add for phase coherence
 
 # Mamba Separator Architecture
+# (CPU-only target: mamba-ssm reference impl — no custom CUDA kernels)
 separator:
   d_model: 768
-  n_layer: 12
+  n_layers: 12
   d_state: 16
   d_conv: 4
   expand: 2
-  selective_scan_impl: "cuda"  # Use mamba_ssm selective_scan_fn
-  causal_conv1d_impl: "cuda"   # Custom causal conv kernel
 
 # Mamba Transcriber Architecture  
 transcriber:
   d_model: 512
-  n_layer: 8
+  n_layers: 8
   d_state: 12
   onset_head_dim: 64
   pitch_vocab_size: 128        # MIDI 0-127 + silence
@@ -34,7 +33,7 @@ transcriber:
 
 # Mixed Precision & Distributed
 training:
-  precision: "fp8"             # Dynamic FP8 via TransformerEngine
+  precision: "fp32"            # CPU-only target — FP8/TransformerEngine require CUDA
   gradient_checkpointing: true # Enable for 60s+ sequences
   megatron_core:
     tensor_model_parallel_size: 1
@@ -49,6 +48,7 @@ loss:
   onset_f1_weight: 1.0
   pitch_ce_weight: 0.8
   velocity_mae_weight: 0.3
+  duration_iou_weight: 0.5
   cross_modal_alignment_weight: 0.5
 
 # Quality Gates
@@ -58,12 +58,5 @@ quality_gates:
   min_confidence: 0.6
   min_si_sdr: 20.0
 
-# TensorRT-LLM Export
-export:
-  max_batch_size: 1            # Streaming inference
-  max_seq_len: 264600          # 6s chunks @ 44.1kHz
-  custom_plugins:
-    - "causal_conv1d"
-    - "selective_scan_fn"
-  cuda_graph_capture: true
-  enable_kv_cache: false       # SSM state caching instead
+# Export
+# [REMOVED: TensorRT-LLM export block — TensorRT-LLM requires CUDA; target is CPU-only]
