@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stem-midi-pro"
+version = "0.1.0"
+description = "Mamba-SSM-based guitar/bass stem separation with MIDI transcription (CPU-only target)"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = [
+    # Kept in sync with requirements.txt (DEP-4.1). torch<2.4 wheels do not
+    # exist for Python 3.13; 2.5+ ships cp313 wheels.
+    "torch>=2.5.0,<3.0.0",
+    "torchaudio>=2.5.0,<3.0.0",
+    # mamba-ssm is intentionally NOT a hard dependency: it requires CUDA/nvcc
+    # to build. models/_mamba_compat.py falls back to a pure-PyTorch Mamba.
+    "librosa>=0.10.0,<0.11.0",
+    "soundfile>=0.12.0",
+    "mido>=1.2.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0.1",
+    # numpy 2.1.0 is the first release with cp313 wheels
+    "numpy>=2.1.0,<3.0.0",
+    "tqdm>=4.65.0",
+    "auraloss>=0.4.0",
+    "structlog>=24.1.0",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+]
+
+[project.optional-dependencies]
+# CPU-only target (bare-metal i5). CPU wheels of torch for the pinned range.
+cpu = [
+    "torch>=2.5.0,<3.0.0",
+    "torchaudio>=2.5.0,<3.0.0",
+]
+
+[project.scripts]
+# NOTE: `api:main` and `main:cli` entry callables do not exist yet; the closest
+# existing callable is `main:process_audio_file`. Add `def main()` to api.py and
+# `def cli()` to main.py (thin wrappers around __main__ blocks) to activate these.
+stem-midi-api = "api:main"
+stem-midi-cli = "main:cli"
+
+[tool.setuptools.packages.find]
+include = ["models*", "utils*", "data*", "audio*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["research", "venv", "mamba"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+# Regex (black's format is not a list). Mirrors ruff's extend-exclude:
+# research/ is as-is vendored code; venvs are not source.
+extend-exclude = '''/(research|venv|\\.venv[^/]*)/'''
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+exclude = "research/|venv/|mamba/"

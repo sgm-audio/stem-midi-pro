@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a feature for Stem+MIDI Pro
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      placeholder: What problem does this solve? Is there a TODO.md item for it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Describe the behavior/API you'd like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: todo-ref
+    attributes:
+      label: Related TODO.md item
+      placeholder: e.g. ARCH-11.4.1 (optional)

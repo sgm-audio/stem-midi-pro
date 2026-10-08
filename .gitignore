@@ -1,6 +1,8 @@
 # Virtual environment
 venv/
 .venv/
+.venv-test/
+.venv-rocm/
 env/
 
 # Python
@@ -22,7 +24,29 @@ Thumbs.db
 
 # Outputs
 outputs/
+outputs/cache/
 *.nemo
 
 # Temp
 *.tmp
+*.log
+
+# Machine-local Windows/ROCm maintenance scripts (not part of the project)
+boot_check.ps1
+dev_check.ps1
+dg_state.ps1
+disable_hvci.ps1
+hip_check.py
+
+# Caches & coverage (HYG-9.3.1)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Data & artifacts
+data/datasets/
+*.ckpt
+*.safetensors
+*.pt

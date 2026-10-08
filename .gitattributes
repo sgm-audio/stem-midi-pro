@@ -1,0 +1,15 @@
+# Normalize line endings: LF in repo, native checkout for text files.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.wav binary
+*.flac binary
+*.mp3 binary
+*.mid binary
+*.midi binary
+*.pt binary
+*.ckpt binary
+*.nemo binary
+*.safetensors binary

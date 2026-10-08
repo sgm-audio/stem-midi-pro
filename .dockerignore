@@ -1,0 +1,15 @@
+# Docker build context exclusions (BLD-9.2.3)
+research/
+venv/
+.venv/
+__pycache__/
+.git/
+.pytest_cache/
+outputs/
+*.nemo
+*.pt
+datasets/
+tests/
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,16 @@
+# Default owner for everything
+* @scott
+
+# Model & audio core
+/models/ @scott
+/utils/ @scott
+/data/ @scott
+
+# API & entry points
+/api.py @scott
+/main.py @scott
+
+# Infra / packaging
+/Dockerfile @scott
+/pyproject.toml @scott
+/.github/ @scott
