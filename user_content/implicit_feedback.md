@@ -1,8 +1,9 @@
-🎯 How did Stem+MIDI Pro work for you?
-• [👍] Perfect for my workflow
-• [👌] Good draft, needed minor edits  
-• [👎] Required major fixes
-• [❓] Not what I expected
+# Prototype feedback note
 
-[Optional] What genre/style was this? [Dropdown]
-[Optional] Upload your corrected MIDI to help us improve? [Anonymized, opt-in]
+This repository does not implement feedback collection, analytics, or an upload
+flow for corrected MIDI. Do not send recordings or edited files through this
+prototype for model training or improvement; no such data-use workflow is
+configured here.
+
+If you are evaluating the prototype locally, record feedback through a
+separate, explicitly agreed process and avoid including sensitive media.

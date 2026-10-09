@@ -1,5 +1,11 @@
 # Stem+MIDI Pro API Documentation
 
+<!-- STATUS: research -->
+
+> **Legacy duplicate tree — not canonical.** These route/authentication claims
+> were not verified against the current root `api.py`; use the root
+> `API_DOCUMENTATION.md` for the current prototype contract.
+
 ## Overview
 
 The Stem+MIDI Pro API provides a RESTful interface for accessing the audio processing capabilities of the Stem+MIDI Pro service. Built with FastAPI, it offers automatic API documentation, high performance, and easy integration.

@@ -1,5 +1,12 @@
 # Stem+MIDI Pro
 
+<!-- STATUS: research -->
+
+> **Legacy duplicate tree — not canonical.** The current entrypoints and
+> maintained documentation are at the repository root. This nested copy has
+> not been verified; its Terraform, production-readiness, quality, latency, and
+> hosted-service claims below are not evidence of implemented behavior.
+
 Production-ready Terraform module for deploying real-time audio processing infrastructure on Google Cloud Platform (GCP).
 
 ## Overview

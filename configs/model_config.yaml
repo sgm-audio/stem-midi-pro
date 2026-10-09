@@ -9,7 +9,7 @@ audio:
   hop_length: 512        # ~11.6ms @ 44.1kHz → target <5ms via CUDA graph
   n_mels: 80
   chunk_duration_sec: 2.0
-  overlap_ratio: 0.5     # 50% overlap-add for phase coherence
+  overlap_ratio: 0.5     # Used by an experimental streaming helper; overlap-add is unverified
 
 # Mamba Separator Architecture
 separator:
@@ -18,8 +18,9 @@ separator:
   d_state: 16
   d_conv: 4
   expand: 2
-  selective_scan_impl: "cuda"  # Use mamba_ssm selective_scan_fn
-  causal_conv1d_impl: "cuda"   # Custom causal conv kernel
+  # Legacy knobs: current MambaSeparator does not consume these values.
+  selective_scan_impl: "cuda"
+  causal_conv1d_impl: "cuda"
 
 # Mamba Transcriber Architecture  
 transcriber:
@@ -34,7 +35,7 @@ transcriber:
 
 # Mixed Precision & Distributed
 training:
-  precision: "fp8"             # Dynamic FP8 via TransformerEngine
+  precision: "fp8"             # Legacy setting: train.py maps it to Lightning precision 16, not FP8
   gradient_checkpointing: true # Enable for 60s+ sequences
   megatron_core:
     tensor_model_parallel_size: 1
@@ -56,9 +57,9 @@ quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
-  min_si_sdr: 20.0
+  min_si_sdr: 20.0           # Legacy name; currently compared against a centroid proxy
 
-# TensorRT-LLM Export
+# Legacy aspirational settings; no TensorRT-LLM export path is implemented.
 export:
   max_batch_size: 1            # Streaming inference
   max_seq_len: 264600          # 6s chunks @ 44.1kHz

@@ -1,31 +1,28 @@
 # Stem+MIDI Pro
 
-Studio-grade stem separation + editable MIDI drafts. 
-Not magic—just math that respects your craft.
+## Experimental audio-to-stems and MIDI prototype
 
-## ✓ What You Get
-- Phase-coherent guitar/bass stems (24-bit WAV)
-- DAW-ready MIDI with confidence scores + expression data
-- Processed on NVIDIA H100s, delivered in <2 minutes
+Stem+MIDI Pro is a research prototype for separating guitar and bass audio and
+producing MIDI drafts. It is not a hosted product or a validated transcription
+service. This repository contains no trained checkpoint or browser interface;
+without a compatible checkpoint, the model initializes with random weights.
 
-## For Producers Who Need Drafts, Not Promises
+## Current limitations
 
-### How It Works
-1. **Upload** your audio file (WAV/FLAC/MP3, <10min)
-2. **AI Processing** separates stems and transcribes to MIDI with confidence scoring
-3. **Review & Edit** low-confidence notes in our web-based editor
-4. **Export** DAW-ready package with tempo sync and tuning detection
+- End-to-end model inference and output quality have not been validated.
+- The pipeline transcribes guitar only; the bass MIDI file reuses the guitar
+event stream.
+- MIDI uses a fixed 120 BPM tempo and default note durations because note
+durations are not predicted.
+- Reported confidence and separation metrics are heuristics, not calibrated
+quality measurements.
+- Upload processing writes a temporary file and attempts cleanup. This is not
+secure erasure or a retention guarantee.
 
-### Quality You Can Trust
-- See exactly what the AI is confident about (and what it's not)
-- Low-confidence notes tagged with MIDI CC#127 for easy DAW identification
-- Human-reviewed refinement available for complex material
-- Your audio is processed in-memory only and deleted after 24h
+The API accepts `.wav`, `.flac`, and `.mp3` filename suffixes, subject to the
+validation limits documented in the repository's API notes. This copy is
+informational development material, not an offer of service or performance
+promise.
 
-### Perfect For
-- Creating backing tracks from existing recordings
-- Generating MIDI arrangements for remixing or arrangement
-- Transcribing guitar/bass parts for notation or learning
-- Quick demos and idea generation
-
-[Get Started Free]
+The software is licensed under Apache-2.0; see the repository `LICENSE`.
+That software license does not grant rights to any audio you upload or create.

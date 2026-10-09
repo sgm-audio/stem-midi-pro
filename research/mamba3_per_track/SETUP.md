@@ -1,120 +1,63 @@
-# Setup & Training — Mamba-3 Per-Track Adaptive Filter Bank
+# Mamba-3 per-track experiment setup
 
-## 1. System prep
+<!-- STATUS: research -->
 
-```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install -y build-essential cmake curl git
+This is a research script, not part of the root API. Its name describes the
+experiment; `per_track_processor.py` currently imports `Mamba` from
+`mamba_ssm`. It has no verified trained checkpoint or deployment path.
 
-# NVIDIA driver check
-nvidia-smi
-# → confirm CUDA version ≥ 11.8, driver ≥ 520
-```
+## Runtime requirements
 
-## 2. Python + venv
+The script imports PyTorch, Mamba-SSM, NumPy, and audio/data dependencies.
+Install a PyTorch/Mamba-SSM combination supported by the target platform. The
+upstream Mamba reference in `research/mamba-ssm-reference/mamba/README.md`
+describes its platform/build requirements. This repository does not pin a
+separate research environment, and CPU execution has not been verified here.
 
-```bash
-# Install Python 3.10 if not present
-sudo apt-get install -y python3.10 python3.10-venv python3.10-dev
+## Training command
 
-# Create project root
-mkdir -p ~/mamba3 && cd ~/mamba3
-git clone <your-repo-url> .
-python3.10 -m venv venv
-source venv/bin/activate
-```
-
-## 3. Install PyTorch (CUDA)
+Run from the repository root. The trainer accepts CLI flags; it does not read
+`config.yaml` and has no `--config` option.
 
 ```bash
-# Check nvidia-smi output → pick matching torch version
-pip install torch==2.1.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+python research/mamba3_per_track/train.py \
+  --data /path/to/musdb18hq/train \
+  --save ./outputs/mamba3-research \
+  --steps 50 \
+  --batch 2 \
+  --device cpu \
+  --no-amp
 ```
 
-## 4. Install remaining deps
+The `--device` parser default is `cuda`, so select `--device cpu` explicitly
+for an attempted CPU run. The above command is source-verified but not
+runtime-verified in this environment.
 
-```bash
-pip install librosa soundfile mido tqdm numpy pyyaml auraloss
-pip install mamba-ssm  # compiles CUDA kernels, needs nvcc
-```
+### Available flags
 
-## 5. Prepare MUSDB18-HQ data
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--data` | Research-local MUSDB path | Dataset directory. |
+| `--save` | `./checkpoints` | Checkpoint/log output directory. |
+| `--resume` | unset | Checkpoint path or alias such as `last`/`best`. |
+| `--steps` | `100000` | Training step count. |
+| `--batch` | `16` | Batch size. |
+| `--lr` | `3e-4` | Learning rate. |
+| `--device` | `cuda` | Requested device. |
+| `--no-amp` | false | Disable AMP. |
+| `--grad-accum` | `1` | Gradient accumulation steps. |
+| `--grad-ckpt` | false | Enable gradient checkpointing. |
+| `--val-split` | `0.1` | Validation split. |
+| `--val-every` | `2000` | Validation interval. |
+| `--ckpt-every` | `1000` | Checkpoint interval. |
+| `--log-every` | `50` | Logging interval. |
+| `--early-stop-patience` | `10` | Early-stop patience. |
+| `--num-workers` | `8` | DataLoader workers. |
+| `--cache-in-ram` | false | Cache dataset samples in memory. |
+| `--d-model` | `256` | Model dimension. |
+| `--d-state` | `32` | SSM state dimension. |
+| `--n-layers` | `6` | Layer count. |
 
-```bash
-# Extract to datasets/
-mkdir -p datasets/musdb18hq/train
-# Each track dir should look like:
-#   datasets/musdb18hq/train/The_Singing_Guitar/
-#     bass.wav     drums.wav    vocals.wav    other.wav
-#     bass.crepe.npy  bass.pitched.npy
-#     drums.crepe.npy  drums.pitched.npy
-#     vocals.crepe.npy  vocals.pitched.npy
-#     other.crepe.npy  other.pitched.npy
-```
-
-## 6. Train
-
-```bash
-cd ~/mamba3
-source venv/bin/activate
-
-# First run (100k steps, batch 16, A100/H100)
-python train_mamba3.py \
-  --data ./datasets/musdb18hq/train \
-  --save ./checkpoints \
-  --steps 100000 \
-  --batch 16 \
-  --log-every 50 \
-  --val-every 2000
-
-# Monitor
-watch -n 10 'tail -20 checkpoints/training.log 2>/dev/null || echo "no log yet"'
-nvidia-smi --query-gpu=index,temperature.gpu,utilization.gpu,memory.used --format=csv
-htop  # CPU worker load
-```
-
-## 7. Resume training
-
-```bash
-# By alias (auto-detects in --save dir):
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume last
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume best
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume latest
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume interrupt
-
-# By exact filename:
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume checkpoint_042000.pt
-
-# By full path:
-python train_mamba3.py --data ./datasets/musdb18hq/train --save ./checkpoints --resume /absolute/path/to/model.pt
-```
-
-## 8. Common flags
-
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--data` | `./datasets/musdb18hq/train` | Path to MUSDB18-HQ train dir |
-| `--save` | `./checkpoints` | Where checkpoints + logs go |
-| `--resume` | (none) | `last`/`best`/`latest`/`interrupt` or filename |
-| `--steps` | 100000 | Total training steps |
-| `--batch` | 16 | Per-GPU batch size |
-| `--lr` | 3e-4 | Peak learning rate |
-| `--device` | cuda | `cuda` or `cpu` |
-| `--no-amp` | (off) | Disable mixed precision |
-| `--grad-accum` | 1 | Accumulate N steps (effective batch = batch × accum) |
-| `--grad-ckpt` | (off) | Enable gradient checkpointing (VRAM-limited only) |
-| `--val-every` | 2000 | Validate every N steps |
-| `--ckpt-every` | 1000 | Save checkpoint every N steps |
-| `--num-workers` | 8 | DataLoader workers |
-| `--cache-in-ram` | (off) | Preload all stems into RAM |
-| `--d-model` | 256 | Mamba model dimension |
-| `--d-state` | 32 | SSM state dimension |
-| `--n-layers` | 6 | Number of Mamba layers |
-
-## 9. Quick sanity check
-
-```bash
-# Dry run with synthetic data (no GPU needed)
-python train_mamba3.py --data /tmp/fake --save /tmp/test --steps 50 --batch 2 --device cpu --no-amp
-```
+The sample dataset directory layout is described in
+[`mamba3_datasets.py`](mamba3_datasets.py). Dataset licensing/provenance must
+be verified independently before training or redistribution.

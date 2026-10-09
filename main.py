@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-NeMo ModelPT Wrapper for Stem+MIDI Pro
-Production-ready implementation matching the specified architecture
+NeMo ModelPT prototype for Stem+MIDI Pro.
+
+The model and end-to-end inference/training paths are not yet validated.
 """
 
 import torch
@@ -45,10 +46,10 @@ class StemMidiModel(ModelPT):
         return {
             "audio": NeuralType(('B', 'C', 'T'), AudioSignal()),
             # Optional targets for training (can be None during inference)
-            "target_guitar": NeuralType(('B', 'C', 'T'), AudioSignal()),
-            "target_bass": NeuralType(('B', 'C', 'T'), AudioSignal()),
-            "target_onsets": NeuralType(('B', 'T', 1), LogitsType()),
-            "target_pitch": NeuralType(('B', 'T', 'V'), LogitsType())
+            "target_guitar": NeuralType(('B', 'C', 'T'), AudioSignal(), optional=True),
+            "target_bass": NeuralType(('B', 'C', 'T'), AudioSignal(), optional=True),
+            "target_onsets": NeuralType(('B', 'T', 1), LogitsType(), optional=True),
+            "target_pitch": NeuralType(('B', 'T', 'V'), LogitsType(), optional=True)
         }
     
     @property
@@ -74,9 +75,9 @@ class StemMidiModel(ModelPT):
         """
         B, C, T = audio.shape
         
-        # 1. Separation with state caching (for streaming compatibility)
+        # 1. Run independent waveform separation. The separator currently
+        # returns a None state placeholder; real SSM streaming is not implemented.
         guitar_stem, bass_stem, residual, _state_cache, sep_metrics = self.separator(audio)
-        # _state_cache is available for streaming inference when implemented
         
         # 2. Transcription on guitar stem (could also do bass)
         onset_logits, pitch_logits, velocity, expression, confidence = self.transcriber(guitar_stem)
@@ -199,22 +200,20 @@ class StemMidiModel(ModelPT):
         if torch.any(guitar_noise > 0.1) or torch.any(bass_noise > 0.1):
             flags.append("noise_floor")
             
-        # Check for phase cancellation (simplified)
-        cross_corr = torch.sum(guitar * bass, dim=[1,2])
-        energy_guitar = torch.sum(guitar**2, dim=[1,2])
-        energy_bass = torch.sum(bass**2, dim=[1,2])
+        # A strongly negative normalized correlation is a rough anti-phase
+        # indicator. This is only a heuristic, not a validated phase metric.
+        cross_corr = torch.sum(guitar * bass, dim=[1, 2])
+        energy_guitar = torch.sum(guitar**2, dim=[1, 2])
+        energy_bass = torch.sum(bass**2, dim=[1, 2])
         phase_corr = cross_corr / (torch.sqrt(energy_guitar * energy_bass) + 1e-8)
-        if torch.any(torch.abs(phase_corr) > 0.9):  # Near-perfect correlation = likely artifact
+        if torch.any(phase_corr < -0.9):
             flags.append("phase_cancellation")
             
         return flags if flags else ["none"]
     
     def process_audio_file(self, audio_path: str) -> Dict:
-        """
-        Inference method for production use
-        Handles file I/O and returns user-ready package
-        """
-        # Load and preprocess audio (would use audio_io.py in full implementation)
+        """Load one audio file and format prototype inference outputs."""
+        # Load and preprocess audio.
         audio, sr = self._load_audio(audio_path)
         audio = torch.tensor(audio).unsqueeze(0).unsqueeze(0)  # Add batch/channels
         
@@ -231,7 +230,7 @@ class StemMidiModel(ModelPT):
         with torch.inference_mode():
             outputs = self.forward(audio)
         
-        # Format for user delivery
+        # Format the prototype result dictionary for callers
         return {
             "stems": {
                 "guitar": outputs["guitar_stem"].squeeze().cpu().numpy(),
@@ -244,8 +243,8 @@ class StemMidiModel(ModelPT):
         }
 
     def process_audio_streaming(self, audio_path: str, chunk_seconds: float = 2.0) -> Dict:
-        """
-        Streaming inference: process audio in chunks with state caching.
+        """Experimental chunk helper; currently fails because the separator
+        does not accept the ``state_cache`` keyword this method passes.
 
         Args:
             audio_path: Path to input audio file
@@ -400,15 +399,16 @@ if __name__ == "__main__":
         # Load from checkpoint
         model = load_from_checkpoint(args.checkpoint, args.config)
     else:
-        # Initialize new model
+        # Initialize an untrained model for prototype smoke testing only.
+        print("WARNING: no checkpoint supplied; outputs use random, untrained weights.")
         model = StemMidiModel(config)
     
     # Process audio
     result = model.process_audio_file(args.audio)
     
     # Print summary
-    print(f"Processing complete!")
-    print(f"Quality: {result['report'].quality_tier.value}")
-    print(f"SI-SDR: {result['report'].si_sdr:.1f}dB")
-    print(f"Avg Confidence: {result['report'].avg_confidence:.0%}")
-    print(f"Routing: {result['routing']['action']}")
+    print("Prototype processing completed (not a quality evaluation).")
+    print(f"Heuristic tier: {result['report'].quality_tier.value}")
+    print(f"Separation proxy (si_sdr field; not SI-SDR): {result['report'].si_sdr:.1f}")
+    print(f"Uncalibrated confidence: {result['report'].avg_confidence:.0%}")
+    print(f"Prototype routing draft: {result['routing']['action']}")

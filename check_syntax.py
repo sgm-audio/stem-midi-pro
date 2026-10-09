@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Syntax check for all Python files in the project.
+AST syntax check for first-party Python files (vendored trees are skipped).
 """
 
 import ast
@@ -20,12 +20,15 @@ def check_syntax(filepath):
         return False, e
 
 def main():
-    """Check syntax of all Python files in the project."""
+    """Check syntax of first-party Python files, excluding vendor snapshots."""
     project_root = os.path.dirname(os.path.abspath(__file__))
     python_files = []
     
     skip_dirs = {'venv', '.git', '__pycache__', 'node_modules'}
-    skip_substrings = ('research/mamba-ssm-reference',)
+    skip_substrings = (
+        'research/mamba-ssm-reference',
+        'stem_midi_pro/mamba',
+    )
     project_root_norm = os.path.normpath(project_root)
     for root, dirs, files in os.walk(project_root_norm):
         rel_root = os.path.relpath(root, project_root_norm).replace(os.sep, '/')
@@ -55,7 +58,7 @@ def main():
             all_passed = False
     
     if all_passed:
-        print("\nAll Python files have valid syntax.")
+        print("\nAll scanned first-party Python files have valid syntax.")
         return 0
     else:
         print("\nSyntax errors found.")

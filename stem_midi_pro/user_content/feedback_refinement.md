@@ -1,6 +1,7 @@
-🛠️ MIDI Editor: Refine This Draft
-• Click any note to adjust pitch/timing/velocity
-• Low-confidence notes highlighted in amber
-• Use 'Snap to Grid' or 'Keep Human Feel' quantization
+# Archived duplicate-tree template
 
-[Save Changes] [Re-export Package] [Request Human Review]
+<!-- STATUS: research -->
+
+> This legacy copy is not approved for display. Use the current
+> `user_content/feedback_refinement.md` at the repository root. The nested API
+> and its refinement workflow have not been reviewed for use.

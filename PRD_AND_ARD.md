@@ -2,7 +2,8 @@
 
 > **Version:** 1.0-draft  
 > **Status:** Internal — for review and revision  
-> **Generated from:** codebase audit of prototype at `C:\Dev\stem_midi_pro`
+> **Generated from:** a historical prototype audit; local workstation path removed.
+> **Scope note:** Parts I–II contain aspirational product/architecture requirements, not implemented behavior or service guarantees. Part III is separately labeled as a stale historical audit.
 
 ---
 
@@ -392,7 +393,9 @@ jobs:
 
 # Part III: Audit Findings
 
-All issues discovered during codebase audit at commit `51d28b7`.
+<!-- STATUS: research -->
+
+> **Historical audit only:** this section claims commit `51d28b7`, which is not present in the repository's object database. File/line claims have not been revalidated against the current tree; several are now stale or contradicted by current code. Treat every row as a lead for re-audit, not as a verified current finding.
 
 ## 3.1 Runtime-Crashing Bugs
 

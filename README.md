@@ -3,167 +3,113 @@
 [![CodeQL](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI prototype for guitar/bass stem separation and MIDI transcription using Mamba-SSM.
+<!-- STATUS: in progress -->
 
-## Overview
+> **Prototype, not a production service.** This repository contains an
+> experimental audio-model pipeline and a FastAPI wrapper. There is no trained
+> model checkpoint, deployed web interface, validated quality benchmark, or
+> production support commitment in this checkout. Treat generated audio and
+> MIDI as unverified research output.
 
-Stem+MIDI Pro is an audio AI prototype that provides:
-- High-fidelity guitar/bass stem separation using Mamba-SSM architecture
-- Polyphonic audio-to-MIDI transcription with expression detection
-- Confidence-aware routing and quality gating
-- DAW-ready output with tempo sync, tuning detection, and metadata tagging
-- Canadian artist dataset alignment for training data
+## What is in this repository
 
-## Features
+The current implementation is at the repository root:
 
-### Audio Processing
-- **Phase-coherent separation** using Mamba-SSM with overlap-add processing
-- **Transient preservation** through crest factor and spectral flatness losses
-- **Expression detection** (bends, vibrato, slides) via dedicated neural heads
-- **Cross-modal alignment** ensuring MIDI notes match stem energy peaks
+- `api.py` — FastAPI routes for health, model information, audio processing,
+  and user-content templates.
+- `main.py` — NeMo model wrapper and audio-processing orchestration.
+- `models/` — Mamba-based separation/transcription prototypes, confidence
+  metadata, and training losses.
+- `data/datasets.py` — synthetic samples and partial Slakh/MUSDB loaders.
+- `train.py` — PyTorch Lightning training entry point.
+- `configs/` — model configuration. `example_data_config.yaml` is read by the
+  root trainer; the research trainer instead uses command-line flags.
+- `tests/` — small unit tests; several model/audio tests are skipped because
+  the complete model stack is not isolated from the heavy dependencies.
+- `research/` — separate Mamba-3 experiments and a tracked upstream Mamba
+  reference snapshot; neither is the v1 API runtime dependency.
 
-### Quality & Trust
-- **Confidence scoring** per note with CC#127 MIDI tagging for DAW visualization
-- **Quality-based routing** (studio/draft/complex tiers) with clear user communication
-- **Fallback options** including human-reviewed refinement for challenging material
-- **Transparent reporting** with SI-SDR, phase coherence, and artifact detection
+`stem_midi_pro/` is a second, older copy of much of the project, including a
+second identical Mamba source snapshot. The root-level files are the current
+entry points. The nested copy has not been confirmed as intentionally
+supported and is retained pending a maintainer decision.
 
-### Technical Excellence
-- **Linear-time complexity** Mamba-SSM architecture (8x less VRAM than Transformers)
-- **FP8 precision** support with dynamic scaling
-- **Streaming inference** with state caching and CUDA graph capture
-- **Sub-5ms hop latency** targeting on NVIDIA H100/A100 GPUs
+## Known limitations
 
-### Mission Alignment
-- **Canadian artist focus** with specialized dataset loaders
-- **Indie pricing tiers** and local success story highlights
-- **Training data prioritization** from Canadian artists
+- Model inference, training, streaming, and Docker deployment have not been
+  verified end to end in this checkout. See [Architecture](ARCHITECTURE.md) for
+  the known implementation gaps.
+- The model is randomly initialized unless a checkpoint is supplied. The
+  configured `si_sdr` report value is currently a spectral-centroid proxy, not
+  a measured SI-SDR score; confidence and phase outputs are not calibrated.
+- The current pipeline transcribes the guitar stem only. The API currently
+  packages that event stream as both guitar and bass MIDI; it is not an
+  independent bass transcription.
+- The API writes uploads to a temporary file during processing and attempts to
+  unlink it afterward. This is not secure erasure or an in-memory-only
+  guarantee.
+- The project has no dependency lockfile or declared Python support range.
+  `requirements.txt` includes PyTorch, NeMo, and Mamba-SSM; installation may
+  require platform-specific CUDA/PyTorch setup. Its broad multipart dependency
+  floor permits versions with later published advisories; see
+  [SECURITY.md](SECURITY.md) and do not deploy before resolving and auditing a
+  compatible dependency set.
+- There is no normal test/lint CI workflow. The CodeQL workflow is present, but
+  the latest GitHub runs were reported as failed; their logs were unavailable
+  during this review.
+- `route_by_quality()` still returns stale editor/payment/refund draft copy to
+  Python callers. No corresponding service exists, and the routing object is
+  not in the HTTP ZIP response; do not surface it as a live offer.
 
-## Project Structure
+## Setup and checks
 
-```
-stem_midi_pro/
-├── main.py                 # NeMo ModelPT wrapper (entry point)
-├── demo.py                 # Usage demonstration
-├── requirements.txt        # Python dependencies
-├── Dockerfile              # Container build file
-├── verify_structure.py     # File validation script
-├── README.md               # This file
-│
-├── configs/
-│   └── model_config.yaml   # Model architecture and training config
-│
-├── data/
-│   ├── datasets.py         # Slakh2100 / MUSDB18-HQ loaders
-│   ├── example_data_config.yaml # Example data configuration
-│   └── train.py            # Training script
-│
-├── models/
-│   ├── mamba_separator.py  # Mamba-SSM source separation block
-│   ├── mamba_transcriber.py # Polyphonic audio-to-MIDI head
-│   ├── confidence_injector.py # Metadata tagging pipeline
-│   └── losses.py           # Perceptual loss functions (MR-STFT, etc.)
-│
-├── utils/
-│   └── quality_gates.py    # Confidence-based routing logic
-│
-└── user_content/           # All user-facing prompt templates
-    ├── upload_confirmation.md
-    ├── progress_updates.md
-    ├── completion_delivery.md
-    ├── rights_usage_prompt.md
-    ├── feedback_refinement.md
-    ├── implicit_feedback.md
-    └── landing_page.md
-```
-
-## Installation
+Install the dependencies in an environment compatible with the selected
+PyTorch, NeMo, and Mamba-SSM builds. The commands below are repository entry
+points, not a claim that the full model stack installs on every platform:
 
 ```bash
-# Clone repository
-git clone <repository-url>
-# <repository-root> is the project root — no subdirectory to cd into
-
-# Install dependencies
-pip install -r requirements.txt
-
-# For GPU support with TensorRT-LLM (optional)
-# Install NVIDIA drivers, CUDA Toolkit, and TensorRT separately
+python -m pip install -r requirements.txt
+python check_syntax.py
+python verify_structure.py
+pytest
 ```
 
-## Usage
+`pytest.ini` limits default test discovery to `tests/`; the full suite still
+requires the declared audio/model dependencies. `python demo.py` attempts a
+synthetic forward path with an untrained model, but the known batch/shape
+contract issue may stop it before completion. Any output is not a quality
+evaluation.
 
-### Quick Demo (with synthetic data)
+## Run the API prototype
+
+From the repository root, in an environment with the full dependencies:
+
 ```bash
-python demo.py
+export MODEL_CONFIG_PATH=configs/model_config.yaml
+# Optional. If omitted, the prototype initializes random weights.
+export MODEL_CHECKPOINT_PATH=/path/to/model.nemo
+# Optional API key. When set, use the X-API-Key header on protected routes.
+export API_KEY=replace-with-a-local-secret
+uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-### Training with Canadian Artist Data
-```bash
-# Prepare data configuration (see example_data_config.yaml)
-python train.py \
-  --config configs/model_config.yaml \
-  --data-config example_data_config.yaml \
-  --output-dir ./outputs \
-  --max-epochs 50 \
-  --gpus 1
-```
+The current routes are `/health`, `/model-info`, `/process`, `/templates`, and
+`/render-template`; there is no `/api/v1` prefix. Upload constraints and the
+optional API-key behavior are described in [API documentation](API_DOCUMENTATION.md).
+Do not expose this prototype publicly without reviewing its authentication,
+request limits, concurrency behavior, dependency resolution, and model output.
 
-### Docker Deployment
-```bash
-# Build Docker container
-docker build -t stem-midi-pro .
+## Documentation
 
-# Run service (example)
-docker run -p 8000:8000 stem-midi-pro
-```
+- [API documentation](API_DOCUMENTATION.md)
+- [Architecture and implementation status](ARCHITECTURE.md)
+- [Development guide](DEVELOPMENT_GUIDE.md)
+- [Prototype operator notes](USER_GUIDE.md)
+- [Product and architecture requirements](PRD_AND_ARD.md) — aspirational,
+  not a statement of implemented behavior
+- [Research area](research/README.md)
+- [Review work plan](TODO.md) — historical items are not all validated
 
-## Technical Specifications
+## License
 
-### Architecture
-- **Separator**: 12-layer Mamba-SSM (d_model=768) with selective scan
-- **Transcriber**: 8-layer Mamba-SSM (d_model=512) with multi-task heads
-- **Precision**: FP8 dynamic (training), FP16/FP8 (inference)
-- **Sequence Length**: Up to 60 seconds with state caching
-- **Latency**: <5ms hop, <2s total separation, <4s MIDI transcription (3-min track)
-
-### Loss Functions
-- Multi-Resolution STFT (6 resolutions)
-- Spectral Flatness preservation
-- Crest Factor preservation (transient detail)
-- Onset F1 + Pitch Cross-Entropy
-- Velocity MAE + Duration IoU
-- Cross-modal alignment (MIDI ↔ stem energy)
-
-### Quality Gates
-- **Studio Tier**: Confidence ≥0.85, SI-SDR ≥20dB → Direct download
-- **Draft Tier**: 0.70 ≤ confidence < 0.85 → Editor launch prompt
-- **Complex Tier**: <0.70 confidence → Human review/refund options
-
-## Canadian Artist Alignment
-
-As specified in the mission, this implementation prioritizes:
-1. **Training data** from Canadian artists (Slakh2100-CA, MUSDB-Indie)
-2. **Local success stories** in marketing and case studies
-3. **Indie pricing tiers** for Canadian creators
-4. **Dataset loader utilities** in `data/datasets.py`
-
-## Next Steps
-
-1. **Prepare real datasets**: Place Canadian artist audio data in the specified directory structure
-2. **Modify data configuration**: Update `example_data_config.yaml` with actual paths
-3. **Start training**: Run the training script with appropriate hardware
-4. **Export for deployment**: Use TensorRT-LLM export for accelerated inference
-5. **Deploy**: Containerize and deploy as needed
-
-## Acknowledgements
-
-Built with:
-- NVIDIA NeMo Framework
-- Mamba-SSM State Space Models
-- PyTorch Lightning
-- TensorRT-LLM for accelerated inference
-- Librosa/Ruby for audio processing
-
----
-*Stem+MIDI Pro: Prototype stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

@@ -1,3 +1,5 @@
+# STATUS: research
+# Legacy duplicate-tree dependencies. Not the root runtime manifest; review before use.
 # Core Dependencies
 torch>=2.0.0
 pytorch-lightning>=2.0.0
@@ -11,19 +13,18 @@ torchaudio>=2.0.0
 
 # MIDI Processing
 mido>=1.2.0
-pretty-midi>=0.2.9
 
-# Web/API (for production deployment)
+# Web/API (legacy tree; not verified for production)
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
-python-multipart>=0.0.6
+python-multipart>=0.0.18  # Historical floor; see root SECURITY.md for newer advisory ranges
 
 # Configuration & Utilities
 pyyaml>=6.0
 tqdm>=4.65.0
 numpy>=1.24.0
 
-# TensorRT-LLM (for production inference)
+# TensorRT-LLM (legacy; not used by the root application)
 tensorrt>=8.6.0
 torch-trt>=0.2.0
 

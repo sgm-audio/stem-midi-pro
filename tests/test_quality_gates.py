@@ -3,7 +3,7 @@ import pytest
 from utils.quality_gates import ProcessingReport, QualityTier, route_by_quality
 
 def test_studio_tier():
-    """High confidence + high SI-SDR should route to studio."""
+    """High confidence plus a high configured metric proxy routes to studio."""
     report = ProcessingReport(
         si_sdr=25.0, phase_coherence=0.9, avg_confidence=0.95,
         artifact_flags=["none"], low_confidence_notes=0,
@@ -34,7 +34,7 @@ def test_config_overrides_thresholds():
         artifact_flags=["none"], low_confidence_notes=0,
         config=config,
     )
-    assert report.quality_tier != QualityTier.STUDIO  # Doesn't meet 25.0 SI-SDR
+    assert report.quality_tier != QualityTier.STUDIO  # Does not meet configured proxy threshold
 
 def test_route_by_quality_studio():
     """Studio report should produce direct_download action."""

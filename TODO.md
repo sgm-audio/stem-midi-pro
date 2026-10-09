@@ -1,30 +1,45 @@
 # Stem+MIDI Pro — TODO
 
-> **Audit date:** 2026-06-02
-> **Source-of-truth architecture:** `ARCHITECTURE.md` (every `[PLANNED]` feature in there is a TODO below)
-> **Target hardware:** Bare-metal i5 / 4–8 GB DDR4 (CPU-only)
-> **Python:** 3.13
-> **License:** Apache License 2.0
-> **Repo structure decision:** Consolidate on the **v1 production path** (`main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py` Slakh+MUSDB loaders). Mamba-3 research work moves to `/research/`.
+<!-- STATUS: research -->
+
+> **Status note (2026-10-08):** This historical plan has been partially
+> reconciled against the current checkout, but is not a complete or approved
+> roadmap. Some completed boxes conflict with checked-in code (for example,
+> CPU-only/Python 3.13 decisions and the claimed `ci.yml`), and some proposed
+> PolyForm licensing conflicts with the current Apache-2.0 `LICENSE`. Treat
+> unresolved items as research until maintainers confirm scope; do not apply
+> conflicting license tasks.
+
+> **Historical plan date:** 2026-06-02; status reconciliation: 2026-10-08
+> **Current architecture notes:** `ARCHITECTURE.md` describes the checked-in prototype, not a roadmap or completed specification.
+> **Target hardware:** unverified; the model configuration and Docker image include CUDA/NVIDIA assumptions.
+> **Python:** no supported version is declared or tested in this audit environment.
+> **License:** current root `LICENSE` is Apache License 2.0.
+> **Repo structure:** root-level modules are the current entrypoints; the duplicate `stem_midi_pro/` tree remains pending a maintainer decision.
 
 ---
 
 ## Legend
 
-- **Status:** `[ ]` open · `[x]` done · `[~]` in progress · `[!]` blocked
+- **Status:** `[ ]` open · `[x]` done · `[~]` in progress · `[!]` blocked or awaiting research/owner decision
 - **Effort:** S < 1h · M 1–4h · L 1–3 days · XL 1+ week
 - **Priority:** P0 (blocks prod) · P1 (next sprint) · P2 (post-MVP) · P3 (research)
 - **Tags:** `bug`, `feature`, `perf`, `sec`, `test`, `docs`, `infra`, `refactor`, `arch`
 
 ---
 
-# SECTION 0 — STRATEGIC DECISIONS (LOCKED)
+# SECTION 0 — HISTORICAL STRATEGIC DECISIONS
 
-- [x] **D-STRAT-1** · `decision` · **Path B: consolidate on v1 production path.** `model.py` / `train_mamba3.py` / `utils/losses_mamba3.py` / Mamba-3-specific dataset classes / `SETUP.md` (Mamba-3 version) / `mamba/` github-clone → moved to `/research/`. Production path stays: `main.py` + `api.py` + `models/*` + `train.py` + `data/datasets.py` (Slakh/MUSDB loaders only) + `configs/model_config.yaml`.
-- [x] **D-STRAT-2** · `decision` · **Architecture.md is a source of truth to implement** — every `[PLANNED]` section becomes a tracked work item (see Section 11).
-- [x] **D-STRAT-3** · `decision` · **CPU-only** — drop all CUDA-only paths, downsize models, INT8-ready where possible. Mamba-SSM 1.x supports CPU via the pure-PyTorch reference impl (slower but functional).
-- [x] **D-STRAT-4** · `decision` · **Python 3.13** — pin in pyproject, Dockerfile, CI.
-- [x] **D-STRAT-5** · `decision` · **`mamba-ssm` from PyPI**; **no `causal-conv1d`** (CUDA-only, not needed for CPU).
+<!-- STATUS: research -->
+
+Only the checked-in Apache-2.0 license is verified; platform, Python, and
+canonical-tree decisions remain unconfirmed.
+
+- [~] **D-STRAT-1** · `research` · Root modules act as the current entrypoints and the Mamba-3 experiment lives under `/research/`, but a duplicate legacy tree remains under `stem_midi_pro/`. Treat the intended canonical tree and duplicate's retention as maintainer decisions.
+- [!] **D-STRAT-2** · `research` · This historical plan's architecture is not authoritative; current code facts are documented in `ARCHITECTURE.md`. Maintainers should decide whether any proposed product requirements remain in scope.
+- [!] **D-STRAT-3** · `research` · **CPU-only target unverified** — the checked-in config and Dockerfile target CUDA/NVIDIA tooling; no CPU-only Mamba installation or inference run is verified. Confirm the platform target before changing runtime dependencies.
+- [!] **D-STRAT-4** · `research` · **Python support range undeclared** — there is no root pyproject/CI matrix; Docker uses the base image's system Python. Confirm and test a supported version before pinning.
+- [!] **D-STRAT-5** · `research` · **Mamba installation target unverified** — requirements use the PyPI package, but the current model config requests CUDA and no CPU path is tested. Confirm the target before asserting CPU support.
 - [x] **D-STRAT-6** · `decision` · **License: Apache License 2.0** — permissive open source with explicit patent grant and contributor terms; owner retains copyright. Place at `/LICENSE`.
 
 ---
@@ -40,7 +55,7 @@
 - [x] **R-1.1.5** · `refactor` · S · Move `SETUP.md` → `/research/mamba3_per_track/SETUP.md`. ✅
 - [x] **R-1.1.6** · `refactor` · S · Move `configs/mamba3_config.yaml` → `/research/mamba3_per_track/config.yaml`. ✅
 - [x] **R-1.1.7** · `refactor` · S · Extract `StemDataset` + `Slakh2100StemDataset` + `collate_valid` + `get_musdb18hq_data_loader` + `get_slakh2100_loader` from `data/datasets.py` → `/research/mamba3_per_track/mamba3_datasets.py`. Production `data/datasets.py` retains `AudioDataset`, `Slakh2100YourMT3Dataset`, `MUSDB18HQDataset`, `get_data_loaders`. ✅
-- [x] **R-1.1.8** · `refactor` · S · Move `mamba/` (vendored github clone, includes own `.git`) → `/research/mamba-ssm-reference/mamba/`. Added `/research/mamba-ssm-reference/.gitignore` to ignore the vendored `.git` and build artifacts. ✅
+- [~] **R-1.1.8** · `refactor` · S · A vendored Mamba snapshot exists under `/research/mamba-ssm-reference/mamba/`, but an identical tracked copy remains at `stem_midi_pro/mamba/`. The tracked research snapshot has no embedded `.git`; confirm the duplicate's intended status before removing either tree.
 - [x] **R-1.1.9** · `refactor` · S · Added `/research/README.md` (top-level index for both research subdirs; covers R-1.1.9, R-1.1.10, R-1.1.11 in one document). ✅
 - [x] **R-1.1.10** · `refactor` · S · (folded into R-1.1.9). ✅
 - [x] **R-1.1.11** · `refactor` · S · (folded into R-1.1.9). ✅
@@ -48,39 +63,43 @@
 
 ## 1.2 Update root paths & references
 
-- [x] **R-1.2.1** · `refactor` · S · `check_syntax.py` — `dirs[:]` skip list now excludes `venv`, `.git`, `__pycache__`, `node_modules`, and any subdir under `research/mamba-ssm-reference/`. Verified: scans 28 .py files (was 117+). ✅
+- [x] **R-1.2.1** · `refactor` · `check_syntax.py` skips environment/cache directories and both vendored Mamba snapshots. The exact file count is intentionally omitted because the tree changes.
 - [x] **R-1.2.2** · `refactor` · S · `verify_structure.py` — removed all `model.py` / `train_mamba3.py` / `losses_mamba3.py` checks; added `research/mamba3_per_track/` and `research/mamba-ssm-reference/mamba/README.md` as informational checks. Also fixed cp1252 UnicodeEncodeError by replacing ✓/✗ with `[OK]/[MISSING]`. ✅
-- [x] **R-1.2.3** · `refactor` · S · `.github/workflows/ci.yml` — bump `PYTHON_VERSION` 3.10→3.13; replace `model.py` parse step with `main.py` parse step; update file-existence list (added `api.py`, `train.py`, `models/confidence_injector.py`, `models/losses.py`, `configs/model_config.yaml`; removed `model.py`, `train_mamba3.py`, `utils/losses_mamba3.py`; added `research/mamba3_per_track/per_track_processor.py`, `research/mamba-ssm-reference/mamba/README.md` as research sanity checks); exclude `research/mamba-ssm-reference` from flake8/black/isort. ✅
+- [!] **R-1.2.3** · `research` · The current tree has no `.github/workflows/ci.yml`; `.github/workflows/codeql.yml` is the only workflow. The prior completion claim cannot be verified and needs a maintainer decision on whether to add test/lint CI.
 - [x] **R-1.2.4** · `refactor` · S · `pyproject.toml` — **N/A: no `pyproject.toml` exists at repo root.** No action needed. ✅
-- [x] **R-1.2.5** · `refactor` · S · `.dockerignore` — **N/A: no `.dockerignore` exists at repo root.** The Dockerfile rewrite (BLD-9.2.4 in Section 9.2) will introduce one. ✅
-- [x] **R-1.2.6** · `docs` · S · `example_data_config.yaml` — header rewritten to point at `research/mamba3_per_track/train.py`; `device: cuda` → `device: cpu`; `amp: true` → `amp: false` (CPU target). ✅
+- [x] **R-1.2.5** · `infra` · Added a root `.dockerignore` for credentials, local caches, datasets/checkpoints, tests, research/vendor trees, and the legacy duplicate tree. Docker image build remains unverified.
+- [!] **R-1.2.6** · `research` · The root `example_data_config.yaml` is consumed by the root `train.py`, not the Mamba-3 CLI. The old CPU-only/research instructions were replaced, but the platform target remains unverified.
 
 ## 1.3 Drop redundant qualifier prefixes (mirror the `mamba3_` rename)
 
 - [x] **R-1.3.1** · `refactor` · S · Rename `data/canadian_datasets.py` → `data/datasets.py` (the file IS the data loader; the `canadian_` qualifier belongs in the curation policy, not the filename). ✅
-- [x] **R-1.3.2** · `refactor` · S · Rename `CanadianAudioDataset` → `AudioDataset` (the base class is the v1 audio dataset; not all data needs to be Canadian-sourced — Slakh2100 and MUSDB18-HQ are global). The mission alignment toward Canadian artists is preserved in the config-driven sampling weights and the module docstring. ✅
+- [x] **R-1.3.2** · `refactor` · The base class was renamed to `AudioDataset`. The earlier claim about Canadian curation weights/policy is unsupported by the current loaders and has been removed from current docs; see R-1.3.5.
 - [x] **R-1.3.3** · `refactor` · S · Rename `get_canadian_data_loaders` → `get_data_loaders` (same reasoning). ✅
-- [x] **R-1.3.4** · `refactor` · S · Update all imports: `train.py`, `tests/test_dataset_loaders.py` (split v1 + v3 tests; v3 moved to `research/mamba3_per_track/test_datasets.py`), `verify_structure.py`, `.github/workflows/ci.yml`. ✅
-- [x] **R-1.3.5** · `docs` · S · Update all doc references: `README.md`, `DEVELOPMENT_GUIDE.md`, `SUMMARY.md`, `ARCHITECTURE.md`, `research/README.md`, `research/mamba3_per_track/mamba3_datasets.py`, `TODO.md`. The "Canadian" mission is still documented in `data/datasets.py` module docstring + `README.md` (mission section) + `PRD_AND_ARD.md` — kept where it belongs (curation policy / business context), not in code identifiers. ✅
+- [!] **R-1.3.4** · `research` · Root imports and `verify_structure.py` use the current dataset module, but the prior completion claim references a nonexistent `.github/workflows/ci.yml`. Verify historical test/workflow migration before treating this item as fully complete.
+- [!] **R-1.3.5** · `research` · Path references were updated, but the claimed Canadian-artist mission/curation policy is not evidenced by the current Slakh/MUSDB loaders or README. Confirm whether this remains a product requirement before restoring that copy.
 
 ---
 
-# SECTION 2 — CRITICAL RUNTIME BUGS (P0)
+# SECTION 2 — HISTORICAL RUNTIME / CORRECTNESS LEADS
 
-These are bugs that crash or produce wrong output today. They are the highest-priority items because they block any production use.
+<!-- STATUS: research -->
 
-- [ ] **C-2.1** · `bug` · M · P0 · `models/mamba_separator.py:46-56` — **Mamba constructor receives invalid kwargs** `causal_conv1d_impl=` and `selective_scan_impl=`. Mamba-1.x expects `causal_conv1d_fn` (callable) or no arg, plus `use_mem_eff_path` (bool). Drop these kwargs. Add a unit test that constructs the model from a config and runs a forward pass to lock the contract.
-- [ ] **C-2.2** · `bug` · S · P0 · `models/mamba_transcriber.py` — `self.cfg` is referenced inside `_mel_spectrogram` but never assigned in `__init__`. Add `self.cfg = cfg` in `__init__`. Add a forward-pass test.
-- [ ] **C-2.3** · `bug` · M · P0 · `data/datasets.py:_validate_dataset` vs `_build_file_list` — `self.file_list` is set twice (once in `_validate_dataset` for synthetic, then overwritten in `_build_file_list` for non-synthetic). Reorder: have `__init__` call `_build_file_list` only, and let `_build_file_list` short-circuit on the synthetic flag.
-- [ ] **C-2.4** · `bug` · M · P0 · `data/datasets.py:Slakh2100YourMT3Dataset` — does not override `_build_file_list`. When path is missing, parent's `_build_file_list` calls `os.listdir(self.root_dir)` on a missing dir → `FileNotFoundError`. Add override that short-circuits on `self.synthetic`.
-- [ ] **C-2.5** · `bug` · L · P0 · `models/mamba_separator.py:forward` — "state cache" is implemented as `torch.cat([state_cache, hidden], dim=1)` then `hidden[:, -L:, :]` after the blocks. This is **not** the Mamba SSM state — it's activations. Streaming inference is structurally broken. Either (a) use Mamba's `inference_params` API properly, or (b) remove the `_state_cache` argument and document the limitation. Add a streaming-inference test that verifies chunked outputs match a single-pass output.
-- [ ] **C-2.6** · `bug` · M · P0 · `models/mamba_separator.py:_estimate_si_sdr` calls `_spectral_centroid` which does another full STFT, **after** the forward already computed STFT once. Plus the "SI-SDR" reported to users is a clamped centroid heuristic, not actual SI-SDR. Either pass the cached magnitude in, or rename the metric to `centroid_separation_proxy` and add a TODO for real SI-SDR against ground truth.
-- [ ] **C-2.7** · `bug` · S · P0 · `data/datasets.py:MUSDB18HQDataset._get_real_item:474` — `mixture = sum(stem_wavs.values()) / len(stem_wavs)` returns a 0-d numpy array, not 1-d. Replace with explicit unpack: `total = sum(stem_wavs[k] for k in stem_wavs); mixture = total / len(stem_wavs)`. Verify shape.
-- [ ] **C-2.8** · `bug` · S · P0 · `models/mamba_separator.py:_detect_artifacts` (called via `main.py:_detect_artifacts`) — `phase_corr > 0.9` flagged as "phase cancellation" is **inverted logic**. Two correlated stems can be valid (same fundamental); perfectly anti-correlated (≈ -1) is the cancellation case. Fix sign and threshold.
-- [ ] **C-2.9** · `bug` · S · P0 · `models/mamba_transcriber.py:_create_mel_basis` runs `for j in range(...)` Python loop building an `(n_mels, n_fft//2+1)` tensor on **every** forward call. Move into `__init__`, register as a buffer named `mel_basis`. Eliminates a per-frame allocation hot path.
-- [ ] **C-2.10** · `bug` · M · P0 · `models/mamba_transcriber.py:forward` — `confidence` is computed with MC-dropout ensemble (5 forward passes) only in `not self.training`. During training the same path is used without dropout on, so `Dropout(0.1)` inside `confidence_head` only fires when training=True. Verify the dropout is actually applied; rename to `mc_dropout_eval` to make the eval-only intent explicit. Add a test.
-- [ ] **C-2.11** · `bug` · M · P0 · `models/mamba_separator.py:input_proj` uses `nn.Sequential(Linear, GELU, LayerNorm)` and consumes `(B, T, F)`. The output dim is `d_model` but the code does `hidden.transpose(1, 2)` elsewhere — verify no shape aliasing. Add a shape-assertion test.
-- [ ] **C-2.12** · `bug` · S · P0 · `main.py:process_audio_file:218` — `audio = torch.tensor(audio).unsqueeze(0).unsqueeze(0)` — but `_load_audio` returns `np.ndarray`. Use `torch.from_numpy(audio).float()` for explicitness and to avoid silent dtype coercion.
+This section originated as an earlier audit, not a verified list of current
+P0 defects. Items below have been relabeled where claims were corrected or
+rechecked; remaining unchecked items still need reproduction before action.
+
+- [~] **C-2.1** · `test` · Root separator/transcriber now use NeMo's exported `NeuralModule` base and zero-argument superclass initialization; the separator stores configured `d_model` so zero-layer test configs do not index an empty `ModuleList`. Dependency-gated construction/forward, optional-target metadata, and mel-feature tests were added; none has run in this environment.
+- [~] **C-2.2** · `test` · Assigned the transcriber config, fixed scalar mel-boundary logarithms, and cached the mel basis as a buffer. Added a dependency-gated mel-feature test; it has not run because pytest/PyTorch/NeMo are unavailable here.
+- [x] **C-2.3** · `research` · The prior overwrite claim is inaccurate: `_build_file_list()` returns the synthetic list when `self.synthetic` is true. Explicit synthetic selection is now also forced by `dataset_type: synthetic`, including when the root exists.
+- [!] **C-2.4** · `research` · A missing root is marked synthetic by the base `_validate_dataset()`, and the loader returns synthetic samples before scanning files. This can silently train on synthetic audio even when `dataset_type` names a real dataset; strict-failure versus fallback behavior needs an owner decision before changing it.
+- [ ] **C-2.5** · `bug` · L · P0 · `main.py:process_audio_streaming()` passes `state_cache=` to `MambaSeparator.forward()`, which accepts only `audio`; calling the streaming helper raises `TypeError`. The separator returns a `None` state placeholder. Implementing true SSM streaming or removing the broken helper is an architectural choice; do not silently claim streaming support.
+- [x] **C-2.6** · `refactor` · Renamed `_estimate_si_sdr` to `_centroid_separation()` and updated docs/UI copy to identify the heuristic. It still computes extra STFTs; optimizing this is separate from metric correctness.
+- [!] **C-2.7** · `research` · The stated 0-D failure is incorrect: summing the 1-D NumPy stem arrays yields a 1-D array. MUSDB mixing still needs dataset-backed validation for missing stems, sample rates, and target semantics.
+- [~] **C-2.8** · `test` · The heuristic now flags strongly negative correlation rather than absolute high correlation, with an explicit caveat that it is not a validated phase metric. Added a dependency-gated regression test; not run in this environment.
+- [~] **C-2.9** · `test` · The mel basis is now constructed once and registered as a non-persistent buffer; the per-frame Python build was removed from `_mel_spectrogram()`. The dependency-gated test has not run here.
+- [!] **C-2.10** · `research` · In evaluation mode the code repeats the confidence head five times while its `Dropout` layer is disabled, so the outputs are identical and are not an MC-dropout ensemble. The code comments/docs now disclose this; changing inference scores requires a deliberate calibration/test decision.
+- [!] **C-2.11** · `research` · The specific transpose/aliasing claim is not supported by the current separator path (`input_proj` output remains `(B, T, D)` for Mamba). End-to-end shape validation remains blocked by unavailable model dependencies.
+- [!] **C-2.12** · `research` · `_load_audio()` explicitly returns `np.float32`, so `torch.tensor(audio)` currently infers float32; this is not the stated dtype bug. `torch.from_numpy()` could avoid a copy, but is a separate optimization.
 
 ---
 
@@ -88,15 +107,15 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ## 3.1 Collapse duplication
 
-- [ ] **RF-3.1.1** · `refactor` · M · P1 · `data/datasets.py` — collapse the v1 `MUSDB18HQDataset` and `Slakh2100YourMT3Dataset` into a single `StemFolderDataset(stem_subdir: str, …)` class. They share ~90% of code. Add config-driven selection: `dataset_type` chooses subdir, layout, and stem mapping.
+- [!] **RF-3.1.1** · `research` · The Slakh/MUSDB adapters have overlapping code, but the historical `~90%` estimate was not measured. Quantify duplication and validate layout/target differences before consolidating behavior in a new `StemFolderDataset`.
 - [ ] **RF-3.1.2** · `refactor` · M · P1 · Move `MambaSeparator` mel/STFT code into a shared `audio/stft.py` module with one canonical `stft`, `istft`, `mel_spectrogram` (returns a registered buffer), and `polar_to_complex(mag, phase)`. Use from both separator and transcriber.
 - [ ] **RF-3.1.3** · `refactor` · M · P1 · `main.py:_logits_to_midi` is called from `forward` and `process_audio_streaming`. Move to a new `utils/midi.py` that owns: `logits_to_events`, `events_to_bytes`, `build_midi_from_events` (replaces the misnamed `api.py:create_placeholder_midi`).
 - [ ] **RF-3.1.4** · `refactor` · S · P1 · `api.py:create_placeholder_midi` (which actually emits real events) — rename to `build_midi_from_events` and move to `utils/midi.py`. Update `create_response_zip`.
 - [ ] **RF-3.1.5** · `refactor` · S · P1 · `models/confidence_injector.py:inject_midi_metadata` loop creates a `torch.tensor` per event for the sigmoid. Vectorize. Add a benchmark.
-- [ ] **RF-3.1.6** · `refactor` · S · P1 · `main.py:_logits_to_midi` Python `for b,t` loops over batch×T. Replace with `torch.nonzero(onset_mask).tolist()`. ~100× faster on 60s audio.
-- [ ] **RF-3.1.7** · `refactor` · M · P1 · Remove NeMo ModelPT wrapping from `main.py` — drop the `nemo.core.classes.ModelPT` and `nemo.core.neural_types` imports. Replace with a `torch.nn.Module` subclass `StemMidiModel(nn.Module)` that exposes `forward`, `training_step`, `validation_step` for a plain PyTorch training loop. **Rationale:** NeMo brings in `nemo-toolkit[all]` which is hundreds of MB and CUDA-leaning; bare-metal i5 doesn't need it.
-- [ ] **RF-3.1.8** · `refactor` · M · P1 · Update `models/mamba_separator.py` and `models/mamba_transcriber.py` — drop the NeMo `Module` base class and `typecheck` decorators (no longer relevant without NeMo typing). Replace with explicit shape asserts in forward.
-- [ ] **RF-3.1.9** · `refactor` · M · P1 · `train.py` — replace `pytorch_lightning` Trainer with a plain PyTorch training loop (or `accelerate`/`lightning-fabric` if you want some niceties). Drop `pytorch-lightning` from requirements. Bare-metal CPU training is much simpler in a custom loop.
+- [!] **RF-3.1.6** · `research` · `main.py:_logits_to_midi()` uses Python batch/frame loops. Vectorization is a possible optimization, but the `~100×` speedup claim is unmeasured; benchmark representative inputs before prioritizing or quoting gains.
+- [!] **RF-3.1.7** · `research` · NeMo `ModelPT` is still the root model base and `nemo-toolkit[all]` remains in requirements. Replacing it with bare PyTorch changes the training/checkpoint architecture; do not assume a CPU-only target or remove NeMo without owner approval and dependency-size/compatibility evidence.
+- [!] **RF-3.1.8** · `research` · Root separator/transcriber still use NeMo `NeuralModule` and `typecheck`. Dropping NeMo typing is coupled to an architecture/dependency decision, not an isolated refactor.
+- [!] **RF-3.1.9** · `research` · Root `train.py` still uses PyTorch Lightning. Replacing the trainer and checkpoint lifecycle is an architectural change; CPU simplicity is not established without a supported target and benchmark.
 
 ## 3.2 Consolidate file structure
 
@@ -112,27 +131,27 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ## 4.1 Production `requirements.txt`
 
-- [ ] **DEP-4.1.1** · `infra` · S · P0 · `torch>=2.1.0,<2.4.0` — pin to a range where `mamba-ssm` ships CPU-compatible wheels. Verify on Python 3.13 (2.4+ required for 3.13 wheels).
-- [ ] **DEP-4.1.2** · `infra` · S · P0 · `torchaudio>=2.1.0,<2.4.0` — match torch.
-- [ ] **DEP-4.1.3** · `infra` · S · P0 · **Remove `nemo-toolkit[all]>=2.0.0`** — we no longer use NeMo. Saves ~500 MB and removes a CUDA-leaning dep.
-- [ ] **DEP-4.1.4** · `infra` · S · P0 · **Remove `pytorch-lightning>=2.0.0`** — replaced by custom training loop (RF-3.1.9).
-- [ ] **DEP-4.1.5** · `infra` · S · P0 · **Add `mamba-ssm>=2.0.0`** — required by `models/mamba_separator.py` and `models/mamba_transcriber.py`. Verify CPU support.
-- [ ] **DEP-4.1.6** · `infra` · S · P0 · **Do NOT add `causal-conv1d`** — CUDA-only, not needed for bare-metal CPU target.
-- [ ] **DEP-4.1.7** · `infra` · S · P0 · `librosa>=0.10.0,<0.11.0` (kept).
-- [ ] **DEP-4.1.8** · `infra` · S · P0 · `soundfile>=0.12.0` (kept).
-- [ ] **DEP-4.1.9** · `infra` · S · P0 · `mido>=1.2.0` (kept).
-- [ ] **DEP-4.1.10** · `infra` · S · P0 · `fastapi>=0.110.0` — needed for `lifespan` API.
+- [!] **DEP-4.1.1** · `research` · The proposed Torch range and Python 3.13 CPU-wheel rationale are unverified; resolve supported Python/hardware and test the Mamba/Torch combination before pinning.
+- [!] **DEP-4.1.2** · `research` · Match `torchaudio` to the resolved `torch` version only after selecting and testing a supported runtime; no lock or install resolution exists.
+- [!] **DEP-4.1.3** · `research` · Root code still imports NeMo (`ModelPT`, `NeuralModule`, `typecheck`). Removing `nemo-toolkit[all]` would break the current model stack unless architecture changes are approved and tested.
+- [!] **DEP-4.1.4** · `research` · Root `train.py` still imports/uses PyTorch Lightning; removal depends on the unapproved trainer rewrite in RF-3.1.9.
+- [!] **DEP-4.1.5** · `research` · `mamba-ssm` is required by both model modules, but a `>=2.0.0` floor and CPU support have not been compatibility-tested.
+- [x] **DEP-4.1.6** · `infra` · Root requirements do not include `causal-conv1d`; the config keys are documented as legacy and are not passed into the Mamba constructor.
+- [!] **DEP-4.1.7** · `research` · Both manifests specify `librosa>=0.10.0` without an upper bound. Compatibility of the historical `<0.11.0` cap has not been tested; resolve before narrowing.
+- [x] **DEP-4.1.8** · `infra` · Both root and legacy manifests already declare `soundfile>=0.12.0`; dependency resolution remains unverified.
+- [x] **DEP-4.1.9** · `infra` · Both root and legacy manifests already declare `mido>=1.2.0`; dependency resolution remains unverified.
+- [!] **DEP-4.1.10** · `research` · The `fastapi>=0.110.0` floor was proposed for lifespan migration, but lifespan support predates that floor and the current app uses `on_event`. Resolve a compatible dependency set and test lifecycle behavior before raising the minimum.
 - [ ] **DEP-4.1.11** · `infra` · S · P0 · `uvicorn[standard]>=0.27.0`.
-- [ ] **DEP-4.1.12** · `infra` · S · P0 · `python-multipart>=0.0.9` (CVE in earlier versions).
-- [ ] **DEP-4.1.13** · `infra` · S · P0 · `pydantic>=2.6.0` — FastAPI 0.110+ requires v2.
-- [ ] **DEP-4.1.14** · `infra` · S · P0 · `pyyaml>=6.0.1`.
-- [ ] **DEP-4.1.15** · `infra` · S · P0 · `numpy>=1.26.0,<2.1.0` — 3.13 compat.
-- [ ] **DEP-4.1.16** · `infra` · S · P0 · `tqdm>=4.65.0`.
-- [ ] **DEP-4.1.17** · `infra` · S · P0 · `auraloss>=0.4.0` — used by `models/losses.py` for MR-STFT (currently not in requirements).
+- [!] **DEP-4.1.12** · `research` · Both manifests were raised to `python-multipart>=0.0.18` for CVE-2024-53981, but newer 2026 advisories report affected versions below 0.0.27, 0.0.30, and 0.0.31. The current floor is not sufficient for a deployment assurance. Review and approve a new floor/lock after compatibility testing; no resolved runtime version was audited.
+- [!] **DEP-4.1.13** · `research` · The stated FastAPI/Pydantic v2 requirement has not been verified against a resolved supported dependency set. Confirm the compatibility matrix before raising this floor.
+- [!] **DEP-4.1.14** · `research` · Both manifests specify `pyyaml>=6.0`; the proposed `6.0.1` floor was not resolved or compatibility-tested.
+- [!] **DEP-4.1.15** · `research` · The NumPy bound was tied to an unconfirmed Python 3.13 target. Resolve and test an installation matrix before adding this range.
+- [x] **DEP-4.1.16** · `infra` · The root and legacy manifests already declare `tqdm>=4.65.0`; dependency resolution remains unverified.
+- [!] **DEP-4.1.17** · `research` · Root `models/losses.py` implements MR-STFT in PyTorch and does not import `auraloss`; the separate research trainer uses `auraloss` optionally and warns when absent. Do not add it to root requirements unless the runtime ownership/scope changes.
 - [ ] **DEP-4.1.18** · `infra` · S · P0 · `structlog>=24.1.0` — structured logging for production.
 - [ ] **DEP-4.1.19** · `infra` · S · P0 · `prometheus-client>=0.20.0` — `/metrics` endpoint.
 - [ ] **DEP-4.1.20** · `infra` · S · P0 · `opentelemetry-api>=1.27.0`, `opentelemetry-sdk>=1.27.0`, `opentelemetry-instrumentation-fastapi>=0.48b0` — tracing.
-- [ ] **DEP-4.1.21** · `infra` · S · P0 · **Remove `pretty-midi`** — never imported.
+- [x] **DEP-4.1.21** · `infra` · Removed the unused `pretty-midi` dependency from both requirement manifests; current first-party code uses `mido`.
 
 ## 4.2 Dev `requirements-dev.txt` (new file)
 
@@ -148,46 +167,49 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ## 4.3 Pinned Python
 
-- [ ] **DEP-4.3.1** · `infra` · S · P0 · `pyproject.toml` — `requires-python = ">=3.13,<3.14"`.
-- [ ] **DEP-4.3.2** · `infra` · S · P0 · `Dockerfile` — base image `python:3.13-slim`.
-- [ ] **DEP-4.3.3** · `infra` · S · P0 · `.github/workflows/ci.yml` — single matrix entry for `3.13`.
-- [ ] **DEP-4.3.4** · `infra` · S · P0 · `SETUP.md` (new, in `/`) — rewrite for 3.13 + CPU + bare-metal i5.
+- [!] **DEP-4.3.1** · `research` · No Python support range is declared. Choose one only after resolving/installing the model stack and running checks across candidate versions; Python 3.13 is not established.
+- [!] **DEP-4.3.2** · `research` · The current Dockerfile uses a CUDA Ubuntu base. Replacing it with `python:3.13-slim` assumes unverified CPU/Mamba support and requires a tested build.
+- [!] **DEP-4.3.3** · `research` · A CI workflow and Python matrix need maintainer approval; do not hard-code an unsupported 3.13-only target. `.github/workflows/codeql.yml` is currently the only workflow.
+- [!] **DEP-4.3.4** · `research` · A root setup guide promising Python 3.13/CPU/bare-metal i5 support would be misleading until the platform and installation path are validated.
 
 ---
 
 # SECTION 5 — LICENSE (P0)
 
 - [x] **LIC-5.1** · `infra` · M · P0 · Add `/LICENSE` with full Apache License 2.0 text (verbatim from `https://www.apache.org/licenses/LICENSE-2.0.txt`).
-- [ ] **LIC-5.2** · `docs` · S · P0 · Add a `LICENSE_NOTICE.md` at root that summarizes in plain English:
-  - Free for individuals
-  - Free for companies with < $1M annual revenue AND < 50 employees
-  - Paid license required above
-  - Contact: `licensing@stem-midi-pro.example`
-- [ ] **LIC-5.3** · `docs` · S · P0 · Add license headers to every `.py` file: `# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0`.
-- [ ] **LIC-5.4** · `docs` · S · P0 · Add `NOTICE` file with third-party attributions: `mamba-ssm` (Apache-2.0), `librosa` (ISC), `soundfile` (LGPL-2.1), `mido` (MIT), `fastapi` (MIT), `pydantic` (MIT), `numpy` (BSD-3-Clause), `torch` (BSD-3-Clause), `auraloss` (MIT), `prometheus-client` (Apache-2.0), `structlog` (Apache-2.0), `opentelemetry-*` (Apache-2.0).
-- [ ] **LIC-5.5** · `docs` · S · P0 · `README.md` — add a "License" section near the top with the same plain-English summary.
-- [ ] **LIC-5.6** · `docs` · S · P0 · `user_content/landing_page.md` — add a `License` section visible to end-users (e.g., "Free for personal use and small studios; commercial license required above $1M revenue").
+- [!] **LIC-5.2** · `research` · The proposed small-business terms and example contact conflict with the current Apache-2.0 `LICENSE`. Do not add a commercial restriction notice unless maintainers explicitly approve a license change.
+- [!] **LIC-5.3** · `research` · The proposed PolyForm identifier conflicts with the current Apache-2.0 license; do not add it without an owner-approved relicensing decision.
+- [!] **LIC-5.4** · `research` · Verify actual shipped third-party notices and licenses before creating `NOTICE`; the historical package list includes dependencies not present in the current manifests.
+- [!] **LIC-5.5** · `research` · The proposed commercial license summary conflicts with Apache-2.0; the README now points to the current `LICENSE` without adding those restrictions.
+- [!] **LIC-5.6** · `research` · The proposed small-business restriction conflicts with Apache-2.0. Do not add commercial terms to user-facing copy without an owner-approved license change.
 - [ ] **LIC-5.7** · `docs` · S · P0 · `/research/` — note in `README.md` that research code is also under the same license, but is "as-is" with no support.
 
 ---
 
-# SECTION 6 — API HARDENING (`api.py`) (P0)
+# SECTION 6 — HISTORICAL API-HARDENING PROPOSALS
+
+<!-- STATUS: research -->
+
+These proposals have not been approved as an API/security design. Several
+change public routes, authentication, resource limits, or lifecycle behavior;
+reassess each against current code and obtain maintainer approval before
+implementation.
 
 - [ ] **API-6.1** · `sec` · S · P0 · Convert `@app.on_event("startup")` to `lifespan` async context manager (FastAPI ≥0.110 deprecation).
-- [ ] **API-6.2** · `sec` · S · P0 · Fix CORS: when `CORS_ORIGINS` env var is unset or `"*"`, set `allow_credentials=False` and `allow_origins=["*"]`. Otherwise parse the comma-separated list and set `allow_credentials=True`. Reject mismatched configs with a startup error.
-- [ ] **API-6.3** · `sec` · M · P0 · Add request size limit: `request.headers.get("content-length")` cap at 500 MB; FastAPI body size cap via `Limit` middleware. Return 413 on overflow.
+- [!] **API-6.2** · `research` · Current default is a localhost allowlist; explicit `*` disables credentials. Replacing this with wildcard-by-default or startup rejection changes public CORS behavior and requires an owner/security decision.
+- [~] **API-6.3** · `sec` · The handler has a 50 MiB per-file cap and a Content-Length check, but FastAPI parses multipart data before calling it; there is no pre-parser total-body limit. Add an approved ASGI/proxy body cap before public deployment; the historical 500 MiB target is not validated.
 - [ ] **API-6.4** · `sec` · M · P0 · Add concurrency cap: `asyncio.Semaphore(1)` around `process_audio_file`. Return 503 with `Retry-After: 1` when at capacity.
-- [ ] **API-6.5** · `sec` · M · P0 · Add API-key auth: `Authorization: Bearer <key>` middleware. Keys from env var `API_KEYS` (comma-separated). Apply only to `/process`; leave `/health`, `/live`, `/ready`, `/metrics`, `/docs`, `/redoc`, `/openapi.json` open. Add `401`/`403` responses.
+- [!] **API-6.5** · `research` · Current optional `API_KEY` uses `X-API-Key` on `/process`, `/templates`, and `/render-template`; it is disabled by default. Switching to bearer keys, multiple keys, or route exceptions changes authentication behavior and needs an owner/security decision.
 - [ ] **API-6.6** · `perf` · S · P0 · `validate_audio_file` currently opens with `sf.info` then `_load_audio` opens again with `sf.read`. Use a single `sf.SoundFile` context for both. (Eliminates double-open on the same file.)
 - [ ] **API-6.7** · `sec` · M · P0 · Catch `torch.cuda.OutOfMemoryError` (still relevant if anyone runs on GPU) and any `MemoryError`; return 503 with `Retry-After`. Log the event.
 - [ ] **API-6.8** · `sec` · M · P0 · Add graceful shutdown: `lifespan` teardown that drains in-flight requests, clears CUDA cache if present. Pass `--timeout-graceful-shutdown 30` to uvicorn in Dockerfile CMD.
 - [ ] **API-6.9** · `infra` · S · P0 · Add `X-Request-ID` middleware (read incoming or generate UUID4). Echo in response header. Log on every request. Include in error responses.
 - [ ] **API-6.10** · `infra` · M · P0 · Replace `logging.basicConfig` with `structlog` configured for JSON output (`LOG_FORMAT=json` env). Include `request_id`, `route`, `latency_ms`, `status_code` on every log line.
-- [ ] **API-6.11** · `refactor` · S · P0 · Rename `create_placeholder_midi` to `build_midi_from_events` and move to `utils/midi.py`. Update `create_response_zip`.
-- [ ] **API-6.12** · `bug` · M · P0 · `create_placeholder_midi` (current name) uses fixed 1/16-note duration for every event. Read `duration_frames` from the confidence injector output; convert to ticks using `ticks_per_beat=480` and a configurable default duration. Drop the hardcoded 0.25-beat.
-- [ ] **API-6.13** · `perf` · L · P0 · `process_audio_streaming` concatenates outputs then runs `_logits_to_midi` over the full sequence — defeats streaming. Either (a) emit per-chunk MIDI with overlap-dedup, or (b) document as a non-streaming convenience path and remove the misleading name. Verify CPU memory doesn't blow up on 10-min input.
-- [ ] **API-6.14** · `sec` · S · P0 · `/render-template` — convert from GET to POST with JSON body `{"template_name": "...", "variables": {...}}`. Add `template_name` allowlist (whitelist the 7 templates in `user_content/`). Reject any other with 400.
-- [ ] **API-6.15** · `bug` · S · P0 · `_load_audio` falls back to `librosa.load(path, sr=None, mono=True)`. Some librosa versions resample to 22050 on None; force `sr=None` and mean-downmix manually.
+- [!] **API-6.11** · `research` · The helper now serializes event data rather than writing an empty track, but its legacy name remains. Moving/renaming a module-level helper may affect callers; decide whether to provide a compatibility wrapper before changing it.
+- [!] **API-6.12** · `research` · MIDI events currently carry no duration prediction, so serialization uses a documented fixed 1/16-note default. Do not invent a `duration_frames` contract or change the output format without model/data evidence and maintainer approval.
+- [~] **API-6.13** · `research` · `process_audio_streaming()` is now documented in source/docs as experimental and currently broken (`state_cache` is unsupported). It remains callable; decide whether to remove/deprecate it or design true streaming before claiming this is resolved.
+- [!] **API-6.14** · `research` · `/render-template` currently accepts the template name as a query parameter and variables as an optional body; path traversal is blocked by a basename-only resolver. Changing route method/shape/status codes is a public API change; decide before implementation.
+- [x] **API-6.15** · `research` · `_load_audio()` explicitly uses `sr=None`, preserving the file sample rate, and `mono=True` in the librosa fallback. The historical claim that `None` defaults to 22.05 kHz is not supported; no resampling bug was verified.
 - [ ] **API-6.16** · `infra` · M · P0 · Add `/metrics` (Prometheus format). Counters: `requests_total{route,status}`, `errors_total{route,kind}`, `oom_total`. Histograms: `request_duration_seconds{route}`, `model_inference_seconds`, `bytes_processed`. Gauges: `gpu_memory_bytes` (if GPU), `in_flight_requests`.
 - [ ] **API-6.17** · `infra` · S · P0 · Split `/health` into `/live` (process up, always 200) and `/ready` (model loaded, not OOM, returns 503 with `Retry-After` while loading). Update Dockerfile `HEALTHCHECK` to call `/live`.
 - [ ] **API-6.18** · `sec` · S · P0 · Add `X-Content-Type-Options: nosniff` and `Strict-Transport-Security` (when behind TLS) headers. Use `secure.headers.Secure` middleware or equivalent.
@@ -196,20 +218,26 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ---
 
-# SECTION 7 — INFERENCE PERFORMANCE (P0)
+# SECTION 7 — HISTORICAL INFERENCE-PERFORMANCE PROPOSALS
 
-- [ ] **PERF-7.1** · `perf` · S · P0 · `models/mamba_separator.py` — cache input STFT magnitude in `forward`; pass to `_estimate_si_sdr` to avoid duplicate STFT.
-- [ ] **PERF-7.2** · `perf` · S · P0 · `models/mamba_transcriber.py` — move `_create_mel_basis` into `__init__`, register as buffer `self.mel_basis`. Eliminates per-forward Python loop.
-- [ ] **PERF-7.3** · `perf` · M · P0 · `main.py` — wrap inference in `torch.inference_mode()` (already done in `process_audio_file`, missing in `forward` and `process_audio_streaming` paths).
+<!-- STATUS: research -->
+
+Performance tasks require a validated baseline and target hardware. Do not
+implement the historical CPU/H100 assumptions or make latency claims without
+measurement.
+
+- [!] **PERF-7.1** · `research` · `_estimate_si_sdr` was renamed `_centroid_separation()` and recomputes STFTs on the separated stems. Caching the input mixture STFT may not eliminate those calls; profile the actual metric path before changing it.
+- [~] **PERF-7.2** · `perf` · `_create_mel_basis` now runs in `__init__` and `mel_basis` is a non-persistent buffer used by `_mel_spectrogram()`. Dependency-gated feature test is present but unrun here.
+- [!] **PERF-7.3** · `research` · `process_audio_file()` and `process_audio_streaming()` already wrap inference in `torch.inference_mode()`. Wrapping `forward()` itself would disable gradients needed by training; do not apply this historical proposal without a distinct inference interface.
 - [ ] **PERF-7.4** · `perf` · S · P0 · `main.py` — set `torch.set_num_threads(os.cpu_count() or 1)` at import; allow override via `OMP_NUM_THREADS` env.
-- [ ] **PERF-7.5** · `perf` · M · P0 · `models/mamba_separator.py` — vectorize the per-mask ISTFT loop: stack all three masks into `(B, 3, T, F)`, do one matmul, then split. Avoids 3× STFT setup cost.
-- [ ] **PERF-7.6** · `perf` · M · P0 · Replace Mamba's `use_fast_path=True` with `use_mem_eff_path=True` if mamba-ssm 2.x supports it on CPU. Otherwise document the CPU path uses the reference impl (5–10× slower but works).
-- [ ] **PERF-7.7** · `perf` · L · P0 · `models/mamba_separator.py` — add INT8 dynamic quantization on the Mamba block forward (`torch.ao.quantization.quantize_dynamic`) for CPU inference. Provides ~2× speedup with <1% accuracy loss on audio masks. Add a `--quantize` flag to `process_audio_file`.
-- [ ] **PERF-7.8** · `perf` · M · P0 · `main.py:process_audio_file` — accept an optional `quantize: bool` query param. When true, swap in quantized variant. Document CPU memory savings.
-- [ ] **PERF-7.9** · `perf` · S · P0 · Add `torch.set_float32_matmul_precision("high")` for x86 CPUs with AVX-512. Significant speedup on matmul-heavy layers.
+- [!] **PERF-7.5** · `research` · `models/mamba_separator.py` runs one input STFT and three per-mask ISTFT calls; the old note incorrectly said this loop repeats STFT setup. Any batched iSTFT rewrite needs a valid PyTorch API and profiling before adoption.
+- [!] **PERF-7.6** · `research` · The current `Mamba` constructor uses `use_fast_path=True`; CPU support and any 5–10× comparison in the historical note are unverified. Check the installed Mamba API and benchmark a supported target before changing the path.
+- [!] **PERF-7.7** · `research` · Dynamic INT8 quantization support for the Mamba block and its quality impact are unverified. The historical `~2×`/`<1%` figures have no benchmark evidence; do not add a quantization flag or claim gains without model validation.
+- [!] **PERF-7.8** · `research` · A `quantize` option would change inference behavior and API/CLI contracts; defer until PERF-7.7 is validated and maintainers approve the option.
+- [!] **PERF-7.9** · `research` · The claimed AVX-512 speedup is unmeasured and the current hardware target is unknown. Benchmark accuracy/latency before changing global matmul settings.
 - [ ] **PERF-7.10** · `perf` · S · P0 · `models/mamba_separator.py` — convert `self.mamba_blocks` from `nn.ModuleList` to `nn.Sequential` for cleaner forward (no functional change, but JIT-friendly).
-- [ ] **PERF-7.11** · `perf` · M · P0 · Add a `/batch-process` endpoint that takes a ZIP of multiple files, processes them serially (CPU bottleneck), and returns a ZIP of ZIPs. Document CPU throughput (~30–60s per minute of audio on i5).
-- [ ] **PERF-7.12** · `perf` · L · P0 · Add output caching by content hash: SHA-256 of the input file → store processed ZIP in `outputs/cache/<hash>.zip`. Same content → 301 redirect. Saves CPU on repeat uploads. Add TTL via `CACHE_TTL_HOURS` env (default 24).
+- [!] **PERF-7.11** · `research` · A batch endpoint changes public API/resource limits; no CPU reference target or throughput measurement exists. Do not add the route or publish the historical `30–60s/min` estimate without maintainer approval and load tests.
+- [!] **PERF-7.12** · `research` · Content-hash caching changes response semantics and creates persistence/retention, access-control, and deletion requirements. No cache design or repeat-request benchmark is approved; do not promise CPU savings or a 24-hour TTL.
 
 ---
 
@@ -218,33 +246,33 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 ## 8.1 Test infrastructure
 
 - [ ] **T-8.1.1** · `test` · S · P0 · `tests/conftest.py` — populate with fixtures: `audio` (1-sec 44.1kHz mono tensor), `stereo_audio` (2-ch), `mock_config` (full YAML dict), `temp_audio_file` (WAV in tmp), `temp_flac_file`, `temp_mp3_file` (skip if no encoder), `mock_model` (StemMidiModel with small config).
-- [ ] **T-8.1.2** · `test` · S · P0 · `pytest.ini` (new) — `testpaths=tests`, `addopts=-ra --strict-markers --tb=short`. Add markers: `slow`, `cuda`, `integration`.
-- [ ] **T-8.1.3** · `test` · S · P0 · `.github/workflows/ci.yml` — remove `continue-on-error: true` from test step. Add `pytest -m "not cuda"` as the default. Add a separate `cuda` job that only runs on a self-hosted runner.
+- [x] **T-8.1.2** · `test` · `pytest.ini` restricts default collection to `tests/`, uses `-ra --strict-markers --tb=short`, and registers `slow`, `cuda`, and `integration` markers.
+- [!] **T-8.1.3** · `research` · No `.github/workflows/ci.yml` or test step exists; `.github/workflows/codeql.yml` is the only workflow. Decide whether to add a test/lint CI workflow rather than attempting to remove a nonexistent `continue-on-error` setting.
 
 ## 8.2 Un-skip existing tests
 
-- [ ] **T-8.2.1** · `test` · M · P0 · Refactor `api.py` to lazy-import `StemMidiModel` inside `load_model()` (not at module top). This breaks the import-time CUDA dep.
-- [ ] **T-8.2.2** · `test` · S · P0 · `tests/test_api_validation.py` — remove all `@pytest.mark.skip`. Cover: valid WAV, too-long, unsupported SR, stereo, FLAC, MP3 (if available).
-- [ ] **T-8.2.3** · `test` · S · P0 · `tests/test_audio_loading.py` — remove skips. Cover: mono WAV, stereo→mono, missing file, 22kHz resample path.
-- [ ] **T-8.2.4** · `test` · S · P0 · `tests/test_midi_generation.py` — remove skips. Cover: empty events, multi-event ordering, CC#127 values, file parses round-trip.
+- [~] **T-8.2.1** · `test` · `api.py` now lazy-imports `StemMidiModel` inside `load_model()`, so importing the API no longer imports the full model stack. A missing-checkpoint regression test was added; it remains unrun because pytest and runtime dependencies are unavailable here.
+- [~] **T-8.2.2** · `test` · `tests/test_api_validation.py` no longer uses skip markers and covers valid WAV, excessive duration, and unsupported sample rate. Stereo/FLAC/MP3 cases are not covered; tests remain unrun because pytest and runtime dependencies are unavailable here.
+- [~] **T-8.2.3** · `test` · `tests/test_audio_loading.py` still skips all three cases while constructing the optional NeMo/Mamba model stack; mono WAV, stereo-to-mono, missing-file, and resampling behavior remain unverified.
+- [~] **T-8.2.4** · `test` · `tests/test_midi_generation.py` no longer uses skip markers and covers empty events, note ordering/ticks, exact CC#127 values, and parsing generated MIDI bytes. Tests remain unrun because pytest and `mido` are unavailable here.
 
 ## 8.3 New tests
 
-- [ ] **T-8.3.1** · `test` · M · P0 · `tests/test_mamba_separator.py` (new) — build from `model_config.yaml` (downsized for CPU); forward on `(B=1, C=1, T=8192)`; assert output shapes; assert no NaN; assert `guitar_stem != bass_stem` on synthetic input. **This test would have caught C-2.1, C-2.5, C-2.6, C-2.11.**
-- [ ] **T-8.3.2** · `test` · M · P0 · `tests/test_mamba_transcriber.py` (new) — forward on `(B=1, C=1, T=8192)`; assert 5 outputs with correct shapes. **Catches C-2.2, C-2.9, C-2.10.**
+- [~] **T-8.3.1** · `test` · Dependency-gated separator coverage now lives in `tests/test_model_module_setup.py`: a zero-layer forward asserts output shapes and placeholder state. It is unrun here and does not yet assert finiteness, nonidentical stems, or the broken streaming contract.
+- [~] **T-8.3.2** · `test` · `tests/test_model_module_setup.py` covers mel-feature shape/finiteness but not the transcriber's complete five-output `forward()` contract. Full-stack test and forward-shape coverage remain pending.
 - [ ] **T-8.3.3** · `test` · S · P0 · `tests/test_confidence_injector.py` (new) — verify alignment score, `needs_review` threshold, CC#127 mapping, summary counts.
 - [ ] **T-8.3.4** · `test` · S · P0 · `tests/test_losses.py` (new) — verify MR-STFT returns scalar; crest/flatness/alignment components sum; finite values.
-- [ ] **T-8.3.5** · `test` · S · P0 · `tests/test_template_engine.py` (new) — missing key leaves placeholder intact; list_templates returns 7 entries; re-raises FileNotFoundError on missing.
-- [ ] **T-8.3.6** · `test` · S · P0 · `tests/test_midi_roundtrip.py` (new) — build MidiFile with N events, save bytes, re-parse, verify event count and CC#127 values. **Catches API-6.12.**
-- [ ] **T-8.3.7** · `test` · M · P0 · `tests/test_api_integration.py` (new) — `TestClient.post('/process', files={'file': wav})`; assert 200 and ZIP contains 5 entries (guitar_stem.wav, bass_stem.wav, guitar.mid, bass.mid, processing_report.json).
-- [ ] **T-8.3.8** · `test` · M · P0 · `tests/test_streaming_inference.py` (new) — process 6-sec synthetic file with `process_audio_streaming(chunk_seconds=2.0)`; verify `chunks_processed == 3`.
-- [ ] **T-8.3.9** · `test` · S · P0 · `tests/test_quality_gates.py` (extend) — add test that artifact flags force COMPLEX tier regardless of confidence.
-- [ ] **T-8.3.10** · `test` · S · P0 · `tests/test_api_auth.py` (new) — `TestClient.post('/process')` without API key returns 401; with valid key returns 200; with invalid key returns 403.
-- [ ] **T-8.3.11** · `test` · S · P0 · `tests/test_api_cors.py` (new) — preflight OPTIONS without origin returns defaults; with `Origin: https://app.example` and matching allowlist returns `Access-Control-Allow-Origin`; with mismatched origin returns no ACAO header.
-- [ ] **T-8.3.12** · `test` · S · P0 · `tests/test_api_metrics.py` (new) — `/metrics` returns Prometheus text format; `requests_total` increments after a request.
-- [ ] **T-8.3.13** · `test` · M · P0 · `tests/test_perf_smoke.py` (new) — build model, run 1 forward on `(B=1, T=44100)`; assert <500 MB RSS; assert <30s wall on i5 reference hardware.
-- [ ] **T-8.3.14** · `test` · S · P0 · `tests/test_dataset_loaders.py` (extend) — add test for the new collapsed `StemFolderDataset`; cover both Slakh and MUSDB layouts via parametrize.
-- [ ] **T-8.3.15** · `test` · S · P0 · `tests/test_quantization.py` (new) — `process_audio_file(quantize=True)` returns same output shape; bit-exact mask within tolerance.
+- [~] **T-8.3.5** · `test` · `tests/test_template_engine.py` covers missing-key placeholders, seven listed templates, and `FileNotFoundError` for missing/escaping paths. The tests are implemented but unrun here.
+- [~] **T-8.3.6** · `test` · Equivalent MIDI-byte round-trip, ordered note, and exact CC#127 assertions are in `tests/test_midi_generation.py` rather than a separate module. Implemented but unrun here. **Catches API-6.12.**
+- [!] **T-8.3.7** · `research` · A `/process` 200/ZIP integration test is blocked by the current batch/event contract mismatch in `main.py:forward()`. Fix and validate that contract before making 200 the expected behavior.
+- [!] **T-8.3.8** · `research` · The proposed streaming test calls a helper that currently raises `TypeError` because `state_cache` is unsupported. Decide whether to remove/deprecate the helper or implement true streaming before testing `chunks_processed`.
+- [!] **T-8.3.9** · `research` · Artifact flags currently do not force COMPLEX tier. Whether to change routing semantics requires maintainer/calibration approval; do not codify the historical expectation without that decision.
+- [!] **T-8.3.10** · `research` · Current API returns `401` for both missing and incorrect keys; the proposed `403` expectation is not current behavior. Decide the public auth/status contract before adding assertions.
+- [!] **T-8.3.11** · `research` · CORS preflight expectations depend on Starlette behavior and a resolved version. Pin/test the supported dependency set before treating the historical response assertions as acceptance criteria.
+- [ ] **T-8.3.12** · `test` · S · P0 · `/metrics` and its counter semantics are not implemented; if approved, test the eventual documented endpoint/metric names.
+- [!] **T-8.3.13** · `research` · No reference CPU hardware or benchmark exists. Do not encode `<500 MB` or `<30s` i5 limits until the platform, workload, and measurement method are approved.
+- [!] **T-8.3.14** · `research` · `StemFolderDataset` consolidation is not approved or implemented; the proposed parametrized tests depend on the maintainer decision recorded in RF-3.1.1.
+- [!] **T-8.3.15** · `research` · Quantization support and `process_audio_file(quantize=True)` are unimplemented and unvalidated; defer tests until maintainers approve and benchmark the change (PERF-7.7/7.8).
 
 ## 8.4 Coverage targets
 
@@ -257,22 +285,20 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ## 9.1 Configuration
 
-- [ ] **CFG-9.1.1** · `bug` · S · P0 · `configs/model_config.yaml:21-22` — drop `selective_scan_impl: "cuda"` and `causal_conv1d_impl: "cuda"` (invalid kwargs for Mamba-1.x, CPU path).
-- [ ] **CFG-9.1.2** · `bug` · S · P0 · `configs/model_config.yaml:37` — change `precision: "fp8"` to `precision: "fp32"` for CPU target. Add a comment explaining CPU target.
-- [ ] **CFG-9.1.3** · `refactor` · M · P0 · Add a CPU-tuned default config: `configs/model_config.cpu.yaml` with smaller dims (`d_model=256`, `n_layer=6`, `d_state=12`) to fit in 4–8 GB RAM with 1-min audio segments.
-- [ ] **CFG-9.1.4** · `refactor` · S · P0 · Rename `n_layer` → `n_layers` in YAML for consistency with `model.py` (or vice versa in `model.py`). Pick one.
-- [ ] **CFG-9.1.5** · `refactor` · S · P0 · `configs/model_config.yaml:export:` — remove the TensorRT-LLM export block (not implementing, CPU target). Add a comment `[REMOVED: TensorRT-LLM requires CUDA]`.
-- [ ] **CFG-9.1.6** · `refactor` · S · P0 · `example_data_config.yaml` — fix `dataset_type: 'musdb18hq'` to use the new collapsed `StemFolderDataset` (post RF-3.1.1).
-- [ ] **CFG-9.1.7** · `infra` · S · P0 · Add `model_config_path: str = "configs/model_config.yaml"` env var. Add `--config` to `main.py` and `api.py`.
+- [!] **CFG-9.1.1** · `research` · The `selective_scan_impl`/`causal_conv1d_impl` keys are annotated as legacy and are not passed into the `Mamba` constructor. Removing them or selecting a CPU path depends on the unresolved runtime target.
+- [!] **CFG-9.1.2** · `research` · The config labels `fp8` as legacy; root `train.py` maps it to Lightning precision 16, not FP8. A CPU `fp32` policy is not approved because hardware/runtime support is unverified.
+- [!] **CFG-9.1.3** · `research` · A smaller CPU config and 4–8 GB/one-minute capacity target require hardware and model benchmarks; none is available.
+- [!] **CFG-9.1.4** · `research` · Root and research models have separate config schemas (`n_layer` versus `n_layers`); choose a supported schema before renaming.
+- [!] **CFG-9.1.5** · `research` · The root config labels the TensorRT-LLM export block as legacy/unimplemented. Removing it on a presumed CPU target is not approved; target hardware remains unverified.
+- [!] **CFG-9.1.6** · `research` · `example_data_config.yaml` now selects synthetic data explicitly. The real-data loader has not been collapsed into `StemFolderDataset`; changing the sample config to real data would be misleading without a validated dataset path.
+- [~] **CFG-9.1.7** · `infra` · `MODEL_CONFIG_PATH` is supported by `api.py` and `main.py` already accepts `--config`; `api.py` does not expose a direct `--config` CLI flag. A second interface is not implemented or required for current documented launch commands.
 
 ## 9.2 Build & deploy
 
-- [ ] **BLD-9.2.1** · `infra` · L · P0 · `pyproject.toml` (new) — package the project. `[project]` with name, version, description, license (`SPDX-License-Identifier: PolyForm-Small-Business-1.0.0`), requires-python, dependencies. `[project.optional-dependencies] cpu = [...]` for the CPU target. `[project.scripts] stem-midi-api = "api:main"`, `stem-midi-cli = "main:cli"`. `[tool.setuptools.packages.find] include = ["models*", "utils*", "data*", "audio*"]`.
+- [!] **BLD-9.2.1** · `research` · A package manifest/version source is absent, but the proposed PolyForm license and CPU extras conflict with current Apache licensing and unverified runtime support. Resolve those decisions before packaging.
 - [ ] **BLD-9.2.2** · `infra` · S · P0 · `setup.cfg` (new) — `tool.ruff` config. `line-length=100`, `target-version="py313"`, `extend-exclude=["research", "venv", "mamba"]`, `select=["E","F","W","I","UP","B","SIM","RUF"]`.
-- [ ] **BLD-9.2.3** · `infra` · S · P0 · `.dockerignore` (new) — exclude `research/`, `venv/`, `__pycache__/`, `.git/`, `.pytest_cache/`, `outputs/`, `*.nemo`, `*.pt`, `datasets/`, `tests/`, `*.egg-info/`, `dist/`, `build/`.
-- [ ] **BLD-9.2.4** · `infra` · L · P0 · `Dockerfile` — multi-stage:
-  - **Stage 1 (builder):** `python:3.13-slim` (CPU-only). Install build tools, `pip install -e .` with all deps. Strip build tools at end.
-  - **Stage 2 (runtime):** `python:3.13-slim`. Copy installed site-packages from builder. Copy app. Create `app` user. `EXPOSE 8000`. `HEALTHCHECK --interval=30s --start-period=30s CMD curl -fs http://localhost:8000/live || exit 1`. `CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "30"]`.
+- [x] **BLD-9.2.3** · `infra` · Added root `.dockerignore` for local secrets/state, datasets/checkpoints, tests, research/vendor trees, and the legacy duplicate. Docker build context/build was not validated because Docker is unavailable.
+- [!] **BLD-9.2.4** · `research` · The proposed Python 3.13 CPU-only multi-stage image, health check, and graceful-shutdown command assume an unapproved platform/runtime target. The current Dockerfile uses a CUDA base; reconcile hardware/dependency support and test a build before changing it.
 - [ ] **BLD-9.2.5** · `infra` · S · P0 · `Makefile` (new) — `install`, `install-dev`, `lint`, `format`, `test`, `test-cpu`, `test-cuda`, `demo`, `serve`, `docker-build`, `docker-run`, `clean`, `dist`, `release-{major,minor,patch}`.
 - [ ] **BLD-9.2.6** · `infra` · M · P0 · `.github/workflows/ci.yml` rewrite:
   - **lint job:** Python 3.13. `ruff check .`, `black --check .`, `mypy .` (loose).
@@ -286,8 +312,8 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ## 9.3 Repository hygiene
 
-- [ ] **HYG-9.3.1** · `refactor` · S · P0 · `.gitignore` — extend with `outputs/cache/`, `*.egg-info/`, `dist/`, `build/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `data/datasets/`, `*.ckpt`, `*.safetensors`, `htmlcov/`, `.coverage`.
-- [ ] **HYG-9.3.2** · `refactor` · S · P0 · Initialize a proper git repo if not already (per AGENTS.md, "No git repo is initialized"). `git init`, initial commit, `main` branch, add `gh` as default remote.
+- [x] **HYG-9.3.1** · `refactor` · S · `.gitignore` now excludes test/lint caches, coverage output, logs, local env files, generated model files, and dataset/output artifacts.
+- [x] **HYG-9.3.2** · `research` · A Git repository and `main` branch exist. History review found separate, unrelated histories on `master`, `local-wip`, and current `main`; do not reinitialize or rewrite history. Maintainers should reconcile branch lineage.
 - [ ] **HYG-9.3.3** · `infra` · S · P0 · Add `.github/CODEOWNERS` (new) — assign owners to paths.
 - [ ] **HYG-9.3.4** · `infra` · S · P0 · Add `.github/pull_request_template.md` (new).
 - [ ] **HYG-9.3.5** · `infra` · S · P0 · Add `.github/ISSUE_TEMPLATE/bug_report.yml` and `feature_request.yml`.
@@ -298,25 +324,27 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ## 10.1 Top-level docs
 
-- [ ] **DOC-10.1.1** · `docs` · L · P1 · `AGENTS.md` — regenerate. Reflect: tests exist, real datasets, real audio loading, real MIDI generation, CPU target, license.
-- [ ] **DOC-10.1.2** · `docs` · L · P1 · `README.md` — rewrite. Remove "TensorRT-LLM", "Librosa/Ruby", "FP8 precision" claims. Add bare-metal i5 install instructions. Add license summary. Add CPU performance numbers.
-- [ ] **DOC-10.1.3** · `docs` · L · P1 · `SUMMARY.md` — regenerate. Mark every feature as `[IMPLEMENTED]` or `[PLANNED]` per architecture.md. Drop the stale references to `Slakh2100CADataset` / `MUSDBIndieDataset`.
-- [ ] **DOC-10.1.4** · `docs` · L · P1 · `ARCHITECTURE.md` — annotate every section with `[IMPLEMENTED]` / `[PARTIAL]` / `[PLANNED]` / `[REMOVED]`. Document the CPU-only target. Reference the Apache-2.0 license.
-- [ ] **DOC-10.1.5** · `docs` · M · P1 · `API_DOCUMENTATION.md` — add auth section, error codes, rate-limit responses, metrics endpoint, CORS docs. Drop the `/api/v1` base URL claim.
-- [ ] **DOC-10.1.6** · `docs` · M · P1 · `USER_GUIDE.md` — strip unimplemented features: tuning detection, tempo detection, palm-mute detection, harmonics detection, slap/pop. Replace with what actually works.
-- [ ] **DOC-10.1.7** · `docs` · M · P1 · `DEVELOPMENT_GUIDE.md` — update paths (no `stem_midi_pro/` subdir), `torch.jit.trace` example, CI commands, `make` targets.
-- [ ] **DOC-10.1.8** · `docs` · S · P1 · `SETUP.md` (new, root) — replace the old one. Python 3.13, bare-metal i5, CPU-only, no CUDA. Reference `/research/mamba3_per_track/SETUP.md` for the Mamba-3 path.
-- [ ] **DOC-10.1.9** · `docs` · S · P1 · `PRD_AND_ARD.md` — strip the `C:\Dev\stem_midi_pro` local path leak on line 5.
-- [ ] **DOC-10.1.10** · `docs` · S · P1 · `CHANGELOG.md` (new) — auto-generated via `git-cliff` or manual entries per release. Reference `git log` for now.
+- [~] **DOC-10.1.1** · `docs` · `AGENTS.md` now describes the current prototype, tests, known data/model gaps, and Apache-2.0 license. CPU-only support and end-to-end real-data/audio/MIDI behavior remain unverified and are not claimed.
+- [~] **DOC-10.1.2** · `docs` · `README.md` now describes the prototype, current routes, dependencies, and Apache-2.0 license without the stale TensorRT/FP8/CPU-performance claims. A portable install recipe and measured CPU performance figures remain unavailable.
+- [x] **DOC-10.1.3** · `docs` · `SUMMARY.md` was replaced with a current-checkout inventory and explicit implementation gaps; stale dataset-class claims were removed.
+- [~] **DOC-10.1.4** · `docs` · `ARCHITECTURE.md` now distinguishes prototype implementation from unverified/gapped behavior and references Apache-2.0. A CPU-only target is not established; some requirements sections remain aspirational.
+- [x] **DOC-10.1.5** · `docs` · `API_DOCUMENTATION.md` documents current auth, CORS, constraints, error responses, and routes, and explicitly states that rate limiting/metrics are absent; the stale `/api/v1` claim was removed.
+- [x] **DOC-10.1.6** · `docs` · `USER_GUIDE.md` now documents only the local prototype and current API/output limitations; unsupported feature claims were removed.
+- [x] **DOC-10.1.7** · `docs` · `DEVELOPMENT_GUIDE.md` now uses root paths and available local checks; removed/nonexistent TorchScript, CI, and Make-target examples were not retained.
+- [!] **DOC-10.1.8** · `research` · The requested Python 3.13/CPU-only/i5 instructions are unsupported by checked-in dependencies and runtime evidence. Existing setup notes distinguish the root runtime from the experimental Mamba-3 CLI; confirm a supported platform before publishing stronger instructions.
+- [x] **DOC-10.1.9** · `docs` · Removed the local workstation path and labeled the old Part III audit as unverified historical research (its cited commit is unavailable in this repository).
+- [!] **DOC-10.1.10** · `research` · Do not infer a release changelog from the GitHub `v0.1.0` release description: it refers to product areas absent from this checkout, while the shallow/grafted local clone has no matching tag. Maintainers should reconcile product/version lineage before adding release notes.
+- [!] **DOC-10.1.11** · `research` · `api.py` OpenAPI metadata still uses the description “Professional audio AI service” and version `1.0.0`; changing public schema metadata should follow a maintainer-approved product/version decision.
 
 ## 10.2 User-facing content
 
-- [ ] **DOC-10.2.1** · `docs` · S · P1 · Audit all 7 templates in `user_content/`: `upload_confirmation.md`, `progress_updates.md`, `completion_delivery.md`, `rights_usage_prompt.md`, `feedback_refinement.md`, `implicit_feedback.md`, `landing_page.md`. Verify every `{{ variable }}` resolves to a field in the processing report or is fed by `/render-template` callers.
-- [ ] **DOC-10.2.2** · `docs` · S · P1 · `landing_page.md` — add license statement (LIC-5.6) and bare-metal CPU performance note ("runs on a $200 i5 laptop").
-- [ ] **DOC-10.2.3** · `docs` · S · P1 · `completion_delivery.md` — verify `{{ filename }}`, `{{ si_sdr }}`, `{{ phase_coherence }}`, `{{ avg_confidence }}` all match `create_response_zip:processing_report.json` keys.
-- [ ] **DOC-10.2.4** · `docs` · S · P1 · `rights_usage_prompt.md` — add a clause noting the Apache-2.0 license: "This software is Apache-2.0; attribution required, no warranty."
-- [ ] **DOC-10.2.5** · `docs` · S · P1 · `progress_updates.md` — adjust latency claims to bare-metal CPU numbers (~30–60s per minute of audio).
-- [ ] **DOC-10.2.6** · `docs` · S · P1 · `feedback_refinement.md` — replace the "Web MIDI editor" claim with "DAW-based refinement (MIDI files have CC#127 confidence)".
+- [~] **DOC-10.2.1** · `docs` · All seven user-content templates were reviewed and unsupported product claims removed. `/render-template` accepts caller-supplied variables, but there are no in-repo template callers; `filename`/`sample_rate` therefore require an external caller to supply values.
+- [!] **DOC-10.2.2** · `research` · `landing_page.md` now identifies the Apache-2.0 software license. The requested CPU claim is unmeasured and intentionally omitted.
+- [~] **DOC-10.2.3** · `docs` · Completion copy now distinguishes report fields from quality guarantees; report variable names match the JSON fields, while `filename` is not included in the report. The repository has no in-process caller to populate the template.
+- [x] **DOC-10.2.4** · `docs` · `rights_usage_prompt.md` now distinguishes the software's Apache-2.0 license from rights in user audio and avoids claiming the software license grants media rights.
+- [!] **DOC-10.2.5** · `research` · Removed the unsupported live-progress claim. The suggested CPU latency range is not measured and must not be published as a performance fact.
+- [x] **DOC-10.2.6** · `docs` · Replaced the browser-editor/human-review pitch with a qualified note that generated MIDI can be reviewed in an external DAW; no editor or calibrated CC#127 workflow is promised.
+- [!] **DOC-10.2.7** · `research` · `utils/quality_gates.py` still returns draft routing copy advertising an editor, $4.99/24h human review, and a refund. The repository has no corresponding UI/payment/refund service. Its output is part of the Python return contract; obtain an owner decision before changing/removing it, and do not present it as a live offer.
 
 ## 10.3 Code documentation
 
@@ -331,9 +359,14 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 ---
 
-# SECTION 11 — IMPLEMENT architecture.md (P0–P2)
+# SECTION 11 — HISTORICAL PRODUCT / ARCHITECTURE BACKLOG
 
-These are the features called out in `ARCHITECTURE.md` as designed but not yet built. Each one is a real work item because architecture.md is the source of truth.
+<!-- STATUS: research -->
+
+These items originated as a proposed production roadmap. The current root
+`ARCHITECTURE.md` is an implementation inventory, not an approved feature
+specification. Confirm product scope and review public API, payment, security,
+and architecture decisions before implementing any item.
 
 ## 11.1 From "API Layer" (api.py)
 
@@ -424,34 +457,34 @@ These are the features called out in `ARCHITECTURE.md` as designed but not yet b
 
 # SECTION 12 — TRAINING CORRECTNESS (P0)
 
-- [ ] **TR-12.1** · `bug` · S · P0 · `train.py:42` — `pl.seed_everything(42)` with `deterministic=True` is a contradiction unless `cudnn.deterministic=True; cudnn.benchmark=False` is set. Add explicit `torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False`. (Less critical on CPU but still right.)
-- [ ] **TR-12.2** · `bug` · S · P0 · `train.py:98` — `trainer.test(model, dataloaders=test_loader, ckpt_path='best')` — PyTorch Lightning's `ckpt_path='best'` is a magic string that resolves to `trainer.checkpoint_callback.best_model_path`. After the RF-3.1.9 rewrite to a custom loop, replace with explicit `model.load_state_dict(best_ckpt['model_state_dict'])`.
-- [ ] **TR-12.3** · `refactor` · L · P0 · Replace PyTorch Lightning `pl.Trainer` with a custom training loop in `train.py`. Implement: epoch loop, train/val, gradient accumulation, AMP (CPU: bfloat16 via `torch.autocast(device_type='cpu', dtype=torch.bfloat16)`), checkpointing, early stopping, logging.
+- [!] **TR-12.1** · `research` · The root trainer already sets `deterministic=True` on `pl.Trainer`; the historical assertion that seeding contradicts this was not reproduced. Verify exact Lightning/CUDA semantics before adding global cuDNN settings.
+- [!] **TR-12.2** · `research` · The current trainer still uses Lightning and `ckpt_path='best'`; the proposed explicit state-dict load only applies after a custom-loop rewrite. Confirm behavior against the resolved Lightning version before treating this as a defect.
+- [!] **TR-12.3** · `research` · Replacing Lightning with a custom loop and adding CPU bfloat16 behavior is an architectural/platform change. The model/data/training path is not validated, and a CPU target is unapproved.
 - [ ] **TR-12.4** · `feature` · M · P1 · Add `--grad-accum` CLI flag (currently `train.py` doesn't accept it).
 - [ ] **TR-12.5** · `feature` · M · P1 · Add `--ema` (exponential moving average of weights) for stable eval.
 - [ ] **TR-12.6** · `feature` · M · P1 · Add `--resume` flag (currently `train.py` accepts `--resume-from-checkpoint` but doesn't actually pass it correctly to the custom loop).
 - [ ] **TR-12.7** · `feature` · M · P1 · Add `--quantize` for training-aware quantization-aware training (QAT) on the Mamba backbone.
-- [ ] **TR-12.8** · `bug` · S · P0 · `train.py:50` — `get_data_loaders` returns synthetic data on missing path. Add `--strict-data` flag that raises on missing.
+- [!] **TR-12.8** · `research` · A missing root can silently select synthetic data even for a real `dataset_type`. Whether to fail fast or permit fallback changes training behavior; decide with maintainers before adding a strict-data CLI flag.
 - [ ] **TR-12.9** · `bug` · S · P0 · `models/losses.py:34` — `TODO: Implement onset_f1, pitch_ce, and velocity_mae losses` — covered in ARCH-11.6.
 
 ---
 
 # SECTION 13 — ORPHAN / DEAD CODE (P1)
 
-- [ ] **DEAD-13.1** · `refactor` · S · P1 · Remove `pretty-midi` from requirements (never imported).
-- [ ] **DEAD-13.2** · `refactor` · S · P1 · Remove `tensorrt` and `torch-trt` references from docs and configs.
-- [ ] **DEAD-13.3** · `refactor` · S · P1 · Remove the `tensorrt` install line from any docs that mention it.
-- [ ] **DEAD-13.4** · `refactor` · S · P1 · `api.py` — `import json` (line 198) is in the middle of a function; move to top. `import yaml` in `main.py:367` likewise.
-- [ ] **DEAD-13.5** · `refactor` · S · P1 · `api.py:29-30` — `ProcessingReport`, `QualityTier` imported but never used. Remove.
-- [ ] **DEAD-13.6** · `refactor` · S · P1 · `main.py:10` — `Tuple`, `List` from `typing` used only in type hints; switch to `from __future__ import annotations` + PEP 604 (`tuple[...]`, `list[...]`).
-- [ ] **DEAD-13.7** · `refactor` · S · P1 · `verify_structure.py` — emoji `✓` in `print` is fine but the file still hardcodes `check_directory_exists("data")` etc. Verify the current list matches the actual file layout post-reorg.
-- [ ] **DEAD-13.8** · `refactor` · M · P1 · `models/mamba_separator.py` — after dropping NeMo, the `input_types`/`output_types` properties become dead code. Remove.
-- [ ] **DEAD-13.9** · `refactor` · M · P1 · `models/mamba_transcriber.py` — same as DEAD-13.8.
-- [ ] **DEAD-13.10** · `refactor` · S · P1 · `mamba/` — fully relocated to `/research/mamba-ssm-reference/`. Confirm no remaining references at root.
-- [ ] **DEAD-13.11** · `refactor` · S · P1 · `model.py` — fully relocated to `/research/mamba3_per_track/per_track_processor.py`. Confirm no remaining references at root.
-- [ ] **DEAD-13.12** · `refactor` · S · P1 · `train_mamba3.py` — fully relocated. Confirm no remaining references.
-- [ ] **DEAD-13.13** · `refactor` · S · P1 · `utils/losses_mamba3.py` — fully relocated. Confirm no remaining references.
-- [ ] **DEAD-13.14** · `refactor` · S · P1 · `configs/mamba3_config.yaml` — fully relocated. Confirm no remaining references.
+- [x] **DEAD-13.1** · `refactor` · Removed unused `pretty-midi` from both root and nested requirement manifests.
+- [!] **DEAD-13.2** · `research` · The root config now labels TensorRT export keys as legacy/unimplemented, while TensorRT packages remain only in the duplicate legacy manifest. Removing all mentions from archival docs/configs is a maintainer scope decision, not an active runtime fix.
+- [!] **DEAD-13.3** · `research` · The TensorRT installation guidance lives in the duplicate legacy tree and upstream reference. Do not remove historical/vendor references as if they were root runtime dependencies; reconcile the duplicate tree first.
+- [~] **DEAD-13.4** · `refactor` · `api.py` now imports `json` at module scope. `main.py` retains local `yaml` imports for configuration loading/CLI startup; moving them globally is optional and could change import behavior.
+- [x] **DEAD-13.5** · `refactor` · Removed the unused `ProcessingReport`/`QualityTier` imports from `api.py`.
+- [ ] **DEAD-13.6** · `refactor` · S · P1 · `main.py` uses `Tuple`/`List` in annotations; converting to built-in generic syntax is a style-only cleanup, not a runtime defect.
+- [x] **DEAD-13.7** · `test` · `verify_structure.py` was run successfully and its expected paths match the current root/research layout; it does not validate runtime behavior.
+- [!] **DEAD-13.8** · `research` · Root `MambaSeparator` still subclasses NeMo's `NeuralModule` and uses NeMo type-checking. Removing this requires an approved architecture/dependency decision.
+- [!] **DEAD-13.9** · `research` · Root `MambaTranscriber` still subclasses NeMo's `NeuralModule` and uses NeMo type-checking. Removing this requires an approved architecture/dependency decision.
+- [!] **DEAD-13.10** · `research` · The root vendor snapshot is under `/research/mamba-ssm-reference/`, but an identical tracked copy remains in `stem_midi_pro/mamba/`; duplicate retention/removal is a maintainer decision.
+- [x] **DEAD-13.11** · `refactor` · The former root `model.py` path is absent; its research implementation is `research/mamba3_per_track/per_track_processor.py`. Historical backlog references remain intentionally.
+- [x] **DEAD-13.12** · `refactor` · The former `train_mamba3.py` path is absent; the research trainer is `research/mamba3_per_track/train.py`. Historical backlog references remain intentionally.
+- [x] **DEAD-13.13** · `refactor` · The former `utils/losses_mamba3.py` path is absent; the research implementation is `research/mamba3_per_track/losses.py`. Historical backlog references remain intentionally.
+- [x] **DEAD-13.14** · `refactor` · The former `configs/mamba3_config.yaml` path is absent; the research config is `research/mamba3_per_track/config.yaml`. Historical backlog references remain intentionally.
 
 ---
 
@@ -467,27 +500,34 @@ These are the features called out in `ARCHITECTURE.md` as designed but not yet b
 - [ ] **DAW-14.2.1** · `feature` · XL · P2 · Reaper ReaScript that wraps the API.
 - [ ] **DAW-14.2.2** · `feature` · XL · P2 · Ableton Max for Live device.
 
-## 14.3 Sprint 4 — Monetization
+## 14.3 Historical monetization proposals
 
-- [ ] **MON-14.3.1** · `feature` · L · P2 · Stripe integration for the "$4.99 human review" upsell (per `quality_gates.route_by_quality` COMPLEX tier).
-- [ ] **MON-14.3.2** · `feature` · M · P2 · License-key issuance: when a company buys a paid license (above $1M revenue), issue a signed JWT and serve it via `/license/activate`. Add middleware that checks the JWT and allows >1 concurrent request.
+<!-- STATUS: research -->
 
----
-
-# SECTION 15 — DEFINITION OF DONE (per item)
-
-A TODO is "done" only when **all** of the following are true:
-
-1. Code is written and committed on a feature branch.
-2. Unit tests pass: `make test-cpu`.
-3. Lint passes: `make lint` (ruff + black + mypy).
-4. The relevant docs are updated (README.md, ARCHITECTURE.md, API_DOCUMENTATION.md).
-5. `SPDX-License-Identifier: PolyForm-Small-Business-1.0.0` header is on the new/modified `.py` file.
-6. The item is checked off in this TODO.md as part of the PR description.
+- [!] **MON-14.3.1** · `research` · Stripe integration for the "$4.99 human review" proposal is not approved; no matching service exists and the current Apache-2.0 license has no commercial restriction.
+- [!] **MON-14.3.2** · `research` · License-key/JWT issuance and concurrency entitlements conflict with the current Apache-2.0 license and have no approved product/payment requirements. Do not implement without owner/legal approval.
 
 ---
 
-# SECTION 16 — SPRINT PLAN (PROPOSED)
+# SECTION 15 — HISTORICAL DEFINITION-OF-DONE PROPOSAL
+
+<!-- STATUS: research -->
+
+The following is not current repository policy: `make test-cpu`, `make lint`,
+ruff, mypy, and signed-off commits are not configured or verified in this
+checkout. For changes in this audit, use the available checks documented in
+`DEVELOPMENT_GUIDE.md`; do not claim tests passed when dependencies are absent.
+If SPDX headers are added, they must match the current Apache-2.0 license.
+
+---
+
+# SECTION 16 — HISTORICAL SPRINT PLAN
+
+<!-- STATUS: research -->
+
+These estimates and sprint contents were not approved or re-estimated after
+repository history diverged. In particular, the CPU-only/Python 3.13,
+production-hardening, and monetization assumptions remain unverified.
 
 ## Sprint 1 (3 days) — Stop the bleeding
 - Section 1.1 (R-1.1.x) — move files to /research
@@ -517,20 +557,24 @@ A TODO is "done" only when **all** of the following are true:
 
 ---
 
-# SECTION 17 — AUDIT CHECKLIST CLOSEOUT
+# SECTION 17 — CURRENT AUDIT CLOSEOUT
 
-When all `[ ]` items above are `[x]`, run a final audit:
+<!-- STATUS: in progress -->
 
-- [ ] **AUDIT-17.1** · `infra` · M · P0 · `find . -name "*.py" -not -path "./research/*" -not -path "./venv/*" | xargs wc -l` — total LOC for production code.
-- [ ] **AUDIT-17.2** · `test` · M · P0 · `pytest --cov=. --cov-fail-under=80` — coverage ≥ 80%.
-- [ ] **AUDIT-17.3** · `docs` · M · P0 · `grep -r "TODO\|FIXME\|XXX\|HACK\|NotImplemented" --include="*.py" .` returns 0 matches in production code.
-- [ ] **AUDIT-17.4** · `sec` · S · P0 · `pip-audit -r requirements.txt -r requirements-dev.txt` — 0 known CVEs in production deps.
-- [ ] **AUDIT-17.5** · `docs` · S · P0 · `grep -r "aspirational\|placeholder\|stub\|dummy\|fake" --include="*.md" .` — verify the only remaining matches are in `user_content/landing_page.md` and the explicit "we will not implement this" notes.
-- [ ] **AUDIT-17.6** · `perf` · M · P0 · `python -c "from main import StemMidiModel; m = StemMidiModel(cfg); import time; t=time.time(); m.process_audio_file('test_1sec.wav'); print(time.time()-t)"` on reference i5 hardware — measure and document.
-- [ ] **AUDIT-17.7** · `docs` · S · P0 · Update this `TODO.md` with a "Completed" stamp at the top and a `CHANGELOG.md` entry referencing the final commit.
+This section's original completion criteria were not feasible or valid as
+written (the test suite requires unavailable packages, there is no declared
+CPU reference target, and some grep criteria included intentional caveats).
+
+- [~] **AUDIT-17.1** · `infra` · Root entrypoints are identified in `README.md` and `AGENTS.md`; source/test counts should be scoped to root first-party code and exclude research, vendor, and the legacy duplicate. The duplicate-tree retention decision remains with maintainers.
+- [!] **AUDIT-17.2** · `test` · `pytest` is not installed in the review environment; no test execution or coverage result can be claimed.
+- [!] **AUDIT-17.3** · `research` · A zero-marker requirement is not a valid acceptance criterion: intentional TODOs document unimplemented/high-risk work. Inventory and classify them instead of deleting markers blindly.
+- [!] **AUDIT-17.4** · `sec` · No dependency lockfile or `requirements-dev.txt` exists and the dependency audit was not run. Resolve an install set and run a current vulnerability scan before release.
+- [~] **AUDIT-17.5** · `docs` · Root product copy was revised and duplicate-tree docs/templates now carry research/archival notices. The PRD remains explicitly aspirational and its old Part III is historical; treat any matching terms in context, not as a zero-hit goal.
+- [!] **AUDIT-17.6** · `research` · No supported CPU target, trained checkpoint, valid test audio, or working end-to-end inference was available; do not publish a CPU latency figure.
+- [!] **AUDIT-17.7** · `research` · Do not stamp this work complete or create a release changelog until maintainers reconcile the GitHub `v0.1.0` release description with this checkout and confirm version lineage; local history is shallow/grafted and contains no matching tag.
 
 ---
 
-*This TODO.md is the source of truth for the Stem+MIDI Pro production-readiness effort. It is intentionally large. The Apache License 2.0 applies to all code produced under it. Contributions are accepted under the same license via signed-off commits.*
+*This file is an unreconciled historical backlog, not the current source of truth or an approved production-readiness plan. The root `ARCHITECTURE.md` and source describe the current prototype. See the status notes above before acting on any item.*
 
-*Last updated: 2026-06-02*
+*Status reconciled for this audit: 2026-10-08*

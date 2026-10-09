@@ -1,5 +1,11 @@
 # Stem+MIDI Pro - Complete Implementation Summary
 
+<!-- STATUS: research -->
+
+> **Legacy duplicate tree — not canonical.** This historical summary contains
+> stale file inventories and unverified feature claims. Use the root
+> `SUMMARY.md` for the current checkout.
+
 This document summarizes all files created for the Stem+MIDI Pro implementation based on the original specification.
 
 ## 📁 Complete File Structure

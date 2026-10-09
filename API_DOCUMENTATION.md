@@ -1,309 +1,149 @@
-# Stem+MIDI Pro API Documentation
+# API documentation
 
-## Overview
+<!-- STATUS: in progress -->
 
-The Stem+MIDI Pro API provides a RESTful interface for accessing the audio processing capabilities of the Stem+MIDI Pro service. Built with FastAPI, it offers automatic API documentation, high performance, and easy integration.
+This describes the checked-in FastAPI wrapper, not a hosted or production
+service. The model stack and processing path have not been validated end to
+end; see [Architecture](ARCHITECTURE.md). The API has no `/api/v1` prefix.
 
-## Base URL
+## Base URL and routes
 
-```
-/api/v1
-```
+When run locally on the default port, the base URL is `http://localhost:8000`.
+The routes are:
 
-All endpoints are prefixed with `/api/v1` in a production deployment. For simplicity in this documentation, we'll show the base paths.
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Returns 200 when the global model is loaded; otherwise 503. |
+| `GET` | `/model-info` | Returns loaded model configuration; otherwise 503. |
+| `POST` | `/process` | Accepts a multipart upload and returns a ZIP response. |
+| `GET` | `/templates` | Lists Markdown files under `user_content/`. |
+| `POST` | `/render-template` | Renders a named template. The current function signature uses `template_name` as a query parameter and accepts an optional `variables` dictionary. |
 
-## Authentication
+FastAPI's interactive documentation is available at `/docs` when the
+application starts successfully.
 
-Currently, the API does not implement authentication. In a production environment, you should add appropriate authentication middleware (e.g., API keys, JWT tokens) based on your security requirements.
+## Authentication, CORS, and operational limits
 
-## Rate Limiting
+Authentication is optional. If `API_KEY` is set, `/process`, `/templates`,
+and `/render-template` require the `X-API-Key` header. If it is unset, those
+routes are unauthenticated. `/health` and `/model-info` are unauthenticated.
+There is no rate limiter or concurrency cap.
 
-Rate limiting is not implemented in the base API. Consider adding it via middleware or using a reverse proxy (NGINX, Traefik) in production.
+`CORS_ORIGINS` is a comma-separated list. Its default is
+`http://localhost:3000,http://localhost:5173`. Setting it to `*` enables all
+origins and disables credentialed CORS; a specific allowlist enables
+credentials.
 
-## Endpoints
+`POST /process` currently enforces:
 
-### Health Check
+- Filename suffix: `.wav`, `.flac`, or `.mp3`.
+- Maximum duration: 600 seconds.
+- Accepted sample rates: 44,100 Hz or 48,000 Hz. Other rates are rejected by
+  validation; they are not resampled by the API validation step.
+- Maximum uploaded file bytes: `MAX_UPLOAD_BYTES`, default 50 MiB. The handler
+  counts bytes while reading the parsed `UploadFile`, and also checks
+  `Content-Length` with 1 MiB allowance for multipart overhead. Because FastAPI
+  parses the multipart body before invoking this endpoint, these checks are not
+  a pre-parser/ASGI request-body limit. Enforce a total body cap at a trusted
+  reverse proxy or server boundary before public deployment.
+- Bit depth is inspected and logged as a warning when outside the preferred
+  16/24-bit range; it is not a hard rejection criterion.
 
-```
-GET /health
-```
+The API reads the upload, writes it to a named temporary file for processing,
+and attempts to unlink that file in a `finally` block. This is not secure
+media erasure and should not be described as in-memory-only processing or a
+24-hour retention guarantee. Concurrent requests can each consume upload
+memory and model resources.
 
-Check if the service is healthy and the model is loaded.
+## Process audio
 
-**Response:**
-```json
-{
-  "status": "healthy",
-  "model_loaded": true
-}
-```
+### Request
 
-**Responses:**
-- `200 OK`: Service is healthy
-- `503 Service Unavailable`: Model not loaded
-
-### Process Audio
-
-```
-POST /process
-```
-
-Upload an audio file to extract stems and generate MIDI transcription.
-
-**Request:**
-- `file`: Audio file (multipart/form-data)
-  - Supported formats: `.wav`, `.flac`, `.mp3`
-  - Maximum duration: 10 minutes
-  - Supported sample rates: 44.1 kHz, 48 kHz
-  - Supported bit depths: 16-bit, 24-bit (flexible on input)
-
-**Response:**
-- `200 OK`: Returns a ZIP file containing:
-  - `guitar_stem.wav` - Separated guitar stem
-  - `bass_stem.wav` - Separated bass stem
-  - `guitar.mid` - Guitar MIDI transcription
-  - `bass.mid` - Bass MIDI transcription
-  - `processing_report.json` - Quality metrics and metadata
-- `400 Bad Request`: Invalid file format, duration, or sample rate
-- `503 Service Unavailable`: Model not loaded
-- `500 Internal Server Error`: Processing failed
-
-**Example using curl:**
 ```bash
 curl -X POST "http://localhost:8000/process" \
-     -F "file=@/path/to/audio.wav" \
-     -o output.zip
+  -H "X-API-Key: $API_KEY" \
+  -F "file=@/path/to/audio.wav" \
+  -o output.zip
 ```
 
-**Example using Python requests:**
-```python
-import requests
+The header is required only when `API_KEY` is configured.
 
-response = requests.post(
-    "http://localhost:8000/process",
-    files={"file": open("audio.wav", "rb")}
-)
+### Response
 
-if response.status_code == 200:
-    with open("output.zip", "wb") as f:
-        f.write(response.content)
-else:
-    print(f"Error: {response.status_code}")
-    print(response.json())
-```
+On success, the endpoint returns `application/zip` with:
 
-### Get Model Information
+- `guitar_stem.wav`
+- `bass_stem.wav`
+- `guitar.mid`
+- `bass.mid`
+- `processing_report.json`
 
-```
-GET /model-info
-```
+The `bass.mid` file is currently generated from the same event stream as
+`guitar.mid`; it is not a separate bass transcription. MIDI output uses a fixed
+120 BPM tempo and a 1/16-note default duration because note durations are not
+predicted.
 
-Retrieve information about the currently loaded model.
+The report JSON currently includes:
 
-**Response:**
-```json
-{
-  "model_name": "stem_midi_mamba_v1",
-  "audio_config": {
-    "sample_rate": 44100,
-    "n_fft": 2048,
-    "hop_length": 512,
-    "n_mels": 80,
-    "chunk_duration_sec": 2.0,
-    "overlap_ratio": 0.5
-  },
-  "separator_config": {
-    "d_model": 768,
-    "n_layer": 12,
-    "d_state": 16,
-    "d_conv": 4,
-    "expand": 2
-  },
-  "transcriber_config": {
-    "d_model": 512,
-    "n_layer": 8,
-    "d_state": 12,
-    "onset_head_dim": 64,
-    "pitch_vocab_size": 128,
-    "velocity_bins": 128,
-    "expression_heads": ["bend", "vibrato", "slide"],
-    "onset_threshold": 0.5
-  },
-  "training_config": {
-    "precision": "fp8",
-    "gradient_checkpointing": true
-  },
-  "quality_gates": {
-    "studio_confidence_threshold": 0.85,
-    "draft_confidence_threshold": 0.70,
-    "min_confidence": 0.6,
-    "min_si_sdr": 20.0
-  }
-}
-```
+| Field | Meaning in the current code |
+| --- | --- |
+| `si_sdr` | A spectral-centroid separation heuristic, not SI-SDR. |
+| `phase_coherence` | A learned phase-head score, not a measured coherence metric. |
+| `avg_confidence` | Mean output of an uncalibrated confidence head. |
+| `artifact_flags` | Basic heuristic flags. |
+| `low_confidence_notes` | Currently derived from low-confidence frames, not reliably counted notes. |
+| `quality_tier` | Studio/draft/complex classification based on confidence and the `si_sdr` field; artifact flags do not currently force the complex tier. |
 
-**Responses:**
-- `200 OK`: Model information returned
-- `503 Service Unavailable`: Model not loaded
+These names and scores should not be used as validated quality measurements.
 
-## Data Models
+### Errors
 
-### Processing Report
+The endpoint can return:
 
-The `processing_report.json` file in the response ZIP contains:
+- `400` for unsupported suffix, invalid audio, duration, or sample rate.
+- `401` when API-key authentication is enabled and the key is absent or wrong.
+- `413` when the configured file-size limit is exceeded.
+- `503` when the model is not loaded.
+- `500` for an unhandled processing/packaging error.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `si_sdr` | float | Signal-to-Distortion Ratio estimate (dB) |
-| `phase_coherence` | float | Phase coherence score between stems (0-1) |
-| `avg_confidence` | float | Average confidence of MIDI transcription (0-1) |
-| `artifact_flags` | list[str] | Detected artifacts (e.g., ["clipping", "noise_floor"]) |
-| `low_confidence_notes` | int | Number of MIDI notes below confidence threshold |
-| `quality_tier` | string | Overall quality assessment ("studio", "draft", or "complex") |
+Error details are returned in FastAPI's `{"detail": "..."}` format. The
+current implementation includes exception text in some `500` responses; do
+not assume those messages are sanitized for public deployment.
 
-### Quality Tiers
+## Model information and startup configuration
 
-The service uses a three-tier quality system:
+The model is loaded during FastAPI startup. Configuration is supplied by:
 
-1. **Studio Quality** (`confidence ≥ 0.85` AND `SI-SDR ≥ 20dB`)
-   - Ready for professional use
-   - Direct download without editing
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `MODEL_CONFIG_PATH` | `configs/model_config.yaml` | YAML model configuration. |
+| `MODEL_CHECKPOINT_PATH` | unset | Optional model checkpoint. If set, the file must exist. If unset, the model is randomly initialized. |
+| `API_KEY` | unset | Optional key for protected routes. |
+| `CORS_ORIGINS` | `http://localhost:3000,http://localhost:5173` | Comma-separated CORS origins; `*` disables credentials. |
+| `MAX_UPLOAD_BYTES` | `52428800` | Maximum upload file bytes (50 MiB). |
+| `PORT` | `8000` | Port used by `python api.py`; when launching `uvicorn` directly, pass its port on the command line. |
 
-2. **Draft Quality** (`0.70 ≤ confidence < 0.85`)
-   - Good starting point requiring minor edits
-   - Prompts user to use the MIDI editor
-
-3. **Complex Material** (`confidence < 0.70` OR artifact flags present)
-   - Challenging material requiring special handling
-   - Offers options: raw download, human review, or refund
-
-## Error Responses
-
-All error responses follow this format:
-```json
-{
-  "detail": "Error message describing the issue"
-}
-```
-
-Common HTTP status codes:
-- `400 Bad Request`: Invalid input (file format, duration, etc.)
-- `404 Not Found`: Endpoint does not exist
-- `405 Method Not Allowed`: Wrong HTTP method
-- `413 Payload Too Large`: File exceeds size limits
-- `500 Internal Server Error`: Unexpected server error
-- `503 Service Unavailable`: Service temporarily unavailable (e.g., model loading)
-
-## Performance Characteristics
-
-### Latency Targets
-- **Hop latency**: <5ms (for streaming applications)
-- **Total separation**: <2 seconds (for 3-minute track)
-- **MIDI transcription**: <4 seconds (for 3-minute track)
-- **Total processing**: <6 seconds (end-to-end for 3-minute track)
-
-### Throughput
-- **Batch size**: 1 (optimized for low-latency streaming)
-- **Concurrent requests**: Depends on GPU memory and instance type
-- **Recommended instance**: NVIDIA A100 or H100 for production
-
-## Security Considerations
-
-### File Handling
-- All files are processed in-memory only
-- Temporary files are securely deleted after processing
-- Original files are not stored permanently
-- Output files are available only for the duration of the request
-
-### Data Privacy
-- Audio files are not persisted beyond processing
-- No personal data is collected or stored
-- Processing occurs in ephemeral containers
-- GDPR-compliant by design (data minimization)
-
-## Deployment Notes
-
-### Environment Variables
-The API can be configured using environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MODEL_CONFIG_PATH` | Path to model configuration YAML | `configs/model_config.yaml` |
-| `MODEL_CHECKPOINT_PATH` | Path to model checkpoint (optional) | None |
-| `PORT` | Port to bind the API server | `8000` |
-
-### Docker Deployment
-The API is designed to run in the provided Docker container:
+Run from the repository root:
 
 ```bash
-docker build -t stem-midi-pro .
-docker run -p 8000:8000 stem-midi-pro
+uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-### Kubernetes Deployment
-For production Kubernetes deployments, consider:
-- Resource requests/limits based on GPU memory
-- Liveness and readiness probes using the `/health` endpoint
-- Horizontal pod autoscaling based on CPU/GPU utilization
-- Persistent volumes for model checkpoints (if needed)
+The full PyTorch/NeMo/Mamba-SSM stack is required to load the model. There is
+no production-ready container guarantee; the Dockerfile has not been built in
+the review environment. The API dependency bounds are broad and unpinned; see
+[SECURITY.md](SECURITY.md) for unresolved multipart/Starlette advisory ranges.
 
-## Client Libraries
+## Versioning status
 
-While the API can be called directly with any HTTP client, here are examples for common languages:
+`api.py` currently hard-codes OpenAPI version `1.0.0`, but the repository has
+no package version source or checked-in changelog. The GitHub `v0.1.0` release
+description covers product areas absent from this checkout. This local clone is
+shallow/grafted and contains no matching tag, so release lineage cannot be
+established here. Maintainers must reconcile release history before treating
+either version as authoritative.
 
-### JavaScript (Fetch API)
-```javascript
-async function processAudio(file) {
-  const formData = new FormData();
-  formData.append('file', file);
-  
-  const response = await fetch('/process', {
-    method: 'POST',
-    body: formData
-  });
-  
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-  
-  const blob = await response.blob();
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'output.zip';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-```
-
-### Python (Requests)
-See the example in the POST /process section above.
-
-### cURL
-See the example in the POST /process section above.
-
-## Versioning
-
-The API follows semantic versioning. Backward-incompatible changes will increment the major version number.
-
-Current version: `1.0.0`
-
-## Changelog
-
-### v1.0.0
-- Initial release
-- Stem separation using Mamba-SSM
-- MIDI transcription with expression detection
-- Confidence-based quality routing
-- RESTful API with FastAPI
-- Docker containerization
-- Canadian artist dataset support
-
-## Support
-
-For issues, questions, or feature requests, please refer to the project documentation or contact the maintainers.
-
----
-*API Documentation Generated: 2026-05-31*
-*Stem+MIDI Pro: Studio-grade stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*
+<!-- STATUS: research -->
+Latency targets, professional-quality claims, refunds/human review, privacy or
+regulatory compliance, and browser/editor behavior are product requirements,
+not implemented or measured API guarantees.

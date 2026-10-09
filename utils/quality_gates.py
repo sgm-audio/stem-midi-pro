@@ -3,9 +3,10 @@ from dataclasses import dataclass
 from typing import List, Dict, Any
 
 class QualityTier(Enum):
-    STUDIO = "studio"    # Confidence ≥0.85, SI-SDR ≥20dB
-    DRAFT = "draft"      # 0.70 ≤ confidence < 0.85
-    COMPLEX = "complex"  # <0.70 or artifact flags
+    # Names and thresholds are prototype heuristics, not validated quality claims.
+    STUDIO = "studio"    # Confidence threshold + the `si_sdr` proxy threshold
+    DRAFT = "draft"      # Intermediate confidence threshold
+    COMPLEX = "complex"  # Below the draft confidence threshold
 
 @dataclass
 class ProcessingReport:
@@ -32,8 +33,11 @@ class ProcessingReport:
             return QualityTier.COMPLEX
 
 def route_by_quality(report: ProcessingReport) -> Dict[str, Any]:
-    """
-    Returns user-facing routing decision + UI prompts.
+    """Return a prototype routing dictionary.
+
+    The action labels and copy are stale draft UX: this repository has no web
+    editor, human-review service, payment/refund workflow, or corresponding UI.
+    Do not expose these values as a live product offer without owner review.
     """
     if report.quality_tier == QualityTier.STUDIO:
         return {

@@ -1,8 +1,9 @@
-# Core Dependencies
+# Prototype runtime dependencies
+# No lockfile is checked in; resolve torch/NeMo/Mamba versions for your platform.
 torch>=2.0.0
 pytorch-lightning>=2.0.0
 nemo-toolkit[all]>=2.0.0
-mamba-ssm>=1.0.0  # Optional: requires NVIDIA GPU + CUDA
+mamba-ssm>=1.0.0  # Required by the model modules; installation is platform-specific.
 
 # Audio Processing
 librosa>=0.10.0
@@ -11,12 +12,11 @@ torchaudio>=2.0.0
 
 # MIDI Processing
 mido>=1.2.0
-pretty-midi>=0.2.9
 
-# Web/API (for production deployment)
+# Web/API
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
-python-multipart>=0.0.6
+python-multipart>=0.0.18  # Historical floor; see SECURITY.md for newer advisory ranges
 
 # Configuration & Utilities
 pyyaml>=6.0

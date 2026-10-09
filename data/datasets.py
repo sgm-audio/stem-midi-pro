@@ -1,24 +1,18 @@
 """
-Dataset loaders for Stem+MIDI Pro.
-Supports Slakh2100-YourMT3-16k and MUSDB18-HQ with synthetic fallback.
-The Slakh2100 / MUSDB18-HQ subsets we ship are weighted toward Canadian artists
-as part of the project mission; see config/curation policy in ARCHITECTURE.md.
+Prototype dataset adapters for Slakh2100-YourMT3-16k and MUSDB18-HQ, plus
+synthetic samples. Real-data layouts and training targets are not validated;
+no Canadian-artist curation or weighting is implemented in this module.
 """
 
 import logging
 import os
 import torch
-import torch.nn.functional as F
 import numpy as np
 import soundfile as sf
 import librosa
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, Tuple, Optional, List
-from torch import Tensor
-import json
 import random
-from pathlib import Path
-import torchaudio
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +26,9 @@ class AudioDataset(Dataset):
                  root_dir: str,
                  sample_rate: int = 44100,
                  segment_length: float = 6.0,  # seconds
-                 instruments: List[str] = ['guitar', 'bass'],
-                 augment: bool = True):
+                 instruments: Optional[List[str]] = None,
+                 augment: bool = True,
+                 force_synthetic: bool = False):
         """
         Args:
             root_dir: Path to dataset root
@@ -45,8 +40,9 @@ class AudioDataset(Dataset):
         self.root_dir = root_dir
         self.sample_rate = sample_rate
         self.segment_length = segment_length
-        self.instruments = instruments
+        self.instruments = list(instruments) if instruments is not None else ['guitar', 'bass']
         self.augment = augment
+        self.force_synthetic = force_synthetic
         
         # Validate dataset exists or create synthetic fallback
         self._validate_dataset()
@@ -60,12 +56,15 @@ class AudioDataset(Dataset):
         self.noise_level = 0.005
         
     def _validate_dataset(self):
-        """Check if dataset exists or create synthetic fallback for development."""
-        if not os.path.exists(self.root_dir):
-            logger.warning(f"Dataset not found at {self.root_dir}")
-            logger.warning("Using synthetic data for development. Replace with real Canadian artist data.")
+        """Check the dataset path or explicitly select synthetic samples."""
+        if self.force_synthetic:
+            logger.info("Using synthetic samples as requested by dataset config")
             self.synthetic = True
-            # Create a dummy file list for synthetic data
+            self.file_list = [f"synthetic_{i}" for i in range(100)]
+        elif not os.path.exists(self.root_dir):
+            logger.warning("Dataset not found at %s", self.root_dir)
+            logger.warning("Using synthetic data for development.")
+            self.synthetic = True
             self.file_list = [f"synthetic_{i}" for i in range(100)]
         else:
             self.synthetic = False
@@ -217,11 +216,11 @@ class AudioDataset(Dataset):
 
 def get_data_loaders(data_config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Create train, validation, and test data loaders for Canadian artist datasets.
+    Create train, validation, and test loaders for the configured dataset prototype.
     
     Args:
         data_config: Dictionary containing:
-            - dataset_type: 'slakh2100_yourmt3' or 'musdb18hq' or 'synthetic'
+            - dataset_type: 'slakh2100_yourmt3', 'musdb18hq', or 'synthetic'
             - root_dir: Path to dataset
             - batch_size: Batch size for training
             - num_workers: Number of DataLoader workers
@@ -232,6 +231,13 @@ def get_data_loaders(data_config: Dict) -> Tuple[DataLoader, DataLoader, DataLoa
         Tuple of (train_loader, val_loader, test_loader)
     """
     dataset_type = data_config.get('dataset_type', 'synthetic')
+    supported_dataset_types = {'slakh2100_yourmt3', 'musdb18hq', 'synthetic'}
+    if dataset_type not in supported_dataset_types:
+        raise ValueError(
+            f"Unsupported dataset_type {dataset_type!r}; "
+            f"expected one of {sorted(supported_dataset_types)}"
+        )
+
     root_dir = data_config['root_dir']
     batch_size = data_config.get('batch_size', 16)
     num_workers = data_config.get('num_workers', 4)
@@ -286,19 +292,22 @@ def get_data_loaders(data_config: Dict) -> Tuple[DataLoader, DataLoader, DataLoa
             root_dir=root_dir,
             sample_rate=sample_rate,
             segment_length=segment_length,
-            augment=True
+            augment=True,
+            force_synthetic=True,
         )
         val_dataset = AudioDataset(
             root_dir=root_dir,
             sample_rate=sample_rate,
             segment_length=segment_length,
-            augment=False
+            augment=False,
+            force_synthetic=True,
         )
         test_dataset = AudioDataset(
             root_dir=root_dir,
             sample_rate=sample_rate,
             segment_length=segment_length,
-            augment=False
+            augment=False,
+            force_synthetic=True,
         )
     
     # Create data loaders

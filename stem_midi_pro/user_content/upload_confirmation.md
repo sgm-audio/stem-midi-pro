@@ -1,10 +1,7 @@
-🎵 Processing: {{filename}} 
-• Duration: {{duration}} • Sample Rate: {{sample_rate}}Hz • Detected Genre: {{genre}}
+# Archived duplicate-tree template
 
-✅ Separation: Guitar + Bass stems (phase-coherent, {{bit_depth}}-bit WAV)
-✅ MIDI: Editable draft with confidence scores + expression data
+<!-- STATUS: research -->
 
-⏱️ Estimated time: {{estimated_time}} seconds on NVIDIA H100
-🔒 Your file is processed in-memory only; deleted after 24h
-
-[Cancel] [Proceed]
+> This legacy copy is not approved for display. Use the current
+> `user_content/upload_confirmation.md` at the repository root. The nested API
+> and its upload/retention behavior have not been reviewed for use.

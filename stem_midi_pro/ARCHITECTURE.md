@@ -1,5 +1,11 @@
 # Stem+MIDI Pro Architecture
 
+<!-- STATUS: research -->
+
+> **Legacy duplicate tree — not canonical.** This document contains unverified
+> production-architecture claims. Refer to the root `ARCHITECTURE.md` for the
+> current implementation inventory and known gaps.
+
 ## Overview
 
 Stem+MIDI Pro is a production-ready audio AI service that combines state-of-the-art source separation and audio-to-MIDI transcription using Mamba State Space Models (SSM). This document details the architectural decisions, components, and data flows.

@@ -1,6 +1,7 @@
-⚠️ By uploading, you confirm:
-• You own or have licensed rights to this audio
-• Output stems/MIDI are for personal/production use only
-• Commercial redistribution of isolated stems requires original rights holder permission
+# Archived duplicate-tree template
 
-[I Agree] [Learn More]
+<!-- STATUS: research -->
+
+> This legacy copy is not approved for display. Use the current
+> `user_content/rights_usage_prompt.md` at the repository root. The nested API
+> and its licensing/data-handling behavior have not been reviewed for use.

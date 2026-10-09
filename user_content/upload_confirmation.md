@@ -1,9 +1,16 @@
-🎵 Processing: {{filename}} ({{sample_rate}}Hz)
+# Prototype upload confirmation
 
-✅ Separation: Guitar + Bass stems (phase-coherent WAV)
-✅ MIDI: Editable draft with confidence scores + expression data
-🔒 Your file is processed in-memory only; deleted after 24h
+**File:** {{filename}}
 
-<!-- TODO: Add duration, genre, bit_depth, estimated_time once those features exist -->
+**Sample rate:** {{sample_rate}} Hz
 
-[Cancel] [Proceed]
+The local prototype may attempt to separate guitar and bass stems and create a
+guitar MIDI draft. The model path and output quality have not been validated
+end to end. Without a compatible checkpoint, the model uses random weights.
+
+Uploads are written to a temporary file during processing. The service attempts
+to remove that file afterward, but this is not secure erasure or a retention
+guarantee. Do not upload sensitive recordings to an untrusted deployment.
+
+This is development copy, not a live upload interface or processing-status
+promise.

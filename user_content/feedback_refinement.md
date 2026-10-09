@@ -1,6 +1,9 @@
-🛠️ MIDI Editor: Refine This Draft
-• Click any note to adjust pitch/timing/velocity
-• Low-confidence notes highlighted in amber
-• Use 'Snap to Grid' or 'Keep Human Feel' quantization
+# Reviewing prototype MIDI output
 
-[Save Changes] [Re-export Package] [Request Human Review]
+No in-browser MIDI editor, automatic refinement workflow, or human-review
+service is included in this repository. If a MIDI file was generated, you can
+inspect and edit it in your own DAW or MIDI editor.
+
+Pitch, timing, velocity, and note duration may be inaccurate. The current model
+does not predict note durations, and its confidence values are uncalibrated.
+Treat all output as an unverified draft.

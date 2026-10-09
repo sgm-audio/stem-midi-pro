@@ -1,6 +1,7 @@
-🔄 Stage {{current_stage}}/{{total_stages}}: {{stage_description}}
-• Detected tuning: {{tuning}}
-• Confidence: {{confidence}}% ({{confidence_level}})
-• Expression detected: {{expression_count}} {{expression_type}}{% if expression_count != 1 %}s{% endif %}
+# Archived duplicate-tree template
 
-[View live MIDI preview] [Adjust quantization settings]
+<!-- STATUS: research -->
+
+> This legacy copy is not approved for display. Use the current
+> `user_content/progress_updates.md` at the repository root. The nested API
+> and its progress-reporting behavior have not been reviewed for use.

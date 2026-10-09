@@ -1,4 +1,4 @@
-# Virtual environment
+# Virtual environments
 venv/
 .venv/
 env/
@@ -10,19 +10,41 @@ __pycache__/
 dist/
 build/
 
-# IDE
+# Test, lint, and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# IDE and editor files
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# OS
+# Operating system files
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Outputs
-outputs/
-*.nemo
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
 
-# Temp
+# Logs and temporary files
+*.log
 *.tmp
+
+# Generated model and training artifacts
+outputs/
+outputs/cache/
+data/datasets/
+*.nemo
+*.ckpt
+*.pt
+*.pth
+*.safetensors

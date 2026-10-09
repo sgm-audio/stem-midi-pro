@@ -1,0 +1,44 @@
+# Git metadata and local developer state
+.git/
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+coverage/
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# Local datasets, outputs, and model artifacts
+data/datasets/
+outputs/
+*.nemo
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Tests, documentation-only plans, research experiments, and the legacy duplicate tree
+tests/
+research/
+stem_midi_pro/
+AGENTS.md
+API_DOCUMENTATION.md
+ARCHITECTURE.md
+DEVELOPMENT_GUIDE.md
+PRD_AND_ARD.md
+README.md
+SECURITY.md
+SUMMARY.md
+TODO.md
+USER_GUIDE.md

@@ -4,7 +4,7 @@ import numpy as np
 import tempfile
 import soundfile as sf
 
-@pytest.mark.skip(reason="requires mamba_ssm (CUDA)")
+@pytest.mark.skip(reason="requires the optional PyTorch/NeMo/Mamba model stack")
 def test_load_audio_mono():
     """_load_audio should load a mono WAV file correctly."""
     from main import StemMidiModel
@@ -24,7 +24,7 @@ def test_load_audio_mono():
     assert sr == 44100
     assert len(audio) == 44100
 
-@pytest.mark.skip(reason="requires mamba_ssm (CUDA)")
+@pytest.mark.skip(reason="requires the optional PyTorch/NeMo/Mamba model stack")
 def test_load_audio_stereo_to_mono():
     """Stereo audio should be converted to mono."""
     from main import StemMidiModel
@@ -41,7 +41,7 @@ def test_load_audio_stereo_to_mono():
     
     assert audio.ndim == 1, f"Expected mono, got shape {audio.shape}"
 
-@pytest.mark.skip(reason="requires mamba_ssm (CUDA)")
+@pytest.mark.skip(reason="requires the optional PyTorch/NeMo/Mamba model stack")
 def test_load_audio_file_not_found():
     """Should raise FileNotFoundError for missing file."""
     from main import StemMidiModel

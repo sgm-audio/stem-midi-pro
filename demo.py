@@ -32,8 +32,8 @@ def main():
     
     print(f"Loaded config: {config['name']}")
     
-    # Initialize model
-    print("\nInitializing model...")
+    # Initialize the untrained prototype model
+    print("\nInitializing model with random, untrained weights (smoke test only)...")
     model = StemMidiModel(config)
     print("Model initialized successfully!")
     
@@ -59,18 +59,18 @@ def main():
     # Processing report
     report = outputs['processing_report']
     print(f"\nProcessing Report:")
-    print(f"  SI-SDR: {report.si_sdr:.1f} dB")
-    print(f"  Phase Coherence: {report.phase_coherence:.3f}")
+    print(f"  Separation proxy (si_sdr field; not SI-SDR): {report.si_sdr:.1f}")
+    print(f"  Phase-head score (not measured coherence): {report.phase_coherence:.3f}")
     print(f"  Avg Confidence: {report.avg_confidence:.0%}")
     print(f"  Artifact Flags: {report.artifact_flags}")
-    print(f"  Low Confidence Notes: {report.low_confidence_notes}")
+    print(f"  low_confidence_notes report field (not a reliable note count): {report.low_confidence_notes}")
     
-    # Quality tier
-    print(f"\nQuality Tier: {report.quality_tier.value.upper()}")
+    # Prototype heuristic tier
+    print(f"\nPrototype Heuristic Tier: {report.quality_tier.value.upper()}")
     
     # Routing decision
     routing = outputs['routing_decision']
-    print(f"\nRouting Decision:")
+    print("\nPrototype routing draft (not a live UI or service offer):")
     print(f"  Action: {routing['action']}")
     print(f"  Badge: {routing['badge']}")
     print(f"  Message: {routing['message']}")

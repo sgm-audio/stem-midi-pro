@@ -1,8 +1,7 @@
-🎯 How did Stem+MIDI Pro work for you?
-• [👍] Perfect for my workflow
-• [👌] Good draft, needed minor edits  
-• [👎] Required major fixes
-• [❓] Not what I expected
+# Archived duplicate-tree template
 
-[Optional] What genre/style was this? [Dropdown]
-[Optional] Upload your corrected MIDI to help us improve? [Anonymized, opt-in]
+<!-- STATUS: research -->
+
+> This legacy copy is not approved for display. Use the current
+> `user_content/implicit_feedback.md` at the repository root. The nested API
+> and any feedback/data-collection workflow have not been reviewed for use.

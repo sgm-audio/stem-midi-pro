@@ -1,10 +1,10 @@
 """
 Training recipe for Mamba-3 Per-Track Adaptive Filter Bank.
 
-UPDATED 2026-05-31: parallel scan in model.py removes the throughput
-bottleneck. Defaults are now tuned for cloud GPU (H100/A100/H200) with
-the parallel scan path enabled. Step rate target: 5-15 step/s at batch 16
-on A100, 15-30 step/s on H100/H200.
+Research snapshot updated 2026-05-31. Performance figures and cloud-GPU
+settings described in the original experiment notes were not benchmarked in
+this repository and are not retained as validated targets. Runtime/device
+support is unverified.
 
 Loss stack:
   - Multi-resolution STFT (auraloss) — tonal + transient accuracy

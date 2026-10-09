@@ -1,14 +1,15 @@
+import math
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from mamba_ssm import Mamba
-from nemo.core.classes import Module, typecheck
-from nemo.core.neural_types import AudioSignal, NeuralType, ChannelType, TimeType, LogitsType
+from nemo.core.classes import NeuralModule, typecheck
+from nemo.core.neural_types import AudioSignal, NeuralType, ChannelType, LogitsType
 
-class MambaTranscriber(Module):
+class MambaTranscriber(NeuralModule):
     """
-    Polyphonic audio-to-MIDI with expression detection.
-    Outputs: onset logits, pitch logits, velocity, expression CCs.
+    Prototype audio-to-MIDI prediction heads; not trained or validated.
+    Outputs onset, pitch, velocity, expression, and confidence tensors.
     """
     
     @property
@@ -26,7 +27,8 @@ class MambaTranscriber(Module):
         }
     
     def __init__(self, cfg: dict):
-        super().__init__(cfg)
+        super().__init__()
+        self.cfg = cfg
         d_model = cfg['transcriber']['d_model']
         
         # Input projection: mel spectrogram → Mamba dim
@@ -34,6 +36,17 @@ class MambaTranscriber(Module):
         self.n_fft = cfg['audio']['n_fft']
         self.hop_length = cfg['audio']['hop_length']
         self.register_buffer("mel_window", torch.hann_window(self.n_fft))
+        self.register_buffer(
+            "mel_basis",
+            self._create_mel_basis(
+                sr=cfg['audio']['sample_rate'],
+                n_fft=self.n_fft,
+                n_mels=self.n_mels,
+                fmin=0,
+                fmax=cfg['audio']['sample_rate'] // 2,
+            ),
+            persistent=False,
+        )
         self.input_proj = nn.Linear(self.n_mels, d_model)
         
         # Mamba backbone
@@ -58,7 +71,8 @@ class MambaTranscriber(Module):
         )
         self.expression_head = nn.Linear(d_model, len(cfg['transcriber']['expression_heads']))
         
-        # Confidence head: ensemble uncertainty estimation
+        # Confidence score head. Its dropout is active during training; the
+        # repeated eval path below is currently deterministic, not MC dropout.
         self.confidence_head = nn.Sequential(
             nn.Linear(d_model, 128),
             nn.Dropout(0.1),
@@ -85,10 +99,11 @@ class MambaTranscriber(Module):
         velocity = self.velocity_head(hidden)   # (B, T, 1)
         expression = torch.sigmoid(self.expression_head(hidden))  # (B, T, E)
         
-        # Confidence: Monte Carlo dropout ensemble (inference-time)
+        # This eval branch repeats the same deterministic pass because nn.Dropout
+        # is disabled in eval mode; it does not currently estimate MC uncertainty.
         if not self.training:
             conf_samples = []
-            for _ in range(5):  # 5-sample MC dropout
+            for _ in range(5):
                 conf_samples.append(self.confidence_head(hidden))
             confidence = torch.stack(conf_samples).mean(dim=0).squeeze(-1)  # (B, T)
         else:
@@ -109,15 +124,9 @@ class MambaTranscriber(Module):
         )
         mag = torch.abs(spec)  # (B, F, T)
         
-        # Convert to mel scale
-        mel_basis = self._create_mel_basis(
-            sr=self.cfg['audio']['sample_rate'],
-            n_fft=self.n_fft,
-            n_mels=self.n_mels,
-            fmin=0,
-            fmax=self.cfg['audio']['sample_rate'] // 2
-        ).to(audio.device)
-        
+        # Convert to mel scale. The filter bank is a registered buffer so it
+        # follows the model device instead of being rebuilt on every forward.
+        mel_basis = self.mel_basis.to(device=audio.device, dtype=mag.dtype)
         mel_spec = torch.matmul(mel_basis, mag)  # (B, n_mels, T)
         
         # Apply log compression
@@ -127,9 +136,10 @@ class MambaTranscriber(Module):
     
     def _create_mel_basis(self, sr, n_fft, n_mels, fmin, fmax):
         """Create mel filter bank matrix"""
-        # Mel scale boundaries
-        mel_fmin = 2595 * torch.log10(1 + fmin / 700)
-        mel_fmax = 2595 * torch.log10(1 + fmax / 700)
+        # Mel scale boundaries are scalar configuration values, so use Python's
+        # scalar logarithm rather than torch.log10(), which requires a tensor.
+        mel_fmin = 2595 * math.log10(1 + fmin / 700)
+        mel_fmax = 2595 * math.log10(1 + fmax / 700)
         
         # Equally spaced in mel scale
         mel_points = torch.linspace(mel_fmin, mel_fmax, n_mels + 2)

@@ -1,5 +1,11 @@
 # Development Guide for Stem+MIDI Pro
 
+<!-- STATUS: research -->
+
+> **Legacy duplicate tree — not canonical.** Its setup commands and dependency
+> instructions have not been checked; use the root `DEVELOPMENT_GUIDE.md` for
+> the current prototype.
+
 This guide provides information for developers who want to contribute to the Stem+MIDI Pro project, understand the codebase, or extend its functionality.
 
 ## Table of Contents

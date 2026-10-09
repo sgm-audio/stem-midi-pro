@@ -1,19 +1,18 @@
 import torch
 import torch.nn as nn
 from mamba_ssm import Mamba
-from nemo.core.classes import Module, typecheck
-from nemo.core.neural_types import AudioSignal, NeuralType, ChannelType, TimeType
+from nemo.core.classes import NeuralModule, typecheck
+from nemo.core.neural_types import AudioSignal, NeuralType, ChannelType
 
 
-class MambaSeparator(Module):
+class MambaSeparator(NeuralModule):
     """
-    Phase-coherent guitar/bass separation using Mamba SSM.
+    Mamba-based guitar/bass separation prototype.
 
-    NOTE: Streaming inference with SSM state caching is not yet implemented.
-    The original prototype used activation concatenation (not real SSM state),
-    which was structurally incorrect. See C-2.5 in TODO.md for the full design
-    when real SSM state caching is added. For now, each forward call is
-    independent — overlap-add in main.py works at the waveform level only.
+    Phase-aware outputs are not a validated phase-coherent separation method.
+    Streaming inference with SSM state caching is not implemented; each
+    forward call is independent. The separate streaming helper in ``main.py``
+    currently passes an unsupported ``state_cache`` argument.
     """
 
     @property
@@ -28,15 +27,16 @@ class MambaSeparator(Module):
             "guitar_stem": NeuralType(('B', 'C', 'T'), AudioSignal()),
             "bass_stem": NeuralType(('B', 'C', 'T'), AudioSignal()),
             "residual": NeuralType(('B', 'C', 'T'), AudioSignal()),
-            "new_state_cache": typecheck.Optional(NeuralType(('B', 'L', 'D'), ChannelType())),
-            "metrics": NeuralType(('B'), ChannelType()),
+            "new_state_cache": NeuralType(('B', 'L', 'D'), ChannelType(), optional=True),
+            "metrics": NeuralType(('B', 'C'), ChannelType()),
         }
 
     def __init__(self, cfg: dict):
-        super().__init__(cfg)
+        super().__init__()
         self.hop_length = cfg['audio']['hop_length']
         self.n_fft = cfg['audio']['n_fft']
         d_model = cfg['separator']['d_model']
+        self.d_model = d_model
 
         # STFT encoder (fixed, no grad)
         self.register_buffer("window", torch.hann_window(self.n_fft))
@@ -92,15 +92,15 @@ class MambaSeparator(Module):
         # Project to Mamba dim: (B, T_f, F) → (B, T_f, D)
         x = mag.transpose(1, 2)                     # (B, T_f, F)
         hidden = self.input_proj(x)                 # (B, T_f, D)
-        assert hidden.shape[-1] == self.mamba_blocks[0].d_model, (
-            f"hidden dim {hidden.shape[-1]} != d_model {self.mamba_blocks[0].d_model}"
+        assert hidden.shape[-1] == self.d_model, (
+            f"hidden dim {hidden.shape[-1]} != d_model {self.d_model}"
         )
 
         # Mamba blocks
         for block in self.mamba_blocks:
             hidden = block(hidden)
 
-        # Generate masks + phase coherence score
+        # Generate source masks and an uncalibrated auxiliary phase-head score
         masks = {k: head(hidden) for k, head in self.mask_heads.items()}  # (B, T_f, n_fft//2+1)
         phase_score = self.phase_head(hidden.mean(dim=1))  # (B, 1)
 

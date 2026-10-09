@@ -1,8 +1,12 @@
-🔄 Processing {{filename}} ...
-<!-- TODO: Replace with real streaming progress once pipeline supports stage tracking
-     Fields that don't exist yet: current_stage, total_stages, stage_description,
-     tuning, confidence_level, expression_count, expression_type -->
-• Confidence: {{avg_confidence}}
-• Low-confidence notes: {{low_confidence_notes}}
+# Prototype processing status
 
-[View live MIDI preview] [Adjust quantization settings]
+This prototype does not report live processing stages or provide a live MIDI
+preview. The following values can be rendered after processing only when the
+caller supplies them:
+
+- File: {{filename}}
+- Confidence-head average (uncalibrated): {{avg_confidence}}
+- `low_confidence_notes` report field (currently frame-based, not a reliable
+  count of notes): {{low_confidence_notes}}
+
+These values are model heuristics, not validated quality measurements.

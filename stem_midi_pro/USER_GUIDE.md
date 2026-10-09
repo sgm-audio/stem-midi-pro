@@ -1,5 +1,11 @@
 # Stem+MIDI Pro User Guide
 
+<!-- STATUS: research -->
+
+> **Legacy duplicate tree — not canonical.** This copy describes unverified
+> hosted-product behavior. Use the root `USER_GUIDE.md` for cautious notes on
+> the current local prototype.
+
 ## Introduction
 
 Stem+MIDI Pro is a professional audio AI service that separates audio recordings into individual instrument stems (guitar and bass) and transcribes them into editable MIDI files. This guide will help you get the best results from the service, whether you're a musician, producer, audio engineer, or hobbyist.

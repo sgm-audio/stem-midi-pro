@@ -3,31 +3,28 @@ FastAPI API for Stem+MIDI Pro service
 Provides endpoints for audio processing, health checks, and file downloads.
 """
 
+import io
+import json
 import logging
 import os
-import io
 import tempfile
-
-import mido
-from mido import MidiFile, MidiTrack, MetaMessage, Message
 import zipfile
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
-import torch
-import numpy as np
 import soundfile as sf
-from fastapi import Depends, FastAPI, File, Header, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from mido import Message, MetaMessage, MidiFile, MidiTrack
 import uvicorn
 
-logger = logging.getLogger(__name__)
+from utils.template_engine import list_templates, render_template
 
-# Import our model and utilities
-from main import StemMidiModel
-from utils.quality_gates import ProcessingReport, QualityTier
-from utils.template_engine import render_template, list_templates
+if TYPE_CHECKING:
+    from main import StemMidiModel
+
+logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -55,7 +52,7 @@ app.add_middleware(
 )
 
 # Global model instance
-model: Optional[StemMidiModel] = None
+model: Optional["StemMidiModel"] = None
 model_config: Optional[Dict] = None
 
 # Supported audio formats and constraints
@@ -75,30 +72,37 @@ async def require_api_key_if_configured(x_api_key: Optional[str] = Header(defaul
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
-def load_model() -> StemMidiModel:
-    """Load the StemMidiModel from configuration and checkpoint."""
+def load_model() -> "StemMidiModel":
+    """Load the StemMidiModel from configuration and an optional checkpoint."""
     global model_config
-    
-    # Load configuration
+
     config_path = os.getenv("MODEL_CONFIG_PATH", "configs/model_config.yaml")
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Model config not found at {config_path}")
-    
-    import yaml
-    with open(config_path, 'r') as f:
-        model_config = yaml.safe_load(f)
-    
-    # Initialize model
-    model = StemMidiModel(model_config)
-    
-    # Load checkpoint if provided
+
     checkpoint_path = os.getenv("MODEL_CHECKPOINT_PATH")
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        logger.info(f"Loading checkpoint from {checkpoint_path}")
-        model = model.load_from_checkpoint(checkpoint_path)
-    
-    model.eval()
-    return model
+    if checkpoint_path and not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
+
+    import yaml
+
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        model_config = yaml.safe_load(config_file)
+
+    # Import the heavyweight model stack only when startup actually loads a model.
+    from main import StemMidiModel
+
+    loaded_model = StemMidiModel(model_config)
+    if checkpoint_path:
+        logger.info("Loading checkpoint from %s", checkpoint_path)
+        loaded_model = loaded_model.load_from_checkpoint(checkpoint_path)
+    else:
+        logger.warning(
+            "MODEL_CHECKPOINT_PATH is unset; API outputs will use random, untrained weights"
+        )
+
+    loaded_model.eval()
+    return loaded_model
 
 
 @app.on_event("startup")
@@ -199,9 +203,9 @@ def create_response_zip(outputs: Dict) -> io.BytesIO:
         sf.write(bass_buffer, bass_stem, model_config['audio']['sample_rate'], format='WAV')
         zip_file.writestr("bass_stem.wav", bass_buffer.getvalue())
         
-        # Add MIDI files (we need to convert metadata to actual MIDI)
-        # For now, we'll create placeholder MIDI files
-        # In a full implementation, we would use midi_utils to convert to MIDI
+        # Serialize the available event metadata. Note that the current pipeline
+        # supplies the guitar event stream for both tracks and does not predict
+        # note durations; create_placeholder_midi() uses fixed defaults.
         midi_data = outputs["midi"]
         
         # Guitar MIDI
@@ -213,7 +217,6 @@ def create_response_zip(outputs: Dict) -> io.BytesIO:
         zip_file.writestr("bass.mid", bass_midi)
         
         # Add processing report
-        import json
         report = {
             "si_sdr": float(outputs["report"].si_sdr),
             "phase_coherence": float(outputs["report"].phase_coherence),
@@ -229,49 +232,62 @@ def create_response_zip(outputs: Dict) -> io.BytesIO:
 
 
 def create_placeholder_midi(midi_data: Dict, stem_type: str) -> bytes:
-    """Convert MIDI metadata events to a real MIDI file using mido."""
-    mid = MidiFile(ticks_per_beat=480)
+    """Convert MIDI metadata events to a MIDI file using a fixed 120 BPM tempo.
+
+    Event onset frames are converted to absolute ticks, then serialized as MIDI
+    delta times. The model does not currently predict note durations, so notes
+    use a 1/16-note default duration.
+    """
+    ticks_per_beat = 480
+    tempo = 500_000  # 120 BPM, in microseconds per quarter note
+    mid = MidiFile(ticks_per_beat=ticks_per_beat)
     track = MidiTrack()
     mid.tracks.append(track)
 
-    # Tempo: 120 BPM = 500000 microseconds per quarter note
-    track.append(MetaMessage('set_tempo', tempo=500000))
-    track.append(MetaMessage('time_signature', numerator=4, denominator=4))
-    track.append(MetaMessage('track_name', name=f'{stem_type} transcription'))
-    track.append(MetaMessage('instrument_name', name='Electric Guitar' if stem_type == 'guitar' else 'Electric Bass'))
-    track.append(MetaMessage('marker', text=f'{stem_type.capitalize()} — Stem+MIDI Pro'))
+    track.append(MetaMessage("set_tempo", tempo=tempo))
+    track.append(MetaMessage("time_signature", numerator=4, denominator=4))
+    track.append(MetaMessage("track_name", name=f"{stem_type} transcription"))
+    instrument = "Electric Guitar" if stem_type == "guitar" else "Electric Bass"
+    track.append(MetaMessage("instrument_name", name=instrument))
+    track.append(MetaMessage("marker", text=f"{stem_type.capitalize()} — Stem+MIDI Pro"))
 
-    # Convert onset_frames to ticks
-    hop_length = 512
-    sample_rate = 44100
-    ticks_per_beat = 480
-    ticks_per_second = ticks_per_beat * (60 / 120)  # 960 ticks/sec at 120 BPM
+    audio_config = (model_config or {}).get("audio", {})
+    hop_length = int(audio_config.get("hop_length", 512))
+    sample_rate = int(audio_config.get("sample_rate", 44100))
+    ticks_per_second = ticks_per_beat * 1_000_000 / tempo
+    default_duration_ticks = max(1, ticks_per_beat // 4)
 
-    for ev in midi_data.get('midi_events', []):
-        tick = int(ev['onset_frame'] * hop_length / sample_rate * ticks_per_second)
-        note = ev['note']
-        velocity = min(127, max(1, ev['velocity']))
-        msg = Message(
-            'note_on',
-            note=note,
-            velocity=velocity,
-            time=tick,
-        )
-        track.append(msg)
+    # (absolute tick, ordering at that tick, insertion order, MIDI message)
+    timeline = []
+    for index, event in enumerate(midi_data.get("midi_events", [])):
+        onset_frame = max(0, int(event["onset_frame"]))
+        onset_tick = round(onset_frame * hop_length / sample_rate * ticks_per_second)
+        note = int(event["note"])
+        velocity = min(127, max(1, int(event["velocity"])))
+        confidence = float(event.get("confidence", 0.0))
+        cc_value = min(127, max(0, int(event.get("cc_127_value", confidence * 127))))
 
-        # note_off after a fixed duration (can be refined)
-        dur_ticks = max(1, int(0.25 * ticks_per_beat))  # 1/16 note default
-        track.append(Message('note_off', note=note, velocity=0, time=dur_ticks))
+        timeline.append((onset_tick, 0, index, Message(
+            "control_change", control=127, value=cc_value, time=0
+        )))
+        timeline.append((onset_tick, 1, index, Message(
+            "note_on", note=note, velocity=velocity, time=0
+        )))
+        timeline.append((onset_tick + default_duration_ticks, -1, index, Message(
+            "note_off", note=note, velocity=0, time=0
+        )))
 
-        # Confidence as CC#127 for DAW metadata
-        cc_val = ev.get('cc_127_value', int(ev['confidence'] * 127))
-        track.append(Message('control_change', control=127, value=cc_val, time=0))
+    previous_tick = 0
+    for absolute_tick, _order, _index, message in sorted(timeline):
+        message.time = absolute_tick - previous_tick
+        track.append(message)
+        previous_tick = absolute_tick
 
-    track.append(MetaMessage('end_of_track'))
+    track.append(MetaMessage("end_of_track"))
 
-    buf = io.BytesIO()
-    mid.save(file=buf)
-    return buf.getvalue()
+    buffer = io.BytesIO()
+    mid.save(file=buffer)
+    return buffer.getvalue()
 
 
 @app.post("/process")
