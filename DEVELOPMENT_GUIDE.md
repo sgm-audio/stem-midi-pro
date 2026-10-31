@@ -26,7 +26,7 @@ git clone <repository-url>
 cd stem-midi-pro        # this repo root; all main source files live here
 ```
 
-Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.py`, `train.py` are at the repo root. (`verify_structure.py` predates this layout; see `AGENTS.md` for known quirks.)
+Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.py`, `train.py` are at the repo root. (`verify_structure.py` predates this layout; see [Known quirks](#known-quirks).)
 
 ## Codebase Overview
 
@@ -36,7 +36,7 @@ Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.
 - `demo.py` — synthetic-audio smoke test.
 - `train.py` — training script (PyTorch Lightning today; custom loop planned, TODO TR-12.3).
 - `check_syntax.py` — AST syntax check across the repo.
-- `verify_structure.py` — structural sanity check (has known path quirks, see `AGENTS.md`).
+- `verify_structure.py` — structural sanity check (has known path quirks, see [Known quirks](#known-quirks)).
 
 ### Subpackages
 - `models/` — `mamba_separator.py`, `mamba_transcriber.py`, `confidence_injector.py`, `losses.py`
@@ -81,7 +81,7 @@ The dataset loaders fall back to synthetic data automatically, so no real datase
 1. Branch: `git checkout -b feature/your-feature-name`
 2. Conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
 3. Keep the SPDX license header on every `.py` file.
-4. If you touch anything documented in `AGENTS.md`, update `AGENTS.md` too.
+4. If you touch anything listed under [Known quirks](#known-quirks), update that section too.
 5. Update user-facing docs when behavior changes.
 
 ### Models
@@ -144,7 +144,7 @@ uvicorn api:app --reload                         # dev API server
 pytest -m "not cuda"                             # tests (CPU)
 flake8 . && black --check . && isort --check . && mypy .   # lint (CI parity)
 python check_syntax.py                           # AST syntax check
-python verify_structure.py                       # structural check (see AGENTS.md quirks)
+python verify_structure.py                       # structural check (see Known quirks)
 ```
 
 **Make targets:** a `Makefile` with `install`, `install-dev`, `lint`, `format`, `test`, `test-cpu`, `demo`, `serve`, `docker-build`, `docker-run` targets is planned (TODO BLD-9.2.5) but does not exist yet — use the commands above.
@@ -153,3 +153,14 @@ python verify_structure.py                       # structural check (see AGENTS.
 
 ---
 *Development Guide — updated for the CPU-only, Python 3.13 target. See [TODO.md](TODO.md) for the live work queue.*
+
+## Known quirks
+
+- **`stem_midi_pro/` mirror was deleted 2026-10-07** (125 stale files that broke mypy/check_syntax). Root files are canonical.
+- **`train.py`** is a custom loop now; checkpoints save under `<output-dir>/checkpoints/{best,last}.pt` with a `"state_dict"` key (`main.load_from_checkpoint` reads that shape). CPU bfloat16 autocast not implemented (P2).
+- **Dataset onset targets** carry a spurious `(1, T', 1)` batch dim and a hardcoded-hop frame count; `StemMidiModel._prepare_onset_target` normalizes them — keep new loss inputs shape-robust.
+- **mamba-ssm CPU path:** models use the pure-PyTorch reference impl via `models/_mamba_compat.py` (no `causal_conv1d`, no CUDA kernels). `mamba-ssm` is NOT a hard dependency (needs nvcc to build). Invalid kwargs like `causal_conv1d_impl` must never be passed.
+- **Streaming:** the old fake `_state_cache` activation-concat was removed (C-2.5); chunked inference restarts state per chunk — document, don't reintroduce.
+- **"si_sdr" in `ProcessingReport`** is a centroid-separation **proxy**, not real SI-SDR (needs ground truth). Don't present it as SI-SDR.
+- No real datasets ship; Slakh/MUSDB loaders fall back to synthetic data unless `--strict-data`.
+- **Line endings:** working tree is LF; git warns LF→CRLF on touch (no `.gitattributes`). Add one before committing.

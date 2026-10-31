@@ -55,7 +55,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 ### 3. Model Inference (`main.py` - StemMidiModel) [PARTIAL]
 
 > NeMo base class is slated for removal (TODO RF-3.1.7); FP8 does not apply on the CPU target.
-- **Base Class**: NeMo ModelPT for seamless integration with NeMo ecosystem
+- **Base Class**: NeMo ModelPT, so it plugs into the NeMo tooling
 - **Key Features**:
   - Training/validation step compatibility
   - Neural type definitions for input/output validation
