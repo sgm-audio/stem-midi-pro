@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# Data Configuration for Stem+MIDI Pro — MUSDB18HQ on X:/ (formal training)
+# Used by: python train.py --config configs/model_config.mamba.yaml --data-config example_data_config.musdb18hq.yaml
+# Layout expected (see scripts/prepare_musdb.py --output-dir X:/ --dest musdb18hq):
+#   X:/musdb18hq/train/<Track>/{bass,drums,vocals,other}.wav
+
+dataset_type: musdb18hq
+root_dir: X:/
+
+# DataLoader parameters (CPU target: 4-8 GB)
+batch_size: 4
+num_workers: 0
+
+# Audio parameters
+sample_rate: 44100
+segment_length: 4.0
+
+# Training parameters
+train:
+  n_steps: 100000
+  lr: 3e-4
+  grad_clip: 1.0
+  device: cpu
+  amp: false
+  val_split: 0.1
+  val_every: 2000
+  ckpt_every: 1000
+  log_every: 50
+  early_stop_patience: 10
