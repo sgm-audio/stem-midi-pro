@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Basic Pitch (Spotify) transcription backend."""
+
 from __future__ import annotations
 
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import numpy as np
 import torch
@@ -58,7 +59,7 @@ class BasicPitchTranscriberBackend:
         n_frames = max(1, T // self.hop_length)
         min_f, max_f = self._freq_range()
 
-        all_events: List[List[Dict[str, Any]]] = []
+        all_events: list[list[dict[str, Any]]] = []
         onset_logits = torch.full((B, n_frames, 1), -10.0, device=stem.device)
         pitch_logits = torch.zeros(B, n_frames, self.pitch_vocab, device=stem.device)
         velocity = torch.zeros(B, n_frames, 1, device=stem.device)
@@ -101,7 +102,7 @@ class BasicPitchTranscriberBackend:
         # guitar
         return 70.0, 1200.0
 
-    def _predict_file(self, predict, mono: np.ndarray, min_f, max_f) -> List[Dict[str, Any]]:
+    def _predict_file(self, predict, mono: np.ndarray, min_f, max_f) -> list[dict[str, Any]]:
         import soundfile as sf
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -120,12 +121,12 @@ class BasicPitchTranscriberBackend:
 
         return self._notes_to_events(note_events)
 
-    def _notes_to_events(self, note_events) -> List[Dict[str, Any]]:
+    def _notes_to_events(self, note_events) -> list[dict[str, Any]]:
         """
         Basic Pitch note_events: list of
         (start_time_s, end_time_s, pitch_midi, amplitude, ...)
         """
-        events: List[Dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
         for item in note_events or []:
             try:
                 start_s = float(item[0])
@@ -134,10 +135,8 @@ class BasicPitchTranscriberBackend:
                 amp = float(item[3]) if len(item) > 3 else 0.8
             except (TypeError, ValueError, IndexError):
                 continue
-            onset_frame = int(round(start_s * self.sample_rate / self.hop_length))
-            duration_frames = max(
-                1, int(round((end_s - start_s) * self.sample_rate / self.hop_length))
-            )
+            onset_frame = round(start_s * self.sample_rate / self.hop_length)
+            duration_frames = max(1, round((end_s - start_s) * self.sample_rate / self.hop_length))
             vel = int(np.clip(amp * 127.0, 1, 127))
             conf = float(np.clip(amp, 0.0, 1.0))
             events.append(

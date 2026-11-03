@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Backend contracts for stem separation and MIDI transcription."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, TypedDict, runtime_checkable
+from typing import Any, Protocol, TypedDict, runtime_checkable
 
 import torch
 
@@ -31,7 +32,7 @@ class TranscribeOut(TypedDict, total=False):
     expression: torch.Tensor  # (B, T_frames, E)
     confidence: torch.Tensor  # (B, T_frames)
     # Optional: list-per-batch of event dicts {note, onset_frame, velocity, confidence, ...}
-    events: List[List[Dict[str, Any]]]
+    events: list[list[dict[str, Any]]]
 
 
 @runtime_checkable

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Warm the Demucs + Basic Pitch weight caches."""
+
 from __future__ import annotations
 
 import sys

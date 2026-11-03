@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Demucs / HTDemucs separator backend (pretrained)."""
+
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -25,7 +25,7 @@ class DemucsSeparatorBackend:
     Maps:
       - guitar ← first of guitar/other present
       - bass   ← bass
-      - residual ← mix − guitar − bass (time-aligned)
+      - residual ← mix - guitar - bass (time-aligned)
     """
 
     def __init__(self, cfg: dict):
@@ -92,7 +92,8 @@ class DemucsSeparatorBackend:
             # Proxy metric: energy ratio guitar vs bass (not true SI-SDR)
             g_e = float((guitar_m**2).mean().clamp_min(1e-8))
             b_e = float((bass_m**2).mean().clamp_min(1e-8))
-            proxy = min(30.0, max(0.0, 10.0 * torch.log10(torch.tensor(g_e / b_e + 1e-8)).item() + 15.0))
+            log_ratio = torch.log10(torch.tensor(g_e / b_e + 1e-8)).item()
+            proxy = min(30.0, max(0.0, 10.0 * log_ratio + 15.0))
             metrics_rows.append([proxy, 0.5])
 
         device = audio.device
@@ -116,9 +117,7 @@ class DemucsSeparatorBackend:
             if name in stems:
                 return stems[name]
         available = ", ".join(sorted(stems.keys()))
-        raise KeyError(
-            f"None of {candidates} found in Demucs stems. Available: {available}"
-        )
+        raise KeyError(f"None of {candidates} found in Demucs stems. Available: {available}")
 
     @staticmethod
     def _match_len(wav: torch.Tensor, length: int) -> torch.Tensor:

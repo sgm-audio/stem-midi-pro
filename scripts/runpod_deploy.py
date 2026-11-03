@@ -9,32 +9,43 @@ This script:
 3. Runs Demucs fine-tuning on MUSDB with guitar/bass emphasis
 4. Exports the fine-tuned model for CPU inference
 """
-import os
+
+import argparse
+import json
 import subprocess
 import sys
 import time
-import json
-import argparse
 from pathlib import Path
 
 
 def main():
     parser = argparse.ArgumentParser(description="RunPod deploy: Demucs fine-tune + export")
-    parser.add_argument("--gpu-type", choices=["T4", "A10G", "A100", "L4"], default="T4",
-                        help="RunPod GPU type (default: T4)")
-    parser.add_argument("--image", type=str, default="stem-midi-pro-gpu:latest",
-                        help="Docker image name (default: stem-midi-pro-gpu:latest)")
-    parser.add_argument("--musdb-path", type=str, default=None,
-                        help="Path to MUSDB18HQ dataset root")
-    parser.add_argument("--epochs", type=int, default=50,
-                        help="Fine-tune epochs (default: 50)")
-    parser.add_argument("--lr", type=float, default=1e-4,
-                        help="Learning rate (default: 1e-4)")
-    parser.add_argument("--export", action="store_true", default=True,
-                        help="whether to export fine-tuned model for CPU inference")
+    parser.add_argument(
+        "--gpu-type",
+        choices=["T4", "A10G", "A100", "L4"],
+        default="T4",
+        help="RunPod GPU type (default: T4)",
+    )
+    parser.add_argument(
+        "--image",
+        type=str,
+        default="stem-midi-pro-gpu:latest",
+        help="Docker image name (default: stem-midi-pro-gpu:latest)",
+    )
+    parser.add_argument(
+        "--musdb-path", type=str, default=None, help="Path to MUSDB18HQ dataset root"
+    )
+    parser.add_argument("--epochs", type=int, default=50, help="Fine-tune epochs (default: 50)")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        default=True,
+        help="whether to export fine-tuned model for CPU inference",
+    )
     args = parser.parse_args()
 
-    print(f"=== RunPod Deploy: Demucs Fine-Tune (Path A) ===")
+    print("=== RunPod Deploy: Demucs Fine-Tune (Path A) ===")
     print(f"GPU type: {args.gpu_type}")
     print(f"Image: {args.image}")
     print(f"MUSDB path: {args.musdb_path or 'will use default download'}")
@@ -63,7 +74,7 @@ def main():
         --cpu 4 \\
         --memory 16 \\
         --command "python scripts/fine_tune_demucs.py \\
-            --musdb-path {args.musdb_path or './data/musdb18hq'} \\
+            --musdb-path {args.musdb_path or "./data/musdb18hq"} \\
             --epochs {args.epochs} \\
             --lr {args.lr} \\
             --export \\
@@ -128,14 +139,15 @@ print(f'Best val loss: {ckpt[\"best_val_loss\"]:.4f}')
         result = subprocess.run(export_cmd, shell=True, capture_output=True, text=True)
         print(result.stdout)
         if result.stderr:
-            print('STDERR:', result.stderr)
+            print("STDERR:", result.stderr)
     else:
         print("Checkpoint not found; skipping export step.")
 
     print()
     print("=== Deploy complete ===")
-    print(f"Fine-tuned Demucs separator saved to ./outputs/checkpoints/")
-    print("Use model_config.cpu.yaml with restore_from_path pointing to this checkpoint for CPU inference.")
+    print("Fine-tuned Demucs separator saved to ./outputs/checkpoints/")
+    print("Use model_config.cpu.yaml with restore_from_path pointing to this")
+    print("checkpoint for CPU inference.")
     print("Transcription stays Basic Pitch (no changes needed).")
 
 

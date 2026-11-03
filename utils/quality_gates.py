@@ -64,8 +64,7 @@ def route_by_quality(report: ProcessingReport) -> dict[str, Any]:
             "action": "editor_launch",
             "badge": "✏️ Draft Quality",
             "message": (
-                f"MIDI confidence: {report.avg_confidence:.0%}. "
-                "Refine in our editor before export."
+                f"MIDI confidence: {report.avg_confidence:.0%}. Refine in our editor before export."
             ),
             "editor_launch": True,
             "editor_presets": {

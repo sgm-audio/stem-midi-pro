@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Path utilities for project-root resolution."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,6 +13,7 @@ def get_project_root() -> Path:
     global _PROJECT_ROOT
     if _PROJECT_ROOT is None:
         import __main__
+
         if hasattr(__main__, "__file__"):
             _PROJECT_ROOT = Path(__main__.__file__).resolve().parent
         else:

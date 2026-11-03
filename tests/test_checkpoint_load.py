@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Tests for checkpoint loading (main.load_from_checkpoint + api lifespan wiring)."""
+
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
-import torch.nn as nn
 import yaml
 
 
@@ -70,7 +69,7 @@ def test_load_from_checkpoint_accepts_model_state_dict_key(tmp_path):
     loaded = load_from_checkpoint(str(ckpt_path), str(cfg_path))
     assert isinstance(loaded, StemMidiModel)
     # Spot-check one parameter matches
-    for a, b in zip(model.parameters(), loaded.parameters()):
+    for a, b in zip(model.parameters(), loaded.parameters(), strict=False):
         assert torch.allclose(a, b)
         break
 

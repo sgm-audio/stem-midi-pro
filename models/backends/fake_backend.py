@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Deterministic fake backends for unit tests (no mamba_ssm / demucs / basic-pitch)."""
+
 from __future__ import annotations
 
 import torch
@@ -14,7 +15,7 @@ class FakeSeparatorBackend:
         self.cfg = cfg or {}
 
     def separate(self, audio: torch.Tensor) -> SeparateOut:
-        B, C, T = audio.shape
+        B, _C, _T = audio.shape
         # Crude spectral split via simple gain so guitar != bass
         guitar = audio * 0.6
         bass = audio * 0.4

@@ -9,6 +9,7 @@ TensorFlow has NO CPython 3.13 wheels, so `pip install basic-pitch` fails with
 ResolutionImpossible. The ONNX runtime path works fine on 3.13 without TF, so
 we install basic-pitch with --no-deps and pin its real runtime deps explicitly.
 """
+
 from __future__ import annotations
 
 import subprocess

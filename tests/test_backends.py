@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Unit tests for pluggable backends (fake path — no heavy deps)."""
+
 from __future__ import annotations
 
 import torch
@@ -66,6 +67,6 @@ def test_unknown_backend_raises(mock_config):
     bad = {**mock_config, "backends": {"separator": "nope", "transcriber": "fake"}}
     try:
         build_separator(bad)
-        assert False, "expected ValueError"
+        raise AssertionError("expected ValueError")
     except ValueError as e:
         assert "nope" in str(e)

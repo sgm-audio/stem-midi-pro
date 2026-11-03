@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Mamba-SSM backends (requires mamba_ssm)."""
+
 from __future__ import annotations
 
 import torch
