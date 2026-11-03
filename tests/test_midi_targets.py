@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Tests for MIDI → frame-aligned training targets (real label pipeline)."""
+
 from __future__ import annotations
 
 import mido
-import pytest
-import torch
 
 from utils.midi_targets import midi_to_targets
 

@@ -6,8 +6,8 @@ Data preparation script for MUSDB18HQ dataset (Phase 2 Path A).
 Downloads and extracts MUSDB18HQ dataset for Demucs fine-tuning.
 Compatible with the example_data_config.yaml dataset_type: musdb18hq.
 """
+
 import argparse
-import os
 import shutil
 import subprocess
 import sys
@@ -16,19 +16,34 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare MUSDB18HQ dataset for Demucs fine-tune")
-    parser.add_argument("--output-dir", type=str, default="./data",
-                        help="Output directory for dataset (default: ./data)")
-    parser.add_argument("--dest", type=str, default="musdb18hq",
-                        help="Destination subdirectory name")
-    parser.add_argument("--force", action="store_true",
-                        help="Force re-download if dataset already exists")
-    parser.add_argument("--downloader", type=str, default="auto",
-                        choices=["auto", "aria2c", "wget", "curl"],
-                        help="Downloader to use (default: auto = aria2c -> wget -> curl)")
-    parser.add_argument("--aria2c-path", type=str, default="aria2c",
-                        help="Path to aria2c binary (default: aria2c on PATH)")
-    parser.add_argument("--connections", type=int, default=8,
-                        help="aria2c connections per server (default: 8)")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./data",
+        help="Output directory for dataset (default: ./data)",
+    )
+    parser.add_argument(
+        "--dest", type=str, default="musdb18hq", help="Destination subdirectory name"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Force re-download if dataset already exists"
+    )
+    parser.add_argument(
+        "--downloader",
+        type=str,
+        default="auto",
+        choices=["auto", "aria2c", "wget", "curl"],
+        help="Downloader to use (default: auto = aria2c -> wget -> curl)",
+    )
+    parser.add_argument(
+        "--aria2c-path",
+        type=str,
+        default="aria2c",
+        help="Path to aria2c binary (default: aria2c on PATH)",
+    )
+    parser.add_argument(
+        "--connections", type=int, default=8, help="aria2c connections per server (default: 8)"
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -58,8 +73,12 @@ def main():
 
     # Try using the musdb Python package
     try:
-        import musdb
-        print("musdb package found, using to download...")
+        import importlib.util
+
+        if importlib.util.find_spec("musdb") is not None:
+            print("musdb package found, using to download...")
+        else:
+            raise ImportError("musdb not installed")
         # musdb does have a download function, but let's use a simpler approach
         print("musdb API available but will use direct download instead")
     except ImportError:
@@ -88,21 +107,50 @@ def main():
         if args.aria2c_path == "aria2c" and shutil.which("aria2c") is None:
             print("  SKIP: aria2c not found")
             return None
-        return _run([args.aria2c_path, "-c", "-x", str(args.connections),
-                     "--summary-interval=60", "--connect-timeout=30",
-                     "--max-tries=5", "--retry-wait=5",
-                     "-d", str(output_dir), "-o", tar_path.name, download_url])
+        return _run(
+            [
+                args.aria2c_path,
+                "-c",
+                "-x",
+                str(args.connections),
+                "--summary-interval=60",
+                "--connect-timeout=30",
+                "--max-tries=5",
+                "--retry-wait=5",
+                "-d",
+                str(output_dir),
+                "-o",
+                tar_path.name,
+                download_url,
+            ]
+        )
 
     def _dl_wget():
-        return _run(["wget", "-c", "--timeout=30", "--tries=5",
-                     "-O", str(tar_path), download_url])
+        return _run(["wget", "-c", "--timeout=30", "--tries=5", "-O", str(tar_path), download_url])
 
     def _dl_curl():
-        return _run(["curl", "-L", "-C", "-", "-o", str(tar_path),
-                     "--retry", "5", "--connect-timeout", "30", download_url])
+        return _run(
+            [
+                "curl",
+                "-L",
+                "-C",
+                "-",
+                "-o",
+                str(tar_path),
+                "--retry",
+                "5",
+                "--connect-timeout",
+                "30",
+                download_url,
+            ]
+        )
 
-    order = {"auto": ("aria2c", "wget", "curl"), "aria2c": ("aria2c",),
-             "wget": ("wget",), "curl": ("curl",)}[args.downloader]
+    order = {
+        "auto": ("aria2c", "wget", "curl"),
+        "aria2c": ("aria2c",),
+        "wget": ("wget",),
+        "curl": ("curl",),
+    }[args.downloader]
     downloaders = {"aria2c": _dl_aria2c, "wget": _dl_wget, "curl": _dl_curl}
     downloaded = False
     for name in order:
@@ -181,7 +229,7 @@ def main():
     train_dir = dest_dir / "train"
     if train_dir.exists():
         tracks = len(list(train_dir.glob("*/")))
-        print(f"MUSDB18HQ dataset prepared successfully!")
+        print("MUSDB18HQ dataset prepared successfully!")
         print(f"  Location: {dest_dir}")
         print(f"  Training tracks: {tracks}")
         print()

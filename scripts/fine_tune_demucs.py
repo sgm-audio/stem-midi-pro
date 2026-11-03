@@ -5,40 +5,41 @@ Demucs fine-tuning script for Stem+MIDI Pro (Path A).
 Trains the Demucs separator on MUSDB18HQ with guitar/bass emphasis.
 Transcription head stays Basic Pitch (frozen/pretrained).
 """
+
 import argparse
 import os
-import yaml
+
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
+import yaml
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from data.datasets import AudioDataset, get_data_loaders
+from data.datasets import get_data_loaders
 from main import StemMidiModel
 
 
 def main():
     parser = argparse.ArgumentParser(description="Demucs fine-tune (Path A)")
-    parser.add_argument("--musdb-path", type=str, required=True,
-                        help="Path to MUSDB18HQ dataset root")
-    parser.add_argument("--epochs", type=int, default=50,
-                        help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=1e-4,
-                        help="Learning rate")
-    parser.add_argument("--batch-size", type=int, default=8,
-                        help="Batch size (CPU target: 4-8 GB)")
-    parser.add_argument("--grad-accum", type=int, default=4,
-                        help="Gradient accumulation steps")
-    parser.add_argument("--output-dir", type=str, default="./outputs",
-                        help="Output directory for checkpoints")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Path to checkpoint to resume from")
+    parser.add_argument(
+        "--musdb-path", type=str, required=True, help="Path to MUSDB18HQ dataset root"
+    )
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size (CPU target: 4-8 GB)")
+    parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument(
+        "--output-dir", type=str, default="./outputs", help="Output directory for checkpoints"
+    )
+    parser.add_argument(
+        "--resume", type=str, default=None, help="Path to checkpoint to resume from"
+    )
     args = parser.parse_args()
 
     # Load configs
-    model_config = yaml.safe_load(open("configs/model_config.cpu.yaml"))
-    data_config = yaml.safe_load(open("example_data_config.yaml"))
+    with open("configs/model_config.cpu.yaml") as f:
+        model_config = yaml.safe_load(f)
+    with open("example_data_config.yaml") as f:
+        data_config = yaml.safe_load(f)
 
     # Override data config for MUSDB path
     data_config["dataset_type"] = "musdb18hq"
@@ -149,12 +150,15 @@ def main():
             best_val_loss = avg_val_loss
             epochs_without_improvement = 0
             ckpt_path = f"{args.output_dir}/checkpoints/best.pt"
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "best_val_loss": best_val_loss,
-            }, ckpt_path)
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_val_loss": best_val_loss,
+                },
+                ckpt_path,
+            )
             log.info(f"Saved best checkpoint (val_loss={best_val_loss:.4f})")
         else:
             epochs_without_improvement += 1
@@ -186,13 +190,13 @@ def main():
 
     # Save final model info
     with open(f"{args.output_dir}/FINAL.md", "w") as f:
-        f.write(f"# Demucs Fine-Tune (Path A) - Complete\n")
+        f.write("# Demucs Fine-Tune (Path A) - Complete\n")
         f.write(f"- Epochs: {args.epochs}\n")
         f.write(f"- Best val loss: {best_val_loss:.4f}\n")
         f.write(f"- Test loss: {avg_test_loss:.4f}\n")
         f.write(f"- Trainable params: {sum(p.numel() for p in trainable_params):,}\n")
-        f.write(f"- Separator fine-tuned; Basic Pitch transcription frozen\n")
-        f.write(f"- Output: ./outputs/checkpoints/best.pt\n")
+        f.write("- Separator fine-tuned; Basic Pitch transcription frozen\n")
+        f.write("- Output: ./outputs/checkpoints/best.pt\n")
 
 
 if __name__ == "__main__":

@@ -10,12 +10,16 @@ Tests the end-to-end flow:
 4. Run INT8 quantization
 5. Verify backward compatibility with model_config.cpu.yaml
 """
+
 import argparse
-import yaml
-import torch
+import contextlib
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
-from pathlib import Path
+import torch
+import yaml
+
 from main import StemMidiModel
 
 
@@ -33,21 +37,24 @@ def create_synthetic_audio(duration=2.0, sr=44100):
 
 def main():
     parser = argparse.ArgumentParser(description="Verify CPU export of fine-tuned model")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to fine-tuned checkpoint (.pt)")
-    parser.add_argument("--config", type=str, default="configs/model_config.cpu.yaml",
-                        help="Model config YAML")
-    parser.add_argument("--output", type=str, default="./outputs/exported_verify",
-                        help="Output directory")
-    parser.add_argument("--synthetic-duration", type=float, default=2.0,
-                        help="Duration of synthetic test audio")
+    parser.add_argument(
+        "--checkpoint", type=str, required=True, help="Path to fine-tuned checkpoint (.pt)"
+    )
+    parser.add_argument(
+        "--config", type=str, default="configs/model_config.cpu.yaml", help="Model config YAML"
+    )
+    parser.add_argument(
+        "--output", type=str, default="./outputs/exported_verify", help="Output directory"
+    )
+    parser.add_argument(
+        "--synthetic-duration", type=float, default=2.0, help="Duration of synthetic test audio"
+    )
     parser.add_argument("--sr", type=int, default=44100, help="Sample rate")
-    parser.add_argument("--quantize", action="store_true",
-                        help="Enable INT8 dynamic quantization")
+    parser.add_argument("--quantize", action="store_true", help="Enable INT8 dynamic quantization")
     args = parser.parse_args()
 
     # Load config
-    with open(args.config, "r") as f:
+    with open(args.config) as f:
         config = yaml.safe_load(f)
 
     # Initialize model
@@ -87,12 +94,16 @@ def main():
     print()
     print("MIDI guitar notes:")
     for i, ev in enumerate(result["midi_guitar"]["midi_events"][:5]):
-        print(f"  {i+1}. note={ev['note']}, frame={ev['onset_frame']}, "
-              f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}")
+        print(
+            f"  {i + 1}. note={ev['note']}, frame={ev['onset_frame']}, "
+            f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}"
+        )
     print("MIDI bass notes:")
     for i, ev in enumerate(result["midi_bass"]["midi_events"][:5]):
-        print(f"  {i+1}. note={ev['note']}, frame={ev['onset_frame']}, "
-              f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}")
+        print(
+            f"  {i + 1}. note={ev['note']}, frame={ev['onset_frame']}, "
+            f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}"
+        )
     print()
     print("Stem shapes:")
     print(f"  Guitar: {result['stems']['guitar'].shape}")
@@ -104,37 +115,42 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
     export_path = out_dir / "model.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": config,
-        "ft_info": {
-            "fine_tuned": True,
-            "base_backend": "demucs",
-            "transcription": "basic_pitch (frozen)",
-            "checkpoint": args.checkpoint,
-        }
-    }, export_path)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": config,
+            "ft_info": {
+                "fine_tuned": True,
+                "base_backend": "demucs",
+                "transcription": "basic_pitch (frozen)",
+                "checkpoint": args.checkpoint,
+            },
+        },
+        export_path,
+    )
     log.info(f"Exported model to: {export_path}")
 
     # Also save quantized version if requested
     if args.quantize:
         import copy
+
         qmodel = copy.deepcopy(model)
         qmodel = torch.ao.quantization.quantize_dynamic(
             qmodel, {torch.nn.Linear}, dtype=torch.qint8
         )
         q_path = out_dir / "model_quantized.pt"
-        torch.save({
-            "model_state_dict": qmodel.state_dict(),
-            "quantized": True,
-        }, q_path)
+        torch.save(
+            {
+                "model_state_dict": qmodel.state_dict(),
+                "quantized": True,
+            },
+            q_path,
+        )
         log.info(f"Quantized model saved to: {q_path}")
 
     # Cleanup
-    try:
+    with contextlib.suppress(BaseException):
         audio_path.unlink()
-    except:
-        pass
 
     print()
     print("Verification complete!")

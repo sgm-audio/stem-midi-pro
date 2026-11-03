@@ -783,8 +783,7 @@ async def render_template_endpoint(request: Request):
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Template '{template_name}' is not allowed. "
-                f"Allowed: {sorted(ALLOWED_TEMPLATES)}"
+                f"Template '{template_name}' is not allowed. Allowed: {sorted(ALLOWED_TEMPLATES)}"
             ),
         )
     if not isinstance(variables, dict):

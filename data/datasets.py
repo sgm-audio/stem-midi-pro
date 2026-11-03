@@ -68,7 +68,7 @@ class AudioDataset(Dataset):
         if self.synthetic:
             logger.warning(f"Dataset not found at {self.root_dir}")
             logger.warning(
-                "Using synthetic data for development. " "Replace with real Canadian artist data."
+                "Using synthetic data for development. Replace with real Canadian artist data."
             )
 
     def _build_file_list(self) -> list[str]:

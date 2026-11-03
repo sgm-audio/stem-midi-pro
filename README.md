@@ -3,7 +3,7 @@
 [![CodeQL](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml/badge.svg)](https://github.com/sgm-audio/stem-midi-pro/actions/workflows/codeql.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4–8 GB RAM is the reference target. Python **3.13**.
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4–8 GB RAM is the reference target. Python **3.13** (target). The test suite was also run on Python 3.12: 86 passed (2026-10-31).
 
 > **Status:** Active development toward production readiness. See [TODO.md](TODO.md) for the tracked work items and current state. Some features documented in [ARCHITECTURE.md](ARCHITECTURE.md) are still `[PLANNED]`; [SUMMARY.md](SUMMARY.md) marks exactly what works today.
 
@@ -91,11 +91,11 @@ docs/                    # ADRs and operations docs
 
 The mission behind Stem+MIDI Pro is to serve the Canadian independent-music community:
 
-1. **Training-data prioritization** for Canadian artists — curation weights and provenance live in `data/datasets.py` and [PRD_AND_ARD.md](PRD_AND_ARD.md).
-2. **Indie-friendly licensing** — Apache-2.0: free for everyone, including small studios and commercial use.
-3. **Local success stories** in user-facing content (`user_content/`).
+1. **Training-data prioritization** for Canadian artists — planned, not implemented. [PRD_AND_ARD.md](PRD_AND_ARD.md) describes it; `data/datasets.py` has no weighting code and the repository ships no dataset.
+2. **Indie-friendly licensing** — the code is Apache-2.0: free for everyone, including small studios and commercial use.
+3. **Local success stories** in user-facing content — planned; the templates in `user_content/` do not contain any yet.
 
-The core datasets used for training (Slakh2100, MUSDB18-HQ) are open-license (CC-BY). The trained model weights and this codebase are under the Apache License 2.0.
+The data loaders target Slakh2100 (CC BY 4.0) and MUSDB18-HQ. MUSDB18-HQ is **not** CC-BY: its Zenodo record (https://zenodo.org/records/3338373) says it is for educational, non-commercial use only, with parts under CC BY-NC-SA. Weights trained on it carry that restriction. No trained weights are included in this repository. The code is Apache-2.0.
 
 ## Documentation
 

@@ -92,9 +92,12 @@ curl -X POST "http://localhost:8000/process" \
 
 ```python
 import requests
-r = requests.post("http://localhost:8000/process",
-                  headers={"Authorization": "Bearer <key>"},
-                  files={"file": open("song.wav", "rb")})
+
+r = requests.post(
+    "http://localhost:8000/process",
+    headers={"Authorization": "Bearer <key>"},
+    files={"file": open("song.wav", "rb")},
+)
 r.raise_for_status()
 open("output.zip", "wb").write(r.content)
 ```

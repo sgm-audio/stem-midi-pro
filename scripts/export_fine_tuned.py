@@ -10,32 +10,37 @@ Usage:
         --output ./outputs/exported \
         --audio ./data/test_audio.wav
 """
+
 import argparse
-import yaml
-import torch
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
-from pathlib import Path
+import torch
+import yaml
 
 from main import StemMidiModel
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export fine-tuned Demucs model")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to fine-tuned checkpoint (.pt)")
-    parser.add_argument("--config", type=str, default="configs/model_config.cpu.yaml",
-                        help="Model config YAML")
-    parser.add_argument("--output", type=str, default="./outputs/exported",
-                        help="Output directory")
-    parser.add_argument("--audio", type=str, default=None,
-                        help="Input audio path (optional, for test run)")
-    parser.add_argument("--quantize", action="store_true",
-                        help="Enable INT8 dynamic quantization for CPU")
+    parser.add_argument(
+        "--checkpoint", type=str, required=True, help="Path to fine-tuned checkpoint (.pt)"
+    )
+    parser.add_argument(
+        "--config", type=str, default="configs/model_config.cpu.yaml", help="Model config YAML"
+    )
+    parser.add_argument("--output", type=str, default="./outputs/exported", help="Output directory")
+    parser.add_argument(
+        "--audio", type=str, default=None, help="Input audio path (optional, for test run)"
+    )
+    parser.add_argument(
+        "--quantize", action="store_true", help="Enable INT8 dynamic quantization for CPU"
+    )
     args = parser.parse_args()
 
     # Load config
-    with open(args.config, "r") as f:
+    with open(args.config) as f:
         config = yaml.safe_load(f)
 
     # Initialize model
@@ -46,13 +51,15 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    log.info(f"Checkpoint loaded (epoch {ckpt.get('epoch', '?')}, "
-             f"best_val_loss={ckpt.get('best_val_loss', '?'):.4f}")
+    log.info(
+        f"Checkpoint loaded (epoch {ckpt.get('epoch', '?')}, "
+        f"best_val_loss={ckpt.get('best_val_loss', '?'):.4f}"
+    )
 
     # Test inference if audio provided
     if args.audio and Path(args.audio).exists():
         log.info(f"Running inference on: {args.audio}")
-        audio, sr = sf.read(args.audio)
+        audio, _sr = sf.read(args.audio)
         if audio.ndim > 1 and audio.shape[1] > 1:
             audio = audio.mean(axis=1)
         audio = audio.astype(np.float32)
@@ -76,42 +83,53 @@ def main():
         print()
         print("MIDI guitar notes:")
         for ev in result["midi_guitar"]["midi_events"][:5]:
-            print(f"  note={ev['note']}, frame={ev['onset_frame']}, "
-                  f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}")
+            print(
+                f"  note={ev['note']}, frame={ev['onset_frame']}, "
+                f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}"
+            )
         print("MIDI bass notes:")
         for ev in result["midi_bass"]["midi_events"][:5]:
-            print(f"  note={ev['note']}, frame={ev['onset_frame']}, "
-                  f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}")
+            print(
+                f"  note={ev['note']}, frame={ev['onset_frame']}, "
+                f"velocity={ev['velocity']}, confidence={ev['confidence']:.2f}"
+            )
         print("=" * 60)
 
     # Save exported model
     export_dir = Path(args.output)
     export_dir.mkdir(parents=True, exist_ok=True)
     export_path = export_dir / "model.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": config,
-        "ft_info": {
-            "fine_tuned": True,
-            "base_backend": "demucs",
-            "transcription": "basic_pitch (frozen)",
-            "checkpoint": args.checkpoint,
-        }
-    }, export_path)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": config,
+            "ft_info": {
+                "fine_tuned": True,
+                "base_backend": "demucs",
+                "transcription": "basic_pitch (frozen)",
+                "checkpoint": args.checkpoint,
+            },
+        },
+        export_path,
+    )
     log.info(f"Exported fine-tuned model to: {export_path}")
 
     # Also save a CPU-only version with quantized Linear if requested
     if args.quantize:
         import copy
+
         qmodel = copy.deepcopy(model)
         qmodel = torch.ao.quantization.quantize_dynamic(
             qmodel, {torch.nn.Linear}, dtype=torch.qint8
         )
         q_path = export_dir / "model_quantized.pt"
-        torch.save({
-            "model_state_dict": qmodel.state_dict(),
-            "quantized": True,
-        }, q_path)
+        torch.save(
+            {
+                "model_state_dict": qmodel.state_dict(),
+                "quantized": True,
+            },
+            q_path,
+        )
         log.info(f"Quantized model saved to: {q_path}")
 
     print()

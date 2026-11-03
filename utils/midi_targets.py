@@ -4,9 +4,8 @@
 Converts a MIDI file (e.g. Slakh2100 stems/MIDI) into onset/pitch/velocity
 target tensors aligned to the model's STFT hop grid.
 """
-from __future__ import annotations
 
-from typing import Tuple
+from __future__ import annotations
 
 import torch
 
@@ -20,7 +19,7 @@ def midi_to_targets(
     hop_length: int = 512,
     sample_rate: int = 44100,
     pitch_vocab: int = 128,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Read a MIDI file and produce frame-aligned target tensors.
 
@@ -44,7 +43,7 @@ def midi_to_targets(
         for msg in track:
             abs_time_s += msg.time * seconds_per_tick
             if msg.type == "note_on" and msg.velocity > 0:
-                frame = int(round(abs_time_s * sample_rate / hop_length))
+                frame = round(abs_time_s * sample_rate / hop_length)
                 if 0 <= frame < n_frames:
                     onset[0, frame, 0] = 1.0
                     if 0 <= msg.note < pitch_vocab:

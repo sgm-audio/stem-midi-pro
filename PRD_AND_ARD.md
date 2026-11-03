@@ -46,7 +46,7 @@
 Make studio-quality stem separation and editable MIDI transcription accessible to every musician, producer, and educator — with a focus on Canadian artists and indie creators.
 
 **Mission**  
-Deliver a production-grade AI service that separates mixed audio into guitar/bass stems and transcribes them into expressive, editable MIDI — with transparent quality reporting, confidence-aware routing, and DAW-ready output.
+Deliver an AI service that separates mixed audio into guitar/bass stems and transcribes them into expressive, editable MIDI — with transparent quality reporting, confidence-aware routing, and DAW-ready output.
 
 **Canadian Artist Alignment**  
 - Prioritise training data from Canadian artists (Slakh2100-CA, MUSDB-Indie).

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Factory for separator / transcriber backends."""
+
 from __future__ import annotations
 
 import logging
@@ -39,9 +40,7 @@ def _backend_names(cfg: dict) -> tuple[str, str]:
 def build_separator(cfg: dict) -> Any:
     name, _ = _backend_names(cfg)
     if name not in _SEPARATORS:
-        raise ValueError(
-            f"Unknown separator backend {name!r}. Choose from: {sorted(_SEPARATORS)}"
-        )
+        raise ValueError(f"Unknown separator backend {name!r}. Choose from: {sorted(_SEPARATORS)}")
     log.info("Building separator backend: %s", name)
     return _load_class(_SEPARATORS[name])(cfg)
 

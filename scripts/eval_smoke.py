@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Smoke eval: run StemMidiModel on a wav and print report + event counts."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,7 +13,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import yaml
+import yaml  # noqa: E402
 
 
 def main() -> int:

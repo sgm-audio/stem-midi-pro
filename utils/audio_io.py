@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
 """Audio I/O utilities for Stem+MIDI Pro."""
+
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 import soundfile as sf
@@ -16,12 +16,15 @@ SUPPORTED_SAMPLE_RATES = {44100, 48000}
 MAX_DURATION_SECONDS = 600
 
 
-def load_audio(path: str, target_sr: int | None = None, mono: bool = True) -> tuple[np.ndarray, int]:
+def load_audio(
+    path: str, target_sr: int | None = None, mono: bool = True
+) -> tuple[np.ndarray, int]:
     """Load audio file. Returns (audio, sample_rate)."""
     try:
         audio, sr = sf.read(path)
     except Exception:
         import librosa
+
         audio, sr = librosa.load(path, sr=None, mono=True)
 
     if mono and audio.ndim > 1 and audio.shape[1] > 1:
@@ -31,6 +34,7 @@ def load_audio(path: str, target_sr: int | None = None, mono: bool = True) -> tu
 
     if target_sr is not None and sr != target_sr:
         import librosa
+
         audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
         sr = target_sr
 
@@ -65,12 +69,10 @@ def validate_audio(
                 "subtype": str(f.subtype),
             }
     except Exception as e:
-        raise ValueError(f"Invalid audio file: {e}")
+        raise ValueError(f"Invalid audio file: {e}") from e
 
     if info["duration"] > max_duration:
-        raise ValueError(
-            f"Duration {info['duration']:.2f}s exceeds maximum {max_duration}s"
-        )
+        raise ValueError(f"Duration {info['duration']:.2f}s exceeds maximum {max_duration}s")
 
     if info["sample_rate"] not in supported_srs:
         raise ValueError(

@@ -23,7 +23,6 @@ try:  # pragma: no cover - depends on environment
 
     MAMBA_BACKEND = "mamba-ssm"
 except ImportError:  # CPU / ROCm / no-CUDA environments
-
     MAMBA_BACKEND = "pure-torch"
 
     class Mamba(nn.Module):
