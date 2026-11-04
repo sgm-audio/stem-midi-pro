@@ -95,6 +95,8 @@ class StemMidiModel(nn.Module):
         enhanced_midi = self.confidence_injector.inject_midi_metadata(
             midi_events, confidence.squeeze(-1), stem_energy
         )
+        # Per-stem metadata view (backward-compat with backend-integrated API)
+        enhanced_midi = {**enhanced_midi, "guitar": enhanced_midi, "bass": enhanced_midi}
 
         # 5. Compute processing report for quality gating
         report = ProcessingReport(
@@ -300,6 +302,8 @@ class StemMidiModel(nn.Module):
                 "bass": outputs["bass_stem"].squeeze().cpu().numpy(),
             },
             "midi": outputs["midi_metadata"],
+            "midi_guitar": outputs["midi_metadata"],
+            "midi_bass": outputs["midi_metadata"],
             "report": outputs["processing_report"],
             "routing": outputs["routing_decision"],
             "sample_rate": self.cfg["audio"]["sample_rate"],
