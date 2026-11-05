@@ -2,7 +2,11 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
+<<<<<<< HEAD
 Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4–8 GB RAM is the reference target. Python **3.13** (target). The test suite runs on Python 3.13: `pytest -q -m "not cuda"` → 96 passed, 2 skipped (mamba_ssm not installed), 0 failed (2026-11-04, Windows 11 / Linux CI target).
+=======
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4–8 GB RAM is the reference target. Python **3.13** (target). The test suite was also run on Python 3.12: 86 passed (2026-10-31).
+>>>>>>> origin/main
 
 > **Status:** Active development toward production readiness. See [TODO.md](TODO.md) for the tracked work items and current state. Some features documented in [ARCHITECTURE.md](ARCHITECTURE.md) are still `[PLANNED]`; [SUMMARY.md](SUMMARY.md) marks exactly what works today.
 
