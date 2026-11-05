@@ -227,7 +227,22 @@ def _inc_in_flight(delta: int) -> None:
 # ---------------------------------------------------------------------------
 
 model = None  # StemMidiModel, lazily imported in load_model() (T-8.2.1)
+# Lazy module-level refs (T-8.2.1) — populated by _import_model()
+StemMidiModel = None  # type: ignore
+load_from_checkpoint = None  # type: ignore
 model_config: dict | None = None
+
+
+def _import_model():
+    global StemMidiModel, load_from_checkpoint
+    if StemMidiModel is None:
+        from main import StemMidiModel as _Model
+        from main import load_from_checkpoint as _load_ckpt
+
+        StemMidiModel = _Model
+        load_from_checkpoint = _load_ckpt
+
+
 _model_ready = False
 _processing_sem: asyncio.Semaphore | None = None  # API-6.4 concurrency cap
 
@@ -258,12 +273,11 @@ def load_model():
     with open(config_path) as f:
         model_config = yaml.safe_load(f)
 
-    from main import StemMidiModel  # lazy: keeps `import api` torch-free
+    _import_model()  # lazy: keeps `import api` torch-free
 
     checkpoint_path = os.getenv("MODEL_CHECKPOINT_PATH")
     if checkpoint_path and os.path.exists(checkpoint_path):
         log_event("info", "loading_checkpoint", checkpoint=checkpoint_path)
-        from main import load_from_checkpoint
 
         m = load_from_checkpoint(checkpoint_path, config_path)
     else:
