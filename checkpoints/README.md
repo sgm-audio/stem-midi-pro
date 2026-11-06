@@ -1,5 +1,7 @@
 # Checkpoints
 
+Training data: Slakh2100-YourMT3-16k (CC BY 4.0, commercial OK). Do NOT train on MUSDB18-HQ for a shippable product (non-commercial).
+
 | Directory | Contents |
 |-----------|----------|
 | `external/` | Downloaded pretrained weights (Demucs cache is usually under `~/.cache/torch`; Basic Pitch ships in-package) |

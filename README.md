@@ -98,7 +98,7 @@ The mission behind Stem+MIDI Pro is to serve the Canadian independent-music comm
 2. **Indie-friendly licensing** — the code is Apache-2.0: free for everyone, including small studios and commercial use.
 3. **Local success stories** in user-facing content — planned; the templates in `user_content/` do not contain any yet.
 
-The data loaders target Slakh2100 (CC BY 4.0) and MUSDB18-HQ. MUSDB18-HQ is **not** CC-BY: its Zenodo record (https://zenodo.org/records/3338373) says it is for educational, non-commercial use only, with parts under CC BY-NC-SA. Weights trained on it carry that restriction. No trained weights are included in this repository. The code is Apache-2.0.
+The data loaders target Slakh2100-YourMT3-16k (**CC BY 4.0**, commercial use OK with attribution) and, optionally, MUSDB18-HQ (educational/non-commercial only — do **not** use for commercial training). Training on Slakh2100 yields weights you can ship; cite Manilow et al., WASPAA 2019. No trained weights are included in this repository. The code is Apache-2.0.
 
 ## Documentation
 

@@ -6,7 +6,7 @@ RunPod deployment script for Stem+MIDI Pro GPU fine-tune (Demucs separator only)
 This script:
 1. Pulls the GPU Docker image
 2. Starts a RunPod GPU container
-3. Runs Demucs fine-tuning on MUSDB with guitar/bass emphasis
+3. Runs Demucs fine-tuning on Slakh2100 (CC BY 4.0) with guitar/bass emphasis
 4. Exports the fine-tuned model for CPU inference
 """
 
@@ -33,7 +33,10 @@ def main():
         help="Docker image name (default: stem-midi-pro-gpu:latest)",
     )
     parser.add_argument(
-        "--musdb-path", type=str, default=None, help="Path to MUSDB18HQ dataset root"
+        "--slakh-path",
+        type=str,
+        default=None,
+        help="Path to Slakh2100-YourMT3-16k dataset root (CC BY 4.0)",
     )
     parser.add_argument("--epochs", type=int, default=50, help="Fine-tune epochs (default: 50)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
@@ -74,7 +77,7 @@ def main():
         --cpu 4 \\
         --memory 16 \\
         --command "python scripts/fine_tune_demucs.py \\
-            --musdb-path {args.musdb_path or "./data/musdb18hq"} \\
+            --slakh-path {args.slakh_path or "./data/slakh2100_yourmt3"} \\
             --epochs {args.epochs} \\
             --lr {args.lr} \\
             --export \\

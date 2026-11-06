@@ -21,7 +21,16 @@ from main import StemMidiModel
 def main():
     parser = argparse.ArgumentParser(description="Demucs fine-tune (Path A)")
     parser.add_argument(
-        "--musdb-path", type=str, required=True, help="Path to MUSDB18HQ dataset root"
+        "--slakh-path",
+        type=str,
+        default=None,
+        help="Path to Slakh2100-YourMT3-16k dataset root (CC BY 4.0)",
+    )
+    parser.add_argument(
+        "--musdb-path",
+        type=str,
+        default=None,
+        help="(deprecated) Path to MUSDB18HQ root; use --slakh-path",
     )
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -35,15 +44,27 @@ def main():
     )
     args = parser.parse_args()
 
+    if not args.slakh_path and not args.musdb_path:
+        parser.error("one of --slakh-path or --musdb-path is required")
+
     # Load configs
     with open("configs/model_config.cpu.yaml") as f:
         model_config = yaml.safe_load(f)
     with open("example_data_config.yaml") as f:
         data_config = yaml.safe_load(f)
 
-    # Override data config for MUSDB path
-    data_config["dataset_type"] = "musdb18hq"
-    data_config["root_dir"] = args.musdb_path
+    # Resolve dataset path: Slakh2100 (CC BY 4.0, commercial OK) preferred.
+    slakh_path = args.slakh_path
+    if args.musdb_path and not slakh_path:
+        log = __import__("logging").getLogger(__name__)
+        log.warning(
+            "MUSDB18-HQ is non-commercial; --musdb-path is deprecated. Prefer --slakh-path."
+        )
+        data_config["dataset_type"] = "musdb18hq"
+        data_config["root_dir"] = args.musdb_path
+    else:
+        data_config["dataset_type"] = "slakh2100_yourmt3"
+        data_config["root_dir"] = slakh_path
     data_config["batch_size"] = args.batch_size
     data_config["train"]["n_steps"] = args.epochs * 1000  # approximate
     data_config["train"]["lr"] = args.lr
@@ -56,7 +77,7 @@ def main():
 
     # Dataset / loaders
     log = __import__("logging").getLogger(__name__)
-    log.info("Loading MUSDB18HQ dataset...")
+    log.info("Loading %s dataset...", data_config["dataset_type"])
     train_loader, val_loader, test_loader = get_data_loaders(data_config)
     log.info(f"Train batches: {len(train_loader)}, Val: {len(val_loader)}")
 
