@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Path utilities for project-root resolution."""
 
 from __future__ import annotations
@@ -9,15 +9,13 @@ _PROJECT_ROOT: Path | None = None
 
 
 def get_project_root() -> Path:
-    """Return the project root directory (parent of the file calling this)."""
+    """Return the project root directory (parent of the ``utils/`` package)."""
     global _PROJECT_ROOT
     if _PROJECT_ROOT is None:
-        import __main__
-
-        if hasattr(__main__, "__file__"):
-            _PROJECT_ROOT = Path(__main__.__file__).resolve().parent
-        else:
-            _PROJECT_ROOT = Path.cwd()
+        # __file__ is this module (repo_root/utils/paths.py); go up two levels
+        # to reach the repo root. Using __main__.__file__ is wrong under
+        # uvicorn/gunicorn where __main__ is the server entry point.
+        _PROJECT_ROOT = Path(__file__).resolve().parent.parent
     return _PROJECT_ROOT
 
 

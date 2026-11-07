@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Shared STFT/mel audio utilities for MambaSeparator and MambaTranscriber."""
 
 from __future__ import annotations

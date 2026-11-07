@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 # Multi-stage Dockerfile for Stem+MIDI Pro GPU fine-tune (Demucs separator only)
 # Target: RunPod / cloud GPU with NVIDIA CUDA
 

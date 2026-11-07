@@ -4,6 +4,6 @@
 
 ✅ Separation: Guitar + Bass stems (phase-coherent WAV)
 ✅ MIDI: Editable draft with confidence scores (CC#127)
-🔒 Your file is processed in memory; deleted after 24h
+🔒 Your file is processed in a temp file; deleted immediately after the request
 
 [Cancel] [Proceed]

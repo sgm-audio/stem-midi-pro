@@ -65,11 +65,16 @@ def build_midi_from_events(
     ticks_per_second = ticks_per_beat * (60.0 / (DEFAULT_TEMPO_US / 1_000_000.0))
 
     events = midi_data.get("midi_events", [])
+    # Mido `time` is delta-ticks, not absolute. Track a running cursor so that
+    # multi-event files do not drift (B2: was writing absolute ticks as deltas).
+    current_tick = 0
     for ev in events:
         tick = int(ev["onset_frame"] * hop_length / sample_rate * ticks_per_second)
+        delta = tick - current_tick
+        current_tick = tick
         note = int(ev["note"])
         velocity = min(127, max(1, int(ev["velocity"])))
-        track.append(Message("note_on", note=note, velocity=velocity, time=tick))
+        track.append(Message("note_on", note=note, velocity=velocity, time=max(0, delta)))
 
         duration_frames = ev.get("duration_frames")
         if duration_frames:
@@ -77,6 +82,7 @@ def build_midi_from_events(
         else:
             dur_ticks = max(1, int(default_duration_beats * ticks_per_beat))
         track.append(Message("note_off", note=note, velocity=0, time=dur_ticks))
+        current_tick += dur_ticks
 
         cc_val = ev.get("cc_127_value", int(ev.get("confidence", 0.0) * 127))
         cc_clamped = min(127, max(0, int(cc_val)))

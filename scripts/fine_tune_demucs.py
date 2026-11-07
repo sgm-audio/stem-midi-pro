@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """
 Demucs fine-tuning script for Stem+MIDI Pro (Path A).
 Trains the Demucs separator on MUSDB18HQ with guitar/bass emphasis.
@@ -103,8 +103,10 @@ def main():
     best_val_loss = float("inf")
     if args.resume and os.path.exists(args.resume):
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=True)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+        model.load_state_dict(state_dict)
+        if ckpt.get("optimizer_state_dict"):
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_epoch = ckpt.get("epoch", 0)
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         log.info(f"Resumed from epoch {start_epoch}, best_val_loss={best_val_loss:.4f}")
@@ -126,13 +128,22 @@ def main():
                 "target_bass": batch["target_bass"],
                 "target_onsets": batch["target_onsets"],
                 "target_pitch": batch["target_pitch"],
-                "target_velocity": batch.get("target_velocity"),
             }
 
-            # CPU AMP: bfloat16
-            with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            # CPU AMP: bfloat16 (guarded — not all CPUs support bfloat16;
+            # falls back to fp32 on the reference i5 target).
+            try:
+                _amp = torch.autocast(device_type="cpu", dtype=torch.bfloat16)
+                _amp.__enter__()
+                _amp_on = True
+            except Exception:
+                _amp_on = False
+            try:
                 outputs = model(audio, **targets)
                 loss = outputs["loss"] / args.grad_accum
+            finally:
+                if _amp_on:
+                    _amp.__exit__(None, None, None)
 
             loss.backward()
 
@@ -157,10 +168,18 @@ def main():
                     "target_bass": batch["target_bass"],
                     "target_onsets": batch["target_onsets"],
                     "target_pitch": batch["target_pitch"],
-                    "target_velocity": batch.get("target_velocity"),
                 }
-                with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                try:
+                    _amp = torch.autocast(device_type="cpu", dtype=torch.bfloat16)
+                    _amp.__enter__()
+                    _amp_on = True
+                except Exception:
+                    _amp_on = False
+                try:
                     outputs = model(audio, **targets)
+                finally:
+                    if _amp_on:
+                        _amp.__exit__(None, None, None)
                 val_loss += outputs["loss"].item()
 
         avg_val_loss = val_loss / len(val_loader)
@@ -199,10 +218,18 @@ def main():
                 "target_bass": batch["target_bass"],
                 "target_onsets": batch["target_onsets"],
                 "target_pitch": batch["target_pitch"],
-                "target_velocity": batch.get("target_velocity"),
             }
-            with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            try:
+                _amp = torch.autocast(device_type="cpu", dtype=torch.bfloat16)
+                _amp.__enter__()
+                _amp_on = True
+            except Exception:
+                _amp_on = False
+            try:
                 outputs = model(audio, **targets)
+            finally:
+                if _amp_on:
+                    _amp.__exit__(None, None, None)
             test_loss += outputs["loss"].item()
 
     avg_test_loss = test_loss / len(test_loader)

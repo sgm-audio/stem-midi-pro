@@ -31,10 +31,10 @@ Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.
 ## Codebase Overview
 
 ### Core components (repo root)
-- `main.py` — `StemMidiModel` (currently a NeMo ModelPT subclass; planned migration to a plain `torch.nn.Module`, TODO RF-3.1.7) and the CLI entry point.
-- `api.py` — FastAPI service (`POST /process`, `/health`, `/model-info`, `/render-template`).
+- `main.py` — `StemMidiModel` (plain `torch.nn.Module`; NeMo/PyTorch-Lightning removed, RF-3.1.7–9) and the CLI entry point.
+- `api.py` — FastAPI service (`POST /process`, `/live`, `/ready`, `/health`, `/metrics`, `/warmup`, `/model-info`, `/templates`, `/render-template`).
 - `demo.py` — synthetic-audio smoke test.
-- `train.py` — training script (PyTorch Lightning today; custom loop planned, TODO TR-12.3).
+- `train.py` — training script (plain PyTorch loop; Lightning removed, TR-12.3).
 - `check_syntax.py` — AST syntax check across the repo.
 - `verify_structure.py` — structural sanity check (has known path quirks, see [Known quirks](#known-quirks)).
 
@@ -102,8 +102,8 @@ pytest --cov=. tests/           # with coverage
 ```
 
 - Tests live in `tests/` and use fixtures from `tests/conftest.py`.
-- Some tests are marked `skip` pending the bug fixes in TODO Section 2 — un-skip them when you land the corresponding fix (TODO T-8.2.x).
-- Coverage gate target: `--cov-fail-under=70` (TODO T-8.4.1).
+- Bugs C-2.1…C-2.12 were fixed 2026-10-07; corresponding `skip` markers were removed. Re-add skips only for genuinely unimplemented features.
+- Coverage gate target: `--cov-fail-under=70` (TODO T-8.4.1; CI currently allows failure until coverage reaches 70%).
 
 ## Extending the Model
 
@@ -126,7 +126,7 @@ Edit `configs/model_config.yaml` (`separator.d_model`, `n_layer`, etc.). For CPU
 
 - Python: PEP 8, 4-space indent, 100-char lines, type hints, `is None` checks.
 - Import order: stdlib → third-party → local.
-- Linters: `flake8 .`, `black .`, `isort .`, `mypy .` (also what current CI runs). TODO BLD-9.2.2 plans a switch to `ruff`.
+- Linters: `ruff check .`, `black --check .`, `mypy .` (CI runs `ruff check`, `black --check`, `mypy . || true`).
 
 ## Contributing
 
@@ -147,9 +147,9 @@ python check_syntax.py                           # AST syntax check
 python verify_structure.py                       # structural check (see Known quirks)
 ```
 
-**Make targets:** a `Makefile` with `install`, `install-dev`, `lint`, `format`, `test`, `test-cpu`, `demo`, `serve`, `docker-build`, `docker-run` targets is planned (TODO BLD-9.2.5) but does not exist yet — use the commands above.
+**Make targets:** `Makefile` provides `install`, `install-dev`, `lint`, `format`, `test`, `test-cpu`, `test-cuda`, `demo`, `serve`, `docker-build`, `docker-run`, `clean`, `dist`.
 
-**CI:** `.github/workflows/ci.yml` runs a structure/syntax job plus lint, and (per the planned rewrite in TODO BLD-9.2.6) a `pytest -m "not cuda"` job on Python 3.13. A `torch.jit.trace` export example is being reworked for the post-NeMo model layout (TODO RF-3.1.7) and is intentionally not documented here until it works on the CPU target.
+**CI:** `.github/workflows/ci.yml` runs lint (`ruff`, `black --check`, `mypy . || true`), test-cpu (`pytest -m "not cuda"` on Python 3.13), structure/syntax verification, and an SPDX-header license check.
 
 ---
 *Development Guide — updated for the CPU-only, Python 3.13 target. See [TODO.md](TODO.md) for the live work queue.*
@@ -163,4 +163,4 @@ python verify_structure.py                       # structural check (see Known q
 - **Streaming:** the old fake `_state_cache` activation-concat was removed (C-2.5); chunked inference restarts state per chunk — document, don't reintroduce.
 - **"si_sdr" in `ProcessingReport`** is a centroid-separation **proxy**, not real SI-SDR (needs ground truth). Don't present it as SI-SDR.
 - No real datasets ship; Slakh/MUSDB loaders fall back to synthetic data unless `--strict-data`.
-- **Line endings:** working tree is LF; git warns LF→CRLF on touch (no `.gitattributes`). Add one before committing.
+- **Line endings:** working tree is LF; `.gitattributes` enforces `eol=lf` for text files.

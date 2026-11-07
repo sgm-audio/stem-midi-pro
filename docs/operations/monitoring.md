@@ -2,7 +2,7 @@
 
 ## Current state
 
-Today the service exposes only `GET /health` (200/503). The Prometheus `/metrics` endpoint, structlog JSON logs, and OpenTelemetry tracing are planned — TODO API-6.16, API-6.10, API-6.19, ARCH-11.14.
+The service exposes `GET /live` (always 200), `GET /ready` (200/503 while model loads), `GET /health` (deprecated alias of `/ready`), and `GET /metrics` (Prometheus text exposition: `requests_total`, `request_duration_seconds`, `in_flight_requests`). structlog JSON logging and OpenTelemetry tracing are planned — TODO API-6.10, API-6.19, ARCH-11.14.
 
 ## What to watch now (minimal viable)
 

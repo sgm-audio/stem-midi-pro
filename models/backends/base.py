@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Backend contracts for stem separation and MIDI transcription."""
 
 from __future__ import annotations

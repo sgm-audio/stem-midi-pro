@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """
 Install the production pretrained backends (Demucs + Basic Pitch).
 
@@ -23,8 +23,8 @@ def _run(*args: str) -> None:
 
 
 def main() -> int:
-    # 1. Matched torch + torchaudio (first CPython 3.13 CPU pair)
-    _run("torch>=2.11.0", "torchaudio>=2.11.0")
+    # 1. Matched torch + torchaudio (aligned with project pin >=2.5.0,<3.0.0)
+    _run("torch>=2.5.0,<3.0.0", "torchaudio>=2.5.0,<3.0.0")
 
     # 2. Audio stack (librosa 0.11+ dropped numba; needs numpy>=2.0)
     _run("numpy>=2.0,<2.3", "librosa>=0.11.0", "scipy", "soundfile>=0.12.0")

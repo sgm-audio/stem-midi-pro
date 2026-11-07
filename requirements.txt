@@ -2,7 +2,9 @@
 # torch<2.4 pins were unsatisfiable on Python 3.13 (no wheels pre-2.5).
 # 2.5+ ships cp313 wheels; ROCm builds: pip --index-url https://download.pytorch.org/whl/rocm6.4
 torch>=2.5.0,<3.0.0
-torchaudio>=2.5.0,<3.0.0
+# torchaudio is NOT a hard dependency: production code does not import it.
+# It is only used by research/mamba3_per_track/ and by tests via importorskip.
+# Install manually if you need the research data loaders: pip install torchaudio
 # mamba-ssm requires CUDA to BUILD (no CPU/ROCm wheels; needs nvcc at install).
 # Do NOT add as a hard dep: models/_mamba_compat.py falls back to a pure-PyTorch
 # Mamba when it is absent. Install manually only on CUDA machines.
@@ -26,12 +28,10 @@ pyyaml>=6.0.1
 numpy>=2.1.0,<3.0.0
 tqdm>=4.65.0
 
-# Audio loss functions
-auraloss>=0.4.0
-
 # Observability
 structlog>=24.1.0
 prometheus-client>=0.20.0
-opentelemetry-api>=1.27.0
-opentelemetry-sdk>=1.27.0
-opentelemetry-instrumentation-fastapi>=0.48b0
+# auraloss: used only by research/mamba3_per_track/ — NOT a hard dependency.
+# Install manually if needed: pip install auraloss
+# opentelemetry-*: planned (TODO API-6.19) but not imported anywhere yet.
+# Install manually if needed: pip install opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-fastapi
