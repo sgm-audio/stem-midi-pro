@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """
 RunPod deployment script for Stem+MIDI Pro GPU fine-tune (Demucs separator only).
 
@@ -51,7 +51,6 @@ def main():
     print("=== RunPod Deploy: Demucs Fine-Tune (Path A) ===")
     print(f"GPU type: {args.gpu_type}")
     print(f"Image: {args.image}")
-    print(f"MUSDB path: {args.musdb_path or 'will use default download'}")
     print(f"Epochs: {args.epochs}")
     print(f"LR: {args.lr}")
     print()

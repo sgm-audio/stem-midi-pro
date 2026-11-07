@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """MIDI → frame-aligned training targets.
 
 Converts a MIDI file (e.g. Slakh2100 stems/MIDI) into onset/pitch/velocity

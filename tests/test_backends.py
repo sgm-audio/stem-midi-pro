@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Unit tests for pluggable backends (fake path — no heavy deps)."""
 
 from __future__ import annotations

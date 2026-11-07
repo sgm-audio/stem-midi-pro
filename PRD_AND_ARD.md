@@ -392,7 +392,7 @@ jobs:
 
 # Part III: Audit Findings
 
-All issues discovered during codebase audit at commit `51d28b7`.
+All issues discovered during codebase audit at commit `51d28b7`. **Many items below are historical** — the current tree (`5e18e76`) has since removed NeMo/PyTorch-Lightning, renamed `data/canadian_datasets.py` → `data/datasets.py`, and fixed the crashes listed in 3.1–3.2. Items still open are cross-referenced in `TODO.md`. Do not treat this section as the current bug list; see `TODO.md` Section 2 for live status.
 
 ## 3.1 Runtime-Crashing Bugs
 

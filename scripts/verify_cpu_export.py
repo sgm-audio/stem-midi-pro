@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """
 CPU export verification for fine-tuned Demucs model (Path A).
 
@@ -63,7 +63,8 @@ def main():
     model = StemMidiModel(config)
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+    model.load_state_dict(state_dict)
     model.eval()
     log.info(f"Checkpoint loaded (epoch {ckpt.get('epoch', '?')})")
 

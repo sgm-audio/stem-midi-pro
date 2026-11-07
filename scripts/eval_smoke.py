@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Smoke eval: run StemMidiModel on a wav and print report + event counts."""
 
 from __future__ import annotations

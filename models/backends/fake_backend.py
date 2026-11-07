@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 """Deterministic fake backends for unit tests (no mamba_ssm / demucs / basic-pitch)."""
 
 from __future__ import annotations

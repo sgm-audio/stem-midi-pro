@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 # Stem+MIDI Pro v1.0 — CPU-tuned config (bare-metal i5, 4-8 GB DDR4)
 # Default backends: pretrained Demucs + Basic Pitch (no mamba_ssm required)
 name: "stem_midi_pro_v1_cpu"

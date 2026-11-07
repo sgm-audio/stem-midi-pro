@@ -15,7 +15,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌────────────────────┐
 │   API Layer     │    │  Processing      │    │   Model Inference    │
-│ (FastAPI)       │◄──►│   Orchestrator   │◄──►│  (NeMo ModelPT)      │
+│ (FastAPI)       │◄──►│   Orchestrator   │◄──►│  (plain PyTorch nn.Module)      │
 └─────────────────┘    └──────────────────┘    └────────────────────┘
                              │                       │
                              ▼                       ▼
@@ -33,18 +33,25 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ## Component Details
 
-### 1. API Layer (`api.py`) [PARTIAL]
-- **Framework**: FastAPI with asynchronous request handling
+### 1. API Layer (`api.py`) [IMPLEMENTED]
+- **Framework**: FastAPI with asynchronous request handling; lifespan startup/shutdown (replaces deprecated `@app.on_event`)
 - **Endpoints**:
-  - `GET /health`: Health check
-  - `POST /process`: Main audio processing endpoint
+  - `GET /live`: Liveness probe — always 200
+  - `GET /ready`: Readiness probe — 503 + `Retry-After` while model loads
+  - `GET /health`: Deprecated alias of `/ready` (hidden from schema)
+  - `POST /process`: Main audio processing endpoint (API-key gated when `API_KEYS` set)
+  - `GET /metrics`: Prometheus text exposition
+  - `POST /warmup`: 1-second synthetic inference warm-up
   - `GET /model-info`: Model configuration and metadata
+  - `GET /templates`, `POST /render-template`: User-facing template rendering
 - **Features**:
-  - File validation (format, duration, sample rate)
-  - Secure temporary file handling
+  - File validation (format, duration, sample rate) via single `sf.SoundFile` open
+  - Secure temporary file handling (deleted on all exception paths)
   - ZIP response packaging
-  - CORS middleware
-  - Background task support for cleanup
+  - CORS middleware (credentials disabled when `*`)
+  - Concurrency cap (`asyncio.Semaphore(1)`, 503 + `Retry-After`)
+  - API-key auth (`Authorization: Bearer`, `/process` only)
+  - `X-Request-ID` middleware, security headers, request size cap (500 MB)
 
 ### 2. Processing Orchestrator (Embedded in `main.py`) [IMPLEMENTED]
 - Handles the end-to-end processing pipeline
@@ -52,19 +59,19 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 - Coordinates between separation and transcription modules
 - Applies quality gating and routing logic
 
-### 3. Model Inference (`main.py` - StemMidiModel) [PARTIAL]
+### 3. Model Inference (`main.py` - StemMidiModel) [IMPLEMENTED]
 
-> NeMo base class is slated for removal (TODO RF-3.1.7); FP8 does not apply on the CPU target.
-- **Base Class**: NeMo ModelPT, so it plugs into the NeMo tooling
+> `StemMidiModel` is a plain `torch.nn.Module` (NeMo/PyTorch-Lightning removed — RF-3.1.7–9, TR-12.3). FP8 does not apply on the CPU target.
+- **Base Class**: `torch.nn.Module`
 - **Key Features**:
-  - Training/validation step compatibility
-  - Neural type definitions for input/output validation
-  - Checkpoint loading and saving
-  - Mixed precision training support (FP8)
+  - Training/validation step compatibility (`training_step`, `validation_step`)
+  - Explicit shape assertions in `forward`
+  - Checkpoint loading and saving (`load_from_checkpoint`, `train.py` best/last checkpoints)
+  - fp32 precision on CPU target
 
-### 4. Separation Module (`models/mamba_separator.py`) [PARTIAL]
+### 4. Separation Module (`models/mamba_separator.py`) [IMPLEMENTED]
 
-> Known defects: TODO C-2.1 (invalid Mamba kwargs), C-2.5 (state cache is activations, not SSM state), C-2.6 (SI-SDR is a centroid proxy), C-2.8 (inverted phase-cancellation check).
+> Defects C-2.1 (invalid Mamba kwargs), C-2.5 (state cache removed/documented), C-2.8 (inverted phase-cancellation check) fixed 2026-10-07. C-2.6 remains: the `si_sdr` field is a spectral-centroid proxy, not true SI-SDR (needs ground truth).
 - **Architecture**: 12-layer Mamba-SSM
 - **Input**: Raw audio waveform (B, C, T)
 - **Processing**:
@@ -79,9 +86,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
   - SSM state cache for streaming
   - Metrics (SI-SDR estimate, phase coherence)
 
-### 5. Transcription Module (`models/mamba_transcriber.py`) [PARTIAL]
+### 5. Transcription Module (`models/mamba_transcriber.py`) [IMPLEMENTED]
 
-> Known defects: TODO C-2.2 (missing `self.cfg`), C-2.9 (mel basis rebuilt per forward), C-2.10 (MC-dropout intent unclear). Expression head exists but is untrained (ARCH-11.4.4).
+> Defects C-2.2 (`self.cfg` now assigned in `__init__`) and C-2.9 (mel basis built once as a registered buffer) fixed 2026-10-07. C-2.10: MC-dropout confidence is eval-only, made explicit via `mc_dropout_eval`. Expression head exists but is untrained (ARCH-11.4.4).
 - **Architecture**: 8-layer Mamba-SSM
 - **Input**: Separated guitar stem (could also process bass)
 - **Processing**:
@@ -110,9 +117,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
   - Generate DAW-friendly metadata (CC#127 values)
   - Suggest quantization strategy (grid vs human feel)
 
-### 7. Loss Functions (`models/losses.py`) [PARTIAL]
+### 7. Loss Functions (`models/losses.py`) [IMPLEMENTED]
 
-> MR-STFT / flatness / crest losses implemented. Onset F1, pitch CE, velocity MAE, duration IoU are stubs (TODO ARCH-11.6).
+> MR-STFT, spectral flatness, and crest factor losses implemented. Onset F1 (`onset_f1_loss_fn`), pitch CE (`pitch_ce_loss_fn`), velocity MAE (`velocity_mae_loss_fn`), and duration IoU (`duration_iou_loss_fn`) are all implemented in `models/losses.py` (ARCH-11.6).
 - **Multi-Resolution STFT Loss**: Perceptual fidelity across multiple resolutions
 - **Spectral Flatness Loss**: Preserve transient detail and natural spectral shape
 - **Crest Factor Loss**: Maintain peak-to-RMS ratio for transient preservation
@@ -131,14 +138,14 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
   - Noise floor estimation
   - Phase cancellation detection
 
-### 9. Streaming Inference Capabilities [PLANNED]
+### 9. Streaming Inference Capabilities [PARTIAL]
 
-> Current chunked path concatenates activations (TODO C-2.5). True SSM state passing is ARCH-11.8.1. CUDA graph capture is not applicable on the CPU-only target.
-- **Chunked Processing**: 2-second segments with 50% overlap
-- **State Caching**: Mamba SSM state maintained between chunks
-- **Overlap-Add**: Phase-coherent reconstruction at chunk boundaries
-- **CUDA Graph Capture**: Deterministic sub-5ms hop latency
-- **Async I/O**: Pinned memory transfers for minimal CPU-GPU overhead
+> C-2.5 fixed: the fake activation-concat state cache was removed; chunked inference (`process_audio_streaming`) restarts Mamba state per chunk and recombines by overlap-add at the waveform level. True SSM state passing between chunks is ARCH-11.8.1 (planned). CUDA graph capture is not applicable on the CPU-only target.
+- **Chunked Processing**: 2-second segments with configurable overlap
+- **State Caching**: None between chunks (state restarts per chunk — documented limitation)
+- **Overlap-Add**: Waveform-level recombination at chunk boundaries
+- **CUDA Graph Capture**: Not applicable (CPU-only target)
+- **Async I/O**: Not applicable (CPU-only target)
 
 ## Data Flow [IMPLEMENTED with caveats]
 
@@ -362,11 +369,11 @@ The architecture supports Canadian artist data through:
 - Automatic train/validation/test splits
 
 ### Training Pipeline
-- `train.py` orchestrates the full training process
-- NeMo PTL integration for logging and checkpointing
-- Mixed precision training support
+- `train.py` orchestrates the full training process (plain PyTorch loop — Lightning/NeMo removed)
+- Epoch train/val, gradient accumulation, grad clipping, best/last checkpoints
 - Validation-based early stopping
 - Learning rate scheduling
+- fp32 precision on CPU target
 
 ### Model Adaptation
 - Configuration-driven architecture dimensions
@@ -374,9 +381,9 @@ The architecture supports Canadian artist data through:
 - Transfer learning from pre-trained checkpoints
 - Domain adaptation techniques for Canadian audio
 
-## Monitoring and Observability [PLANNED]
+## Monitoring and Observability [PARTIAL]
 
-> Tracked in TODO ARCH-11.14 / API-6.16–6.19. Operational guidance being added in `docs/operations/monitoring.md`. Content below is the design intent.
+> `/metrics` implemented (API-6.16); structlog JSON logging and OpenTelemetry tracing planned (API-6.10, API-6.19, ARCH-11.14). Operational guidance in `docs/operations/monitoring.md`.
 
 ### Metrics Collected
 - Processing latency (end-to-end and per-stage)

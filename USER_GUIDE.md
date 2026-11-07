@@ -7,7 +7,7 @@ Stem+MIDI Pro separates a mixed recording into **guitar and bass stems** and tra
 ## What It Actually Does Today
 
 1. **Stem separation** — produces `guitar_stem.wav` and `bass_stem.wav` from a mixed recording.
-2. **MIDI transcription** — produces `guitar.mid` and `bass.mid` with note onsets, pitches, and velocities. Note durations are currently a fixed 16th-note length (improvement tracked in the project TODO).
+2. **MIDI transcription** — produces `guitar.mid` and `bass.mid` with note onsets, pitches, velocities, and per-note durations (honoring `duration_frames` from the model output; falls back to a configurable default when absent).
 3. **Confidence metadata** — every MIDI note carries a CC#127 value (0–127) representing the model's confidence, so your DAW can highlight uncertain notes.
 4. **Quality report** — `processing_report.json` with separation metrics (SI-SDR estimate, phase coherence), average confidence, artifact flags, and an overall quality tier.
 

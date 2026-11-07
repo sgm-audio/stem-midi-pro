@@ -11,6 +11,6 @@
 🎛️ DAW Tips:
 • Import stems and MIDI together — note timing is aligned to the audio
 • Low-confidence MIDI notes are tagged with CC#127 values <64 — check those first
-• Note durations are fixed 16th notes in this version
+• Note durations follow the model's `duration_frames` output (configurable default when absent)
 
 [Download All] [Import into Your DAW] [Share Feedback]

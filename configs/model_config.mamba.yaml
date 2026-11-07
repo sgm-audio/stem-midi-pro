@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 # Mamba-SSM backends (requires mamba-ssm). Untrained weights = garbage output.
 name: "stem_midi_mamba_v1"
 restore_from_path: null

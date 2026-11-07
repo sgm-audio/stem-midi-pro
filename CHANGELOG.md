@@ -9,7 +9,7 @@ Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 ### Strategic decisions (TODO Section 0)
 - Consolidated on the v1 production path: `main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py`. Mamba-3 research code moved to `research/`.
 - Locked the platform: **CPU-only, bare-metal i5, Python 3.13**.
-- Adopted the **Polyform Small Business License 1.0.0** (`LICENSE`).
+- License: **Apache-2.0** (`LICENSE`; relicensed from PolyForm Small Business 1.0.0 on 2026-10-08, see ADR 0006).
 
 ### Structural (TODO Section 1)
 - Moved Mamba-3 files (`per_track_processor.py`, `train.py`, `losses.py`, datasets, tests) into `research/mamba3_per_track/`; vendored mamba-ssm clone into `research/mamba-ssm-reference/`.
@@ -44,6 +44,6 @@ Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 - **Fixed a latent training-path bug** found by the smoke run: dataset onset targets (`(1, T', 1)` per item → `(B, 1, T', 1)` after collation, frame count from a hardcoded hop, no STFT center padding) could not broadcast against model logits. `StemMidiModel._prepare_onset_target` now coerces them onto the model frame grid, and `onset_f1_loss_fn` is shape-robust. Regression tests in `tests/test_training_forward.py` (4 new). Suite: 86 passing.
 
 ### Relicense 2026-10-08
-- Adopted **Apache-2.0** (aligning with upstream `origin/main`, which settled on Apache-2.0 because the project ships third-party Apache-2.0 code, notably `mamba-ssm`). `/LICENSE` now matches upstream exactly; all `.py` SPDX headers read `Apache-2.0` (also added to `api.py`, `audio_io.py`, `utils/midi.py`, `tests/test_losses.py`, which had none and would have failed the CI license job); `pyproject.toml` license field, `LICENSE_NOTICE.md`, README/ARCHITECTURE/SUMMARY/SETUP/USER_GUIDE/research README, and `user_content/` license sections updated. ADR 0001 marked superseded; ADR 0006 records the decision; TODO D-STRAT-6/Section 5 annotated as superseded (kept for history).
+- Adopted **Apache-2.0** (aligning with upstream `origin/main`, which settled on Apache-2.0 because the project ships third-party Apache-2.0 code, notably `mamba-ssm`). `/LICENSE` now matches upstream exactly; SPDX headers updated to `Apache-2.0` on files touched by the relicense (`api.py`, `audio_io.py`, `utils/midi.py`, `tests/test_losses.py`, and others which previously had none or PolyForm headers and would have failed the CI license job); `pyproject.toml` license field, `LICENSE_NOTICE.md`, README/ARCHITECTURE/SUMMARY/SETUP/USER_GUIDE/research README, and `user_content/` license sections updated. A header sweep for remaining PolyForm `SPDX-License-Identifier` headers (e.g. some `scripts/`, `models/backends/`, `utils/` files) is tracked as a follow-up. ADR 0001 marked superseded; ADR 0006 records the decision; TODO D-STRAT-6/Section 5 annotated as superseded (kept for history).
 
 Refer to `git log` for commit-level history and to [TODO.md](TODO.md) for the authoritative status of each item.

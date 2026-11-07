@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: PolyForm-Small-Business-1.0.0
+# SPDX-License-Identifier: Apache-2.0
 # Multi-stage Dockerfile for Stem+MIDI Pro CPU self-host (bare-metal i5)
 # No CUDA required — runs on CPU only
 

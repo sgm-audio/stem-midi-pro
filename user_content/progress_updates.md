@@ -10,4 +10,4 @@ When done you'll get:
 • Confidence: {{avg_confidence}}
 • Low-confidence notes: {{low_confidence_notes}}
 
-[Estimating time remaining…] [Processing continues in background if you close this]
+[Estimating time remaining…] [Processing runs synchronously — you get the package when it's done]

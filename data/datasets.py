@@ -411,6 +411,18 @@ class Slakh2100YourMT3Dataset(AudioDataset):
         if self.augment:
             mix, guitar, bass = self._augment_audio(mix, guitar, bass)
 
+        # Re-crop/pad to segment length after augmentation (B6: pitch_shift /
+        # time_stretch can change array length, breaking batch collation).
+        seg_len = int(self.segment_length * sr)
+        if len(mix) > seg_len:
+            mix = mix[:seg_len]
+            guitar = guitar[:seg_len]
+            bass = bass[:seg_len]
+        else:
+            mix = np.pad(mix, (0, seg_len - len(mix)))
+            guitar = np.pad(guitar, (0, seg_len - len(guitar)))
+            bass = np.pad(bass, (0, seg_len - len(bass)))
+
         # Convert to tensors
         mix_t = torch.from_numpy(mix).float().unsqueeze(0)
         guitar_t = torch.from_numpy(guitar).float().unsqueeze(0)
@@ -523,6 +535,15 @@ class MUSDB18HQDataset(AudioDataset):
 
         if self.augment:
             mixture, target_stem, _ = self._augment_audio(mixture, target_stem, target_stem)
+
+        # Re-crop/pad to segment length after augmentation (B6: pitch_shift /
+        # time_stretch can change array length, breaking batch collation).
+        if len(mixture) > seg_len:
+            mixture = mixture[:seg_len]
+            target_stem = target_stem[:seg_len]
+        else:
+            mixture = np.pad(mixture, (0, seg_len - len(mixture)))
+            target_stem = np.pad(target_stem, (0, seg_len - len(target_stem)))
 
         return {
             "audio": torch.from_numpy(mixture).float().unsqueeze(0),
