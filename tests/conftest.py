@@ -165,11 +165,18 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     violations = _honesty_violations(config)
     if violations:
         tr.write_line("")
-        tr.write_line("SUITE-HONESTY VIOLATIONS (skips that hide coverage):")
-        for v in violations[:40]:
+        tr.write_line(
+            "SUITE-HONESTY VIOLATIONS (unaccounted skips, plus open known bugs under "
+            "STEM_KNOWN_BUGS=fail):"
+        )
+        # 40 lines is already a wall of text in a CI log, so the list is capped - but
+        # the cap is disclosed, never silent. STEM_KNOWN_BUGS=fail is the release-gate
+        # mode where you want the *complete* list of still-open defects, so no cap there.
+        cap = len(violations) if os.getenv("STEM_KNOWN_BUGS", "").strip().lower() == "fail" else 40
+        for v in violations[:cap]:
             tr.write_line(f"  ! {v}")
-        if len(violations) > 40:
-            tr.write_line(f"  ... and {len(violations) - 40} more")
+        if len(violations) > cap:
+            tr.write_line(f"  ... and {len(violations) - cap} more")
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:

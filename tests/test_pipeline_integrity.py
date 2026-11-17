@@ -321,7 +321,8 @@ def test_summary_and_alignment_counts_agree(pipeline_config):
 
 @known_bug(
     "REPORT-1",
-    "main reads si_sdr=sep_metrics[0, 0].item() and phase_coherence=sep_metrics[0, 1] with "
+    "main reads centroid_separation_db=sep_metrics[0, 0].item() and "
+    "phase_coherence=sep_metrics[0, 1] with "
     "the comment 'Average over batch', so a batched call reports item 0's quality for the "
     "whole batch. A 2-item batch where the second render is garbage is stamped studio. "
     "Average (or return per-item reports).",
@@ -352,9 +353,10 @@ def test_batched_report_aggregates_over_the_batch(pipeline_config):
     with torch.inference_mode():
         out = model(guitar)
     report = out["processing_report"]
-    assert report.si_sdr == pytest.approx(
-        13.0, abs=1e-3
-    ), f"report says {report.si_sdr} dB for a batch whose items measured 25.0 and 1.0 dB"
+    assert report.centroid_separation_db == pytest.approx(13.0, abs=1e-3), (
+        f"report says {report.centroid_separation_db} dB for a batch whose items measured "
+        "25.0 and 1.0 dB"
+    )
 
 
 @known_bug(
@@ -405,47 +407,98 @@ def test_logits_to_midi_threshold_pitch_and_velocity():
     n = 20
     onset = torch.full((1, n, 1), -10.0)
     onset[0, 3, 0] = 0.0  # sigmoid = 0.5 -> not > threshold(0.5)
-    onset[0, 7, 0] = 0.01  # sigmoid ≈ 0.502 -> fires
-    onset[0, 11, 0] = 10.0
+    onset[0, 8, 0] = 0.01  # sigmoid ~ 0.502 -> fires
+    onset[0, 16, 0] = 10.0  # 7 below-threshold frames later: outside onset_refractory_frames
     pitch = torch.zeros(1, n, 128)
-    for f, p in ((3, 60), (7, 61), (11, 62)):
+    for f, p in ((3, 60), (8, 61), (16, 62)):
         pitch[0, f, p] = 10.0
     vel = torch.full((1, n, 1), 100 / 127.0)
     conf = torch.full((1, n), 0.8)
     model = StemMidiModel.__new__(StemMidiModel)  # no heavy init needed for a pure fn
     model.cfg = {"transcriber": {"onset_threshold": 0.5}}
     events = model._logits_to_midi(onset, pitch, vel, conf)
-    assert [e["onset_frame"] for e in events] == [7, 11]
+    assert [e["onset_frame"] for e in events] == [8, 16], (
+        "onsets fired at the wrong frames: with the H-6 peak-picking rule two candidates "
+        "must be >= onset_refractory_frames+1 apart, and 8/16 are"
+    )
     assert [e["note"] for e in events] == [61, 62]
     assert all(e["velocity"] == 100 for e in events)
     assert all(abs(e["confidence"] - 0.8) < 1e-6 for e in events)
 
 
-@known_bug(
-    "TRANS-1",
-    "_logits_to_midi has no minimum inter-onset spacing, no same-frame dedup and no stem "
-    "energy gate, and the transcriber's pitch head has no 'no-note' class, so every frame "
-    "above the onset threshold becomes a note: measured 345 notes for 1.0 s of audio and up "
-    "to 343 for digital silence, with a 1-frame minimum gap. Add a per-frame argmax gate on "
-    "stem energy (e.g. require frame RMS > max(frame RMS) x 1e-3) plus a minimum gap.",
-)
-def test_note_density_is_bounded_and_frames_are_deduplicated(pipeline_config):
-    """No more than ~20 notes/second of real guitar material (16th notes at 120 BPM)."""
+def test_onset_refractory_caps_note_density(pipeline_config):
+    """Regression guard for the density half of TRANS-1 (fixed by PR #14 / H-6).
+
+    A degenerate onset field where EVERY frame is above threshold used to become one
+    note per frame (measured on pre-#14 main: 345 notes for 1 s). Rising-edge
+    peak-picking collapses that to a single event, which is why this now passes —
+    but note *why*: the cap is the refractory window, not any judgement about content.
+    """
     from main import StemMidiModel
 
-    n = frame_count(SR, HOP)  # frames in 1 s
-    onset = torch.zeros(1, n, 1)  # every frame exactly at threshold+
-    onset[0, :, 0] = 0.5
+    n = frame_count(SR, HOP)  # 86 frames in 1 s at hop 512
+    onset = torch.full((1, n, 1), 0.5)
     pitch = torch.zeros(1, n, 128)
     pitch[0, :, 60] = 1.0
     pitch += torch.randn(1, n, 128) * 0.01
     model = StemMidiModel.__new__(StemMidiModel)
+
+    def density(refractory):
+        cfg = {"transcriber": {"onset_threshold": 0.0}}
+        if refractory is not None:
+            cfg["transcriber"]["onset_refractory_frames"] = refractory
+        model.cfg = cfg
+        events = model._logits_to_midi(
+            onset, pitch, torch.full((1, n, 1), 0.7), torch.full((1, n), 0.9)
+        )
+        return len(events) / (n * HOP / SR), events
+
+    per_second, events = density(None)
+    assert per_second <= 20.0, f"{per_second:.0f} notes/second produced from {n} frames"
+    assert len(events) == 1, (
+        f"a plateau of {n} above-threshold frames must be ONE rising edge, got {len(events)} "
+        f"events at frames {[e['onset_frame'] for e in events][:6]}"
+    )
+    unbounded, _ = density(0)
+    assert unbounded > 20.0, (
+        f"onset_refractory_frames=0 should restore the pre-H-6 every-frame behaviour, but it "
+        f"gave {unbounded:.0f}/s — if the plateau rule moved elsewhere, this test is stale"
+    )
+
+
+@known_bug(
+    "TRANS-1",
+    "residual after PR #14 (H-6 added rising-edge peak-picking + onset_refractory_frames, which "
+    "fixed the 345-notes-per-second flood): there is still NO content test in _logits_to_midi — "
+    "no stem-energy gate and no 'no-note' class in the pitch head — so an above-threshold onset "
+    "field is turned into notes even when the audio is digital silence, and the only thing "
+    "bounding density is the refractory window (measured: the saturated field still yields "
+    "1 event per refractory+1 frames, and setting onset_refractory_frames: 0 in the config "
+    "restores 86 notes/s with no error or warning). Silence currently renders 0 notes only "
+    "because the untrained head happens to stay below 0.5 (measured avg_confidence 0.650 with "
+    "0 notes), which is luck, not a guarantee. Gate on frame energy vs the file's max (e.g. "
+    "require frame RMS > 1e-3 x max) and add a no-note logit.",
+)
+def test_a_saturated_onset_field_on_silence_is_rejected_for_lack_of_content(pipeline_config):
+    """Content, not spacing, must decide whether there is a note to emit."""
+    from main import StemMidiModel
+
+    n = frame_count(SR, HOP)
+    model = StemMidiModel.__new__(StemMidiModel)
     model.cfg = {"transcriber": {"onset_threshold": 0.0}}
+    onset = torch.full((1, n, 1), 0.5)
+    pitch = torch.zeros(1, n, 128)
+    pitch[0, :, 60] = 1.0
     events = model._logits_to_midi(
         onset, pitch, torch.full((1, n, 1), 0.7), torch.full((1, n), 0.9)
     )
-    per_second = len(events) / (n * HOP / SR)
-    assert per_second <= 20.0, f"{per_second:.0f} notes/second produced from {n} frames"
+    # `silence` here is the caller's contract: the separator handed this stem a
+    # waveform with no energy, so there is nothing to transcribe. The head layout
+    # gives no way to say that, hence this fails today.
+    assert events == [], (
+        f"{len(events)} notes emitted from an onset field the pipeline cannot have "
+        "measured anything about; expected a stem-energy gate / no-note class to suppress them"
+    )
 
 
 def test_zero_onsets_never_produce_notes(pipeline_config):
@@ -487,7 +540,8 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     assert len(events) == 0, "fixture broke: expected no notes"
     assert report.quality_tier.value == "complex", (
         f"an empty render (0 notes) was graded {report.quality_tier.value} with "
-        f"avg_confidence={report.avg_confidence:.2f} / si_sdr={report.si_sdr:.1f}"
+        f"avg_confidence={report.avg_confidence:.2f} / "
+        f"centroid_separation_db={report.centroid_separation_db:.1f}"
     )
     assert out["routing_decision"]["action"] == "fallback_options"
 

@@ -167,7 +167,7 @@ def test_digital_silence_yields_silent_stems(separator):
     # and the quality proxy must not reward it
     assert (
         float(metrics[0, 0]) < 20.0
-    ), "silence scored at/above min_si_sdr — gate is reachable on nothing"
+    ), "silence scored at/above min_centroid_separation_db - gate is reachable on nothing"
 
 
 def test_silence_makes_no_targets_for_the_transcriber(transcriber):

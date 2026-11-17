@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,6 +29,7 @@ from tests.honesty import known_bug, require
 soundfile = require("soundfile", "ZIP/stem round-trip")
 mido = require("mido", "MIDI parsing")
 
+ROOT = Path(__file__).resolve().parents[1]
 SR = 44100
 HOP = 512
 SECONDS = 3.0
@@ -123,7 +126,7 @@ def _report(**over):
 
     flags = over.pop("artifact_flags", ["none"])
     kw = dict(
-        si_sdr=6.5,
+        centroid_separation_db=6.5,
         phase_coherence=0.42,
         avg_confidence=0.55,  # below draft threshold -> COMPLEX, like an untrained render
         artifact_flags=flags,
@@ -132,7 +135,7 @@ def _report(**over):
             "quality_gates": {
                 "studio_confidence_threshold": 0.85,
                 "draft_confidence_threshold": 0.70,
-                "min_si_sdr": 20.0,
+                "min_centroid_separation_db": 20.0,
             }
         },
     )
@@ -267,7 +270,7 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
     api, _ = api_env
     zf = _zip(_post(api, tmp_path, _wav_bytes()))
     assert json.loads(zf.read("processing_report.json")) == {
-        "si_sdr": 6.5,
+        "centroid_separation_db": 6.5,
         "phase_coherence": 0.42,
         "avg_confidence": 0.55,
         "artifact_flags": ["none"],
@@ -295,8 +298,9 @@ def test_query_flags_reach_the_model(api_env, tmp_path, params, expected):
     "JSON-1",
     "processing_report.json is written with json.dumps(...) and the default allow_nan=True, so a "
     "NaN metric (which the pipeline produces for silent, DC and non-finite input — measured: "
-    "si_sdr/phase_coherence/avg_confidence are all NaN for an all-NaN upload, and for silence the "
-    "separator's proxy returns 0.0 while phase_coherence stays NaN) emits bare `NaN`, which is "
+    "centroid_separation_db/phase_coherence/avg_confidence are all NaN for an all-NaN "
+    "upload, and for silence the separator's proxy returns 0.0 while phase_coherence stays "
+    "NaN) emits bare `NaN`, which is "
     "not valid RFC 8259: browsers' JSON.parse() rejects the whole download. Serialise with "
     "allow_nan=False after sanitising, or emit null with an explicit 'unreliable' flag.",
 )
@@ -306,7 +310,9 @@ def test_zip_report_is_strict_json(api_env, tmp_path):
     def process(path, quantize=False):
         out = StubModel.process_audio_file(stub, path, quantize)
         out["report"] = _report(
-            si_sdr=float("nan"), phase_coherence=float("nan"), avg_confidence=float("nan")
+            centroid_separation_db=float("nan"),
+            phase_coherence=float("nan"),
+            avg_confidence=float("nan"),
         )
         return out
 
@@ -456,7 +462,8 @@ def test_empty_upload_is_a_client_error_not_a_500(api_env, tmp_path):
     "IO-3",
     "non-finite samples sail through validation and out the other end as a *successful* "
     "delivery: an all-NaN upload returns 200 with artifact_flags=['none'], quality_tier='complex' "
-    "and si_sdr/phase_coherence/avg_confidence all NaN, and because the ZIP encodes PCM_16 the "
+    "and centroid_separation_db/phase_coherence/avg_confidence all NaN, and because the ZIP "
+    "encodes PCM_16 the "
     "customer's 'stems' decode as a constant -1.0 full-scale block (uniq == [-1.0], rms 1.0) — "
     "2 seconds of digital clipping billed as a result. validate_audio_file must assert "
     "np.isfinite(data).all(), and _detect_artifacts must flag non-finite stems as 'corrupt'.",
@@ -481,7 +488,9 @@ def test_out_of_range_upload_is_flagged_as_clipping(api_env, tmp_path):
 
     def process(path, quantize=False):
         out = StubModel.process_audio_file(api.model, path, quantize)
-        out["report"] = _report(artifact_flags=["clipping"], avg_confidence=0.97, si_sdr=28.0)
+        out["report"] = _report(
+            artifact_flags=["clipping"], avg_confidence=0.97, centroid_separation_db=28.0
+        )
         return out
 
     api.model.process_audio_file = process
@@ -491,3 +500,98 @@ def test_out_of_range_upload_is_flagged_as_clipping(api_env, tmp_path):
     rep = json.loads(zf.read("processing_report.json"))
     assert "clipping" in rep["artifact_flags"], f"clipping not reported: {rep}"
     assert rep["quality_tier"] != "studio", "clipped audio routed as a studio-ready deliverable"
+
+
+# ---------------------------------------------------------------------------
+# 6. the delivered artefact must match the delivered documentation
+# ---------------------------------------------------------------------------
+
+_DOC_FILES = (
+    "README.md",
+    "USER_GUIDE.md",
+    "API_DOCUMENTATION.md",
+    "DEVELOPMENT_GUIDE.md",
+)
+
+
+def _report_json_from_zip(api_env, tmp_path):
+    api, _ = api_env
+    zf = _zip(_post(api, tmp_path, _wav_bytes(seconds=0.2)))
+    return json.loads(zf.read("processing_report.json"))
+
+
+@known_bug(
+    "DOC-1",
+    "the user-facing docs still describe confidence as CC#127 - USER_GUIDE.md:11 and :88 "
+    "('use CC#127 to find uncertain notes', with the bands 96-127 / 64-95 / 0-63) and "
+    "API_DOCUMENTATION.md:80/150 - while PR #11 (H-5) moved the controller to CC#16 because "
+    "CC#120-127 are MIDI Channel Mode messages. README.md was updated, the workflow docs were "
+    "not, so a user following USER_GUIDE.md:88 filters on a controller that is "
+    "never written and concludes the export is broken. Update the three doc files to say CC#16 "
+    "(and mention MIDI_CONFIDENCE_CC=127 as the opt-in), then keep this guard.",
+)
+def test_the_documented_confidence_controller_is_the_one_the_writer_emits():
+    """A documented MIDI controller is an API promise: it must be the one we emit."""
+    from utils.midi import DEFAULT_CONFIDENCE_CC, resolve_confidence_cc
+
+    assert DEFAULT_CONFIDENCE_CC == resolve_confidence_cc() == 16
+    offenders = []
+    for name in _DOC_FILES:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        mentions_127 = [
+            ln.strip()
+            for ln in text.split("\n")
+            if re.search(r"CC\s*#?127", ln) and re.search(r"confidence", ln, re.I)
+        ]
+        if not mentions_127:
+            continue
+        if re.search(r"CC\s*#?16|MIDI_CONFIDENCE_CC", text):
+            continue  # the file explains the default and the opt-in
+        offenders.append(f"{name}: {mentions_127[0][:110]}")
+    assert not offenders, (
+        "docs promise CC#127 for confidence without mentioning that the writer emits CC#16:\n"
+        + "\n".join(offenders)
+    )
+
+
+@known_bug(
+    "DOC-2",
+    "API_DOCUMENTATION.md's 'Processing Report Schema' table lists 6 fields, but the delivered "
+    "processing_report.json has 7 in production: main always sets report.backend (M-7) and "
+    "api.create_response_zip copies it into the JSON (api.py:631-633), so the shipped artefact "
+    'carries an undocumented `backend` key (`"mamba (pure-torch)" / "separator=demucs,..."). '
+    "An integrator generating a parser from the table gets an unexpected field, and the operator "
+    "who needs to know which stack produced a render cannot find the key documented. Add the row: "
+    "`| backend | string | Which Mamba/backend stack produced this result (M-7) |`.",
+)
+def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path, monkeypatch):
+    """`processing_report.json` is a paid artefact; its key set is a contract.
+
+    The table in API_DOCUMENTATION.md '## Processing Report Schema' is what an integrator
+    parses. Both directions are asserted in one place: no undocumented key ships, and no
+    documented key is missing. The report is built with `backend` set, because that is what
+    main.StemMidiModel does (M-7) - a stub that omitted it would hide exactly the drift above.
+    """
+    api, _ = api_env
+    real = api.model.process_audio_file
+
+    def process(path, quantize=False):
+        out = real(path, quantize)
+        out["report"] = _report(backend="mamba (pure-torch)")
+        return out
+
+    monkeypatch.setattr(api.model, "process_audio_file", process)
+    rep = _report_json_from_zip(api_env, tmp_path)
+
+    doc = (ROOT / "API_DOCUMENTATION.md").read_text(encoding="utf-8")
+    section = doc.split("## Processing Report Schema", 1)
+    assert len(section) > 1, "the schema section was renamed - update this test AND the docs"
+    rows = section[1].split("\n## ")[0]
+    documented = set(re.findall(r"^\|\s*`([a-z_]+)`\s*\|", rows, re.M))
+    assert documented, "no `field` table rows parsed from the schema section"
+    extra = sorted(set(rep) - documented)
+    missing = sorted(documented - set(rep))
+    assert (
+        not extra
+    ), f"keys ship in processing_report.json that the schema does not document: {extra}"
+    assert not missing, f"documented schema keys are absent from the delivered report: {missing}"

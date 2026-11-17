@@ -28,15 +28,20 @@ HOP = 512
 GATES = {
     "studio_confidence_threshold": 0.85,
     "draft_confidence_threshold": 0.70,
-    "min_si_sdr": 20.0,
+    "min_centroid_separation_db": 20.0,
 }
 
 
-def _report(si_sdr: float, avg_confidence: float, flags=("none",), low_confidence_notes: int = 0):
+def _report(
+    centroid_separation_db: float,
+    avg_confidence: float,
+    flags=("none",),
+    low_confidence_notes: int = 0,
+):
     from utils.quality_gates import ProcessingReport
 
     return ProcessingReport(
-        si_sdr=si_sdr,
+        centroid_separation_db=centroid_separation_db,
         phase_coherence=0.5,
         avg_confidence=avg_confidence,
         artifact_flags=list(flags),
@@ -59,36 +64,58 @@ def _tier(**kw):
 
 def test_thresholds_come_from_the_config_not_from_hardcoded_defaults():
     """Same numbers, different gate config → different commercial outcome."""
-    strict, _ = _tier(si_sdr=19.0, avg_confidence=0.86)
+    strict, _ = _tier(centroid_separation_db=19.0, avg_confidence=0.86)
     from utils.quality_gates import ProcessingReport
 
     lenient = ProcessingReport(
-        si_sdr=19.0,
+        centroid_separation_db=19.0,
         phase_coherence=0.5,
         avg_confidence=0.86,
         artifact_flags=["none"],
         low_confidence_notes=0,
-        config={"quality_gates": {**GATES, "min_si_sdr": 10.0}},
+        config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
     )
     assert strict is not lenient.quality_tier, (
-        f"min_si_sdr 20 → {strict.value}, min_si_sdr 10 → {lenient.quality_tier.value}: "
-        f"the gate ignores its own config"
+        f"min_centroid_separation_db 20 -> {strict.value}, 10 -> {lenient.quality_tier.value}: "
+        "the gate ignores its own config"
+    )
+
+    # C-2.6 renamed the field but kept the old CONFIG key working on purpose (every
+    # shipped yaml used `min_centroid_separation_db`); a user with an existing config must not
+    # silently get the 20.0 default instead of the threshold they wrote.
+    legacy = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
+    )
+    assert legacy.quality_tier is lenient.quality_tier, (
+        "the pre-rename `min_centroid_separation_db` config key is no longer honoured, so existing "
+        "configs silently fall back to the 20.0 default and re-tier"
     )
 
 
 def test_artifact_flags_are_an_absolute_veto():
     """A clipped render cannot buy its way back with great numbers (ARCH-11.7)."""
     for flags in (["clipping"], ["phase_cancellation"], ["clipping", "noise_floor"]):
-        tier, route = _tier(si_sdr=29.9, avg_confidence=0.99, flags=flags)
+        tier, route = _tier(centroid_separation_db=29.9, avg_confidence=0.99, flags=flags)
         assert tier.value == "complex", f"{flags} with 29.9 dB/0.99 conf routed to {tier.value}"
         assert route["action"] == "fallback_options", route
 
 
 def test_badges_and_actions_agree_with_the_tier():
     for kw, expected in (
-        (dict(si_sdr=25.0, avg_confidence=0.95), ("studio", "direct_download", False)),
-        (dict(si_sdr=25.0, avg_confidence=0.75), ("draft", "editor_launch", True)),
-        (dict(si_sdr=25.0, avg_confidence=0.30), ("complex", "fallback_options", False)),
+        (
+            dict(centroid_separation_db=25.0, avg_confidence=0.95),
+            ("studio", "direct_download", False),
+        ),
+        (dict(centroid_separation_db=25.0, avg_confidence=0.75), ("draft", "editor_launch", True)),
+        (
+            dict(centroid_separation_db=25.0, avg_confidence=0.30),
+            ("complex", "fallback_options", False),
+        ),
     ):
         tier, route = _tier(**kw)
         assert (
@@ -113,7 +140,7 @@ def test_badges_and_actions_agree_with_the_tier():
     "untrained transcriber emits 342-343 notes per second even for digital silence).",
 )
 def test_a_render_with_no_notes_is_never_routed_as_a_result():
-    tier, route = _tier(si_sdr=25.0, avg_confidence=0.95, low_confidence_notes=0)
+    tier, route = _tier(centroid_separation_db=25.0, avg_confidence=0.95, low_confidence_notes=0)
     assert (
         route["action"] != "direct_download"
     ), f"an empty render was offered for download as {tier.value} with badge {route['badge']!r}"
@@ -121,9 +148,11 @@ def test_a_render_with_no_notes_is_never_routed_as_a_result():
 
 @known_bug(
     "FAKE-1",
-    "the Fake backend returns a constant si_sdr=12.0 / phase_coherence=0.5 for ANY input "
+    "the Fake backend returns a constant centroid_separation_db=12.0 / phase_coherence=0.5 "
+    "for ANY input "
     "(models/backends/fake_backend.py), so a test that runs a quality decision through the fake "
-    "path asserts a fixture, not behaviour — and the constant is *below* min_si_sdr, which makes "
+    "path asserts a fixture, not behaviour — and the constant is *below* "
+    "min_centroid_separation_db, which makes "
     "the fake path permanently COMPLEX and therefore unable to exercise the studio/draft branches "
     "at all. Return metrics computed from the signal (even cheap ones).",
 )
@@ -165,11 +194,13 @@ def _proxy(sep, audio: np.ndarray) -> float:
 
 @known_bug(
     "GATE-4",
-    "the separation number the gate compares against min_si_sdr=20 is not a separation metric at "
+    "the separation number the gate compares against min_centroid_separation_db=20 is not a "
+    "separation metric at "
     "all: MambaSeparator._centroid_separation is a ratio of guitar/bass spectral centroids "
     "clamped to [0, 30] and it *rewards* distortion — at the production grid this test measures "
     "17.75 dB for a hard-clipped square wave against 0.00 dB for the same clean sine, and the "
-    "corpus case in tests/test_audio_edge_cases.py reaches 24.75 dB, above min_si_sdr=20, i.e. "
+    "corpus case in tests/test_audio_edge_cases.py reaches 24.75 dB, above "
+    "min_centroid_separation_db=20, i.e. "
     "an outright Studio badge for a square wave. Silence and a +8 dB overflow both score 0.0, so "
     "the metric neither sees clipping nor verifies that anything was separated. Replace with a "
     "reference-free check (mask sum / residual energy / MR-STFT) or gate on artifact flags first.",
@@ -182,7 +213,8 @@ def test_the_separation_proxy_does_not_prefer_clipping(real_separator, synth, ca
     scores = {"clean": _proxy(real_separator, clean), "clipped": _proxy(real_separator, clipped)}
     assert scores["clipped"] < scores["clean"], (
         f"the proxy rates the hard-clipped square {scores['clipped']:.2f} dB vs the clean sine "
-        f"{scores['clean']:.2f} dB (min_si_sdr={GATES['min_si_sdr']}): clipping scores higher "
+        f"{scores['clean']:.2f} dB (min_centroid_separation_db="
+        f"{GATES['min_centroid_separation_db']}): clipping scores higher "
         f"than the undistorted signal"
     )
 

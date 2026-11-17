@@ -283,7 +283,7 @@ def _child_peak_rss_mb(seconds: float, mode: str = "mono") -> float:
             "studio_confidence_threshold": 0.85,
             "draft_confidence_threshold": 0.70,
             "min_confidence": 0.6,
-            "min_si_sdr": 20.0,
+            "min_centroid_separation_db": 20.0,
         },
         "training": {"precision": "fp32", "gradient_checkpointing": False},
     }

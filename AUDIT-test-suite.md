@@ -111,6 +111,32 @@ hands the writer an already-truncated `confidence_cc_value`, so rounding only th
 changes nothing for a model-produced event. The `xfail` reason now names both call sites.
 
 
+### …and PR #14 landed during the reconciliation (same mechanism, second round)
+
+`ee8dd62` renamed `ProcessingReport.si_sdr` → `centroid_separation_db` (C-2.6, with
+`min_si_sdr` kept as a legacy config key) and added H-6 onset peak-picking. The first run
+against it produced 12 failures here, all of them *this suite's* fault, and one of them a
+finding worth the merge: `api.py`'s `processing_report.json` ships a `backend` key
+(M-7) that the "Processing Report Schema" table does not document (**DOC-2**), and
+`USER_GUIDE.md` / `API_DOCUMENTATION.md` still instruct users to filter notes on
+**CC#127** although #11 moved confidence to CC#16 (**DOC-1**). Both are now locked.
+
+Adaptations: `tests/doubles.py`'s `StubReport` and the report fixtures in
+`tests/test_api_zip.py` / `tests/test_quality_gate_adversarial.py` follow the renamed field
+(and `tests/test_quality_gate_adversarial.py` gained a lock that the legacy `min_si_sdr`
+config key still re-tiers, because #14 kept it as an alias for shipped yaml files);
+`test_logits_to_midi_threshold_pitch_and_velocity` had its onset frames spaced past the new
+refractory window; and `TRANS-1` is re-scoped — its density half is fixed (a saturated
+onset field now yields exactly **1** event, `onset_refractory_frames: 0` restores 86/s),
+while the missing content gate is not, so the id stays open with new measurements.
+
+How this was diagnosed at all: the Actions log host is not reachable from the review
+sandbox, so `.github/workflows/ci.yml` now converts a failing test run's `FAILED`/`ERROR`
+lines plus the interpreter/torch/numpy/pytest versions into ≤12 check annotations. Nine
+lines, one API call — and it is the reason a red `continue-on-error` step can never again
+hide a broken `test_review_fixes.py` the way #11's did.
+
+
 ## 1. Baseline re-verification (the brief asked me not to trust the stated numbers)
 
 Stated: `pytest -q -m "not cuda"` → **96 passed, 2 skipped, 0 failed** on Python 3.13.

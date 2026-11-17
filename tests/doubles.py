@@ -116,11 +116,19 @@ def frame_count(n_samples: int, hop: int) -> int:
 class StubReport:
     """A ProcessingReport-shaped stub for API-level packaging tests."""
 
-    si_sdr: ClassVar[float] = 25.0
+    # Field name follows PR #14 (C-2.6): ProcessingReport carries the centroid
+    # separation heuristic, not SI-SDR. A stub that kept the old name would let
+    # api.create_response_zip's report_json line raise AttributeError on a shape no
+    # real report has any more - which is precisely the drift this stub exists to catch.
+    centroid_separation_db: ClassVar[float] = 25.0
     phase_coherence: ClassVar[float] = 0.9
     avg_confidence: ClassVar[float] = 0.9
     artifact_flags: ClassVar[list[str]] = ["none"]
     low_confidence_notes: ClassVar[int] = 0
+    # The real report always carries it (main.StemMidiModel sets backend=self.backend_name)
+    # and api.create_response_zip ships it when present, so the stub must too - otherwise an
+    # undocumented key slips past the schema test.
+    backend: ClassVar[str] = "mamba (pure-torch fallback)"
 
     @property
     def quality_tier(self):
