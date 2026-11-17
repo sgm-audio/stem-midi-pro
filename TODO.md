@@ -546,8 +546,9 @@ When all `[ ]` items above are `[x]`, run a final audit:
 # SECTION 18 — TEST-SUITE AUDIT (2026-11-17)
 
 Deliverable of the skeptical test audit. The suite grew from 98 collected tests
-(90 passed / 8 skipped) to 294 (254 passed / 40 `xfail(strict)` / 1 legitimately
-skipped / 1 deselected `cuda` + 4 bookkeeping guards). Every `xfail` below is a
+(90 passed / 8 skipped) to 301 (257 passed / 42 `xfail(strict)` / 1 legitimately
+skipped / 1 deselected `cuda`), measured on main @ `ee8dd62` and green on CI's
+Python 3.13.18 / torch 2.15.0 runner as well as the 3.11 sandbox used for the audit. Every `xfail` below is a
 *reproduced* defect with measured evidence in its reason string; the marker IDs are the
 same IDs the tests cite, so `grep -rn "TODO MIDI-1" tests/` finds the locking tests.
 `tests/test_honesty_bookkeeping.py` checks that this paragraph stays true: every
