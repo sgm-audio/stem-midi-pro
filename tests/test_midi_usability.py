@@ -25,37 +25,72 @@ from utils.midi import build_midi_from_events  # noqa: E402
 
 SR = 44100
 GUITAR_HIGH_NOTE = 84  # C6 — well above any bass part
+BASS_NOTE = 40  # E2 — inside the bass register
 BASS_RANGE = range(24, 68)  # E1..G4; a bass stem should live here
 
 
-def _make_model(mock_config, pitch: int = GUITAR_HIGH_NOTE, eager: bool = True):
-    """StemMidiModel with a transcriber that emits a chosen, fixed output."""
+class _RegisterSeparator(torch.nn.Module):
+    """Emits a fixed 220 Hz "guitar" stem and a 55 Hz "bass" stem.
+
+    Known registers make the bass assertions deterministic: a register-aware
+    transcriber can only produce a bass pitch if it was handed the *bass* stem,
+    which is exactly what "bass.mid was transcribed from the bass stem" means.
+    """
+
+    def __init__(self, sr: int = SR):
+        super().__init__()
+        self.sr = sr
+
+    def forward(self, audio):
+        b, _c, t = audio.shape
+        tt = torch.arange(t, dtype=torch.float32) / self.sr
+        guitar = (0.3 * torch.sin(2 * torch.pi * 220.0 * tt)).expand(b, 1, t)
+        bass = (0.3 * torch.sin(2 * torch.pi * 55.0 * tt)).expand(b, 1, t)
+        metrics = torch.tensor([[21.0, 0.9]])
+        return guitar, bass, torch.zeros_like(guitar), None, metrics
+
+
+class _RegisterTranscriber(torch.nn.Module):
+    """Eager onsets on every frame; pitch chosen by the stem's zero-crossing rate.
+
+    220 Hz -> zcr ~0.010, 55 Hz -> zcr ~0.0025 (zcr = 2f/sr), so the pitch
+    follows the register of whatever stem this is called on.
+    """
+
+    def __init__(self, eager: bool = True):
+        super().__init__()
+        self.eager = eager
+
+    def forward(self, stem):
+        b, _c, t = stem.shape
+        frames = max(1, t // 512)
+        zcr = float(((stem[:, 0, 1:] * stem[:, 0, :-1]) < 0).float().mean()) if t > 1 else 0.0
+        pitch = GUITAR_HIGH_NOTE if zcr > 0.005 else BASS_NOTE
+        onset = torch.full((b, frames, 1), 4.0 if self.eager else -4.0)
+        logits = torch.full((b, frames, 128), -10.0)
+        logits[..., pitch] = 10.0
+        return (
+            onset,
+            logits,
+            torch.ones(b, frames, 1),
+            torch.zeros(b, frames, 3),
+            torch.full((b, frames), 0.99),
+        )
+
+
+def _make_model(mock_config, eager: bool = True):
+    """StemMidiModel with stub components whose output is fully determined."""
     from main import StemMidiModel
 
     model = StemMidiModel(mock_config).eval()
-
-    class _PinnedTranscriber(torch.nn.Module):
-        def forward(self, stem):
-            b, _c, t = stem.shape
-            frames = t // 512
-            onset = torch.full((b, frames, 1), 4.0 if eager else -4.0)
-            logits = torch.full((b, frames, 128), -10.0)
-            logits[..., pitch] = 10.0
-            return (
-                onset,
-                logits,
-                torch.ones(b, frames, 1),
-                torch.zeros(b, frames, 3),
-                torch.full((b, frames), 0.99),
-            )
-
-    model.transcriber = _PinnedTranscriber()
+    model.separator = _RegisterSeparator()
+    model.transcriber = _RegisterTranscriber(eager=eager)
     return model
 
 
 @pytest.fixture
 def model_with_guitar_notes(mock_config):
-    return _make_model(mock_config, pitch=GUITAR_HIGH_NOTE)
+    return _make_model(mock_config)
 
 
 def _audio(tmp_path, seconds: float = 1.0) -> str:
@@ -80,11 +115,6 @@ def _onsets(midi_bytes: bytes) -> list[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-6: main.py aliases midi_guitar and midi_bass to the same "
-    "dict, so bass.mid repeats guitar.mid's notes (only the track metadata differs)",
-)
 def test_guitar_and_bass_midi_are_different_files(model_with_guitar_notes, tmp_path):
     """Two stems must produce two different *note sequences*.
 
@@ -101,11 +131,6 @@ def test_guitar_and_bass_midi_are_different_files(model_with_guitar_notes, tmp_p
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-6: bass transcription is never performed; the guitar "
-    "transcription is relabelled as bass",
-)
 def test_bass_midi_contains_no_guitar_range_notes(model_with_guitar_notes, tmp_path):
     """A bass part must not contain C6 (MIDI 84).
 
@@ -123,11 +148,6 @@ def test_bass_midi_contains_no_guitar_range_notes(model_with_guitar_notes, tmp_p
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-7: one event per model frame with no refractory period or "
-    "onset merging -> 87 notes/second on a monophonic input",
-)
 def test_note_density_is_musical(model_with_guitar_notes, tmp_path):
     """One second of monophonic audio must not yield dozens of notes.
 
@@ -161,11 +181,6 @@ def test_every_event_is_a_playable_note(model_with_guitar_notes, tmp_path):
     assert frames == sorted(frames)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-GATE-1: needs_review uses alignment (conf * sigmoid(energy*10)) "
-    "while low_confidence_count uses confidence, so the two disagree",
-)
 def test_summary_counts_agree_with_events(model_with_guitar_notes, tmp_path):
     """``summary`` must not contradict the per-event flags it summarises.
 
@@ -182,9 +197,6 @@ def test_summary_counts_agree_with_events(model_with_guitar_notes, tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    strict=True, reason="BUG-GATE-2: midi summary has no total_notes key"
-)
 def test_summary_exposes_total_note_count(model_with_guitar_notes, tmp_path):
     """The report a client renders needs the note count; it is absent."""
     result = model_with_guitar_notes.process_audio_file(_audio(tmp_path, 1.0))
@@ -196,11 +208,6 @@ def test_summary_exposes_total_note_count(model_with_guitar_notes, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-8: process_audio_streaming zeroes pitch_logits and velocity "
-    "before _logits_to_midi, so every streamed note is pitch 0 (C-1) at velocity 1",
-)
 def test_streaming_notes_are_not_all_pitch_zero(mock_config, tmp_path):
     """Streamed MIDI must contain real pitches, not 128 bins of silence.
 
@@ -224,8 +231,14 @@ def test_streaming_reports_chunk_count_and_sample_rate(mock_config, tmp_path):
     assert set(result["stems"]) == {"guitar", "bass"}
 
 
-def test_streaming_never_claims_studio_quality(mock_config, tmp_path):
-    """Streaming hard-codes zero metrics; it must not be routed as STUDIO."""
+def test_streaming_report_uses_real_chunk_metrics(mock_config, tmp_path):
+    """The streaming report must carry the separator's metrics, not zeros.
+
+    ``process_audio_streaming`` used to hard-code ``final_metrics = [0.0, 0.0]``,
+    so a streamed job could never be routed on its actual quality.
+    """
     model = _make_model(mock_config)
     result = model.process_audio_streaming(_audio(tmp_path, 1.0), chunk_seconds=1.0)
-    assert result["report"].quality_tier.value != "studio"
+    # _RegisterSeparator reports si_sdr=21.0 / phase=0.9 for every chunk.
+    assert result["report"].si_sdr == pytest.approx(21.0)
+    assert result["report"].phase_coherence == pytest.approx(0.9)

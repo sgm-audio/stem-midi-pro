@@ -17,12 +17,15 @@ Reference geometry (must match utils/midi.py):
     ticks_per_beat= 480          -> 960 ticks/sec
 So: ticks(onset_frame) = onset_frame * 512 / 44100 * 960
 
-Tests marked ``xfail(strict=True)`` describe a *known defect*: they fail on
-today's code and must be un-marked (not deleted) when the defect is fixed.
-Strict xfail means a fix turns the suite red, forcing the marker's removal.
+These tests were written as ``xfail(strict=True)`` while the timing defects
+were open (BUG-MIDI-1/2/3/4). The defects are now fixed in ``utils/midi.py`` and
+``utils/midi_targets.py``, so the markers are gone and these are ordinary
+regression tests: if the 60x tempo error or the chord serialisation returns,
+they fail.
 """
 
 import io
+import itertools
 
 import pytest
 
@@ -38,7 +41,7 @@ TEMPO_US = 500_000
 # Derived independently of utils/midi.py so a units bug in production cannot be
 # mirrored here (a helper that copies the buggy formula makes the test vacuous —
 # this exact mistake was caught by strict xfail on first run).
-BPM = 60_000_000 / TEMPO_US                     # 120
+BPM = 60_000_000 / TEMPO_US  # 120
 TICKS_PER_SECOND = TICKS_PER_BEAT * (BPM / 60)  # 480 * 2 = 960
 FRAMES_PER_SECOND = SAMPLE_RATE / HOP
 
@@ -76,9 +79,10 @@ def note_lengths(midi_bytes: bytes) -> list[int]:
         tick += msg.time
         if msg.type == "note_on" and msg.velocity > 0:
             on_tick[msg.note] = tick
-        elif msg.type in ("note_off",) or (msg.type == "note_on" and msg.velocity == 0):
-            if msg.note in on_tick:
-                lengths.append(tick - on_tick.pop(msg.note))
+        elif (msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0)) and (
+            msg.note in on_tick
+        ):
+            lengths.append(tick - on_tick.pop(msg.note))
     return lengths
 
 
@@ -102,11 +106,6 @@ def events(*frames_and_notes: tuple[int, int], **extra) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-1: ticks_per_second computes 480*(60/0.5)=57600 instead of "
-    "480*(1/0.5)=960 -> every note is emitted 60x too late in the bar",
-)
 def test_onset_tick_matches_audio_time():
     """A note at frame 100 (~1.16 s) must sit at tick 1115, not 66873.
 
@@ -118,9 +117,6 @@ def test_onset_tick_matches_audio_time():
     assert onsets == [(ticks_for_frame(100), 60)]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="BUG-MIDI-1: 60x tempo error makes the file 60x too long"
-)
 @pytest.mark.parametrize("seconds", [1.0, 2.0, 5.0])
 def test_midi_length_matches_audio_length(seconds):
     """A transcription of ``seconds`` of audio must not be longer than that.
@@ -136,10 +132,6 @@ def test_midi_length_matches_audio_length(seconds):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-1: relative spacing is also 60x (16th notes 7356 ticks apart, not 122)",
-)
 def test_sixteenth_note_spacing_is_one_sixteenth():
     """A 16th-note run at 120 BPM is 120 ticks per step; spacing must be uniform.
 
@@ -150,9 +142,11 @@ def test_sixteenth_note_spacing_is_one_sixteenth():
     step = 11  # 11 frames ~= 0.128 s ~= a 16th note at 120 BPM
     run = events(*[(i * step, 60 + i) for i in range(8)])
     ticks = [t for t, _ in note_onsets(build_midi_from_events(run, "guitar"))]
-    gaps = {b - a for a, b in zip(ticks, ticks[1:])}
-    assert len(gaps) == 1, f"non-uniform spacing {sorted(gaps)}"
-    assert abs(gaps.pop() - ticks_for_frame(step)) <= 1
+    gaps = [b - a for a, b in itertools.pairwise(ticks)]
+    expected = ticks_for_frame(step)
+    # Ticks are integers, so a 122.6-tick step round-trips as 122 or 123 —
+    # allow that quantisation but nothing more (the 60x bug gave 7 356).
+    assert all(abs(gap - expected) <= 1 for gap in gaps), f"gaps {gaps} vs expected {expected}"
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +154,6 @@ def test_sixteenth_note_spacing_is_one_sixteenth():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-2: the delta cursor advances past each note_off, so "
-    "simultaneous notes are serialised into an arpeggio (and then clamped)",
-)
 def test_chord_notes_share_one_tick():
     """Four pitches at one onset_frame must all be written at the same tick.
 
@@ -179,10 +168,6 @@ def test_chord_notes_share_one_tick():
     assert {t for t, _ in onsets} == {ticks_for_frame(50)}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-2: overlap clamp (max(0, delta)) makes polyphony impossible",
-)
 def test_chord_after_short_note_keeps_its_position():
     """A chord on the next beat must not be dragged later by the previous note.
 
@@ -207,11 +192,6 @@ def test_chord_after_short_note_keeps_its_position():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-1/3: build_midi_from_events writes ticks at 57600/s while "
-    "midi_to_targets reads them at 960/s -> 60x misalignment",
-)
 def test_own_writer_reads_back_at_the_same_frames(tmp_path):
     """build -> save -> midi_to_targets must recover the onset frames.
 
@@ -232,10 +212,6 @@ def test_own_writer_reads_back_at_the_same_frames(tmp_path):
     assert recovered == source_frames
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-MIDI-4: midi_to_targets ignores set_tempo, always assumes 120 BPM",
-)
 def test_midi_to_targets_honours_file_tempo(tmp_path):
     """A 60 BPM file's tick 480 is 1.0 s -> frame 86, not frame 43.
 
@@ -320,8 +296,13 @@ def test_explicit_duration_frames_sets_note_length():
     def length_for(frames: int) -> int:
         data = {
             "midi_events": [
-                {"onset_frame": 0, "note": 60, "velocity": 90, "confidence": 0.9,
-                 "duration_frames": frames}
+                {
+                    "onset_frame": 0,
+                    "note": 60,
+                    "velocity": 90,
+                    "confidence": 0.9,
+                    "duration_frames": frames,
+                }
             ]
         }
         (length,) = note_lengths(build_midi_from_events(data, "guitar"))

@@ -22,6 +22,11 @@ class ProcessingReport:
     artifact_flags: list[str]
     low_confidence_notes: int
     config: dict[str, Any] = None
+    # Provenance (BUG-WIRING-2 / BUG-HONESTY-1): which backends produced this
+    # report, and whether real weights were loaded. Without these a fake or
+    # randomly-initialised run is indistinguishable from a trained Demucs run.
+    backend: str = "unknown"
+    weights_loaded: bool = False
 
     def __post_init__(self):
         gates = (self.config or {}).get("quality_gates", {})

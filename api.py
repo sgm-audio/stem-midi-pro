@@ -753,6 +753,11 @@ async def process_audio(
         ) from e
     except AudioValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except ValueError as e:
+        # Input-validation failures raised by the model (non-finite samples,
+        # audio shorter than one STFT window) are client errors, not crashes.
+        log_event("error", "invalid_audio", error=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         log_event("error", "processing_failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Processing failed: {e!s}") from e
@@ -822,6 +827,7 @@ async def get_model_info():
             headers={"Retry-After": RETRY_AFTER_SECONDS},
         )
     cfg = model_config or {}
+    backends = cfg.get("backends") or {}
     return {
         "model_name": cfg.get("name", "unknown"),
         "audio_config": cfg.get("audio", {}),
@@ -829,6 +835,15 @@ async def get_model_info():
         "transcriber_config": cfg.get("transcriber", {}),
         "training_config": cfg.get("training", {}),
         "quality_gates": cfg.get("quality_gates", {}),
+        # Provenance: which code path is actually serving, and whether the
+        # weights are trained. Without this a randomly-initialised model is
+        # indistinguishable from a trained one (BUG-HONESTY-1/2).
+        "backend": {
+            "separator": backends.get("separator", "mamba"),
+            "transcriber": backends.get("transcriber", "mamba"),
+        },
+        "mamba_backend": getattr(model, "mamba_backend", None),
+        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
     }
 
 

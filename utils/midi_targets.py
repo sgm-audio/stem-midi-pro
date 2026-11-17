@@ -32,7 +32,6 @@ def midi_to_targets(
 
     mid = mido.MidiFile(midi_path)
     ticks_per_beat = mid.ticks_per_beat or 480
-    seconds_per_tick = DEFAULT_TEMPO_US / 1e6 / ticks_per_beat
 
     onset = torch.zeros(1, n_frames, 1)
     pitch = torch.zeros(1, n_frames, pitch_vocab)
@@ -40,17 +39,24 @@ def midi_to_targets(
 
     for track in mid.tracks:
         abs_time_s = 0.0
+        # Tempo is a running property of the track, not a constant of the file:
+        # real corpus MIDI (Slakh/MUSDB) is not all at 120 BPM, and assuming it
+        # is shifts every target by a tempo-dependent ratio (BUG-MIDI-4).
+        tempo_us = DEFAULT_TEMPO_US
+        seconds_per_tick = tempo_us / 1e6 / ticks_per_beat
         for msg in track:
+            # `msg.time` is a delta in ticks at the tempo in force *before* this
+            # message, so advance first and apply any tempo change afterwards.
             abs_time_s += msg.time * seconds_per_tick
-            if msg.type == "note_on" and msg.velocity > 0:
+            if msg.type == "set_tempo":
+                tempo_us = msg.tempo
+                seconds_per_tick = tempo_us / 1e6 / ticks_per_beat
+            elif msg.type == "note_on" and msg.velocity > 0:
                 frame = round(abs_time_s * sample_rate / hop_length)
                 if 0 <= frame < n_frames:
                     onset[0, frame, 0] = 1.0
                     if 0 <= msg.note < pitch_vocab:
                         pitch[0, frame, msg.note] = 1.0
                     velocity[0, frame, 0] = msg.velocity / 127.0
-            elif msg.type == "set_tempo":
-                # Recompute timing from this point (rare; not tracked per-tick in v1)
-                pass
 
     return onset, pitch, velocity

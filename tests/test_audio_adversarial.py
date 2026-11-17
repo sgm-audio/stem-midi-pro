@@ -145,11 +145,6 @@ def confident_model(mock_config):
     return model
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-1: nothing gates the transcriber on input energy, so a "
-    "silent file is transcribed at face value (one note per model frame)",
-)
 def test_silence_emits_no_note_events_even_with_a_confident_head(confident_model):
     """Digital silence must transcribe to zero notes, not a wall of notes.
 
@@ -163,18 +158,13 @@ def test_silence_emits_no_note_events_even_with_a_confident_head(confident_model
     assert events == [], f"silence produced {len(events)} note events"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-2: silence yields artifact_flags=['none'] — the gate has no "
-    "notion of 'no signal'",
-)
 def test_silence_is_flagged_not_silent_pass(mock_model):
     """A silent input must be reported as such, so routing can reject it."""
     with torch.inference_mode():
         report = mock_model(torch.zeros(1, 1, SR))["processing_report"]
-    assert any(flag in report.artifact_flags for flag in ("silence", "no_signal")), (
-        f"silence reported as {report.artifact_flags}"
-    )
+    assert any(
+        flag in report.artifact_flags for flag in ("silence", "no_signal")
+    ), f"silence reported as {report.artifact_flags}"
 
 
 # ---------------------------------------------------------------------------
@@ -182,12 +172,6 @@ def test_silence_is_flagged_not_silent_pass(mock_model):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-3: clipping is tested on model *output* only "
-    "(abs().max() > 0.99). A hard-clipped input shrinks under the masks, so it "
-    "comes back labelled 'noise_floor' — a different defect than the one present",
-)
 def test_hard_clipped_input_is_flagged(mock_model):
     """A square-clipped guitar DI is the most common bad-stem cause.
 
@@ -197,16 +181,11 @@ def test_hard_clipped_input_is_flagged(mock_model):
     clipped = np.clip(_tone(1.0, 220.0, amp=6.0), -1.0, 1.0).astype(np.float32)
     with torch.inference_mode():
         report = mock_model(torch.from_numpy(clipped).reshape(1, 1, -1))["processing_report"]
-    assert "clipping" in report.artifact_flags, (
-        f"hard-clipped input flagged as {report.artifact_flags}"
-    )
+    assert (
+        "clipping" in report.artifact_flags
+    ), f"hard-clipped input flagged as {report.artifact_flags}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-4: a constant DC offset is passed through unflagged "
-    "(centroid proxy collapses to si_sdr=0 but no artifact is raised)",
-)
 def test_dc_offset_is_flagged_or_removed(mock_model):
     """DC offset wastes headroom and biases every mask; it must be handled."""
     dc = np.full(SR, 0.5, dtype=np.float32)
@@ -215,44 +194,40 @@ def test_dc_offset_is_flagged_or_removed(mock_model):
     assert "dc_offset" in report.artifact_flags
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-4a: a single NaN sample is not rejected at the boundary and "
-    "propagates through STFT/mel to the processing report",
-)
 def test_nan_input_does_not_silently_produce_nan_report(mock_model):
     """A NaN sample must be rejected at the boundary, never propagated.
 
-    Today the NaN flows into the report: si_sdr=nan, avg_confidence=nan,
-    artifact_flags=['none'], and ``create_response_zip`` then emits ``NaN``
-    literals in processing_report.json — which strict JSON parsers reject.
+    Previously the NaN flowed into the report (si_sdr=nan, avg_confidence=nan,
+    artifact_flags=['none']) and ``create_response_zip`` emitted ``NaN``
+    literals into processing_report.json, which strict parsers reject.
+    ``_validate_audio`` now rejects the input up front (BUG-AUDIO-4).
     """
     poisoned = _tone(1.0, 220.0).copy()
     poisoned[1000] = np.nan
-    with pytest.raises((ValueError, AssertionError)):
-        with torch.inference_mode():
-            mock_model(torch.from_numpy(poisoned).reshape(1, 1, -1))
+    with pytest.raises((ValueError, AssertionError)), torch.inference_mode():
+        mock_model(torch.from_numpy(poisoned).reshape(1, 1, -1))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-4b: NaN propagates into ProcessingReport (si_sdr=nan), so "
-    "processing_report.json is not strict JSON",
-)
-def test_report_is_strict_json_for_nan_input(mock_model):
-    """Whatever survives inference must serialise to strict JSON."""
+def test_report_serialises_to_strict_json(mock_model, tmp_path):
+    """``processing_report.json`` must be parseable by a strict JSON reader.
+
+    ``json.dumps`` happily emits bare ``NaN``/``Infinity`` tokens, which RFC
+    8259 forbids and most clients reject. Now that non-finite input is rejected
+    at the boundary, a report built from valid audio must serialise cleanly.
+    """
     import json
 
-    poisoned = _tone(0.5, 220.0).copy()
-    poisoned[100] = np.nan
-    with torch.inference_mode():
-        out = mock_model(torch.from_numpy(poisoned).reshape(1, 1, -1))
-    report = out["processing_report"]
+    result = _run_file(mock_model, tmp_path, "ok.wav", _tone(0.5, 220.0))
+    report = result["report"]
     payload = json.dumps(
-        {"si_sdr": float(report.si_sdr), "avg_confidence": float(report.avg_confidence)},
+        {
+            "si_sdr": float(report.si_sdr),
+            "phase_coherence": float(report.phase_coherence),
+            "avg_confidence": float(report.avg_confidence),
+        },
         allow_nan=False,
     )
-    json.loads(payload)
+    assert json.loads(payload)["si_sdr"] == pytest.approx(report.si_sdr)
 
 
 # ---------------------------------------------------------------------------
@@ -260,21 +235,35 @@ def test_report_is_strict_json_for_nan_input(mock_model):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-5: input shorter than n_fft/2 (1024 samples, 23 ms at the "
-    "production config) raises RuntimeError from torch.stft reflect padding -> "
-    "the API maps it to 500 'Processing failed' instead of 400",
-)
-@pytest.mark.parametrize("n_samples", [1, 200, 1000])
-def test_sub_window_audio_raises_a_validation_error(mock_model, n_samples):
-    """Under one STFT window the API must answer 400, not blow up with a 500."""
+@pytest.mark.parametrize("fraction", [0.001, 0.5, 0.99])
+def test_sub_window_audio_raises_a_validation_error(mock_model, fraction):
+    """Under one STFT window the API must answer 400, not blow up with a 500.
+
+    The threshold is ``n_fft`` (read from the model config so this tracks the
+    real value), because ``torch.stft`` reflect-pads by ``n_fft/2`` and raises a
+    ``RuntimeError`` for anything shorter.
+    """
     from audio_io import AudioValidationError
 
+    n_fft = int(mock_model.cfg["audio"]["n_fft"])
+    n_samples = max(1, int(n_fft * fraction))
+    assert n_samples < n_fft
     tiny = _tone(1.0, 220.0)[:n_samples]
-    with pytest.raises((AudioValidationError, ValueError)):
-        with torch.inference_mode():
-            mock_model(torch.from_numpy(tiny).reshape(1, 1, -1))
+
+    with (
+        pytest.raises((AudioValidationError, ValueError), match=r"short|n_fft"),
+        torch.inference_mode(),
+    ):
+        mock_model(torch.from_numpy(tiny).reshape(1, 1, -1))
+
+
+def test_single_stft_window_is_accepted(mock_model):
+    """Exactly ``n_fft`` samples is the documented minimum and must not raise."""
+    n_fft = int(mock_model.cfg["audio"]["n_fft"])
+    window = _tone(1.0, 220.0)[:n_fft]
+    with torch.inference_mode():
+        out = mock_model(torch.from_numpy(window).reshape(1, 1, -1))
+    assert out["guitar_stem"].shape[-1] == n_fft
 
 
 # ---------------------------------------------------------------------------
@@ -282,11 +271,6 @@ def test_sub_window_audio_raises_a_validation_error(mock_model, n_samples):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-AUDIO-6: resampling is F.interpolate(mode='linear'), a triangle "
-    "filter with no anti-imaging; an 8 kHz source keeps a -4 dB image at 4.5 kHz",
-)
 def test_upsampling_does_not_inject_spectral_images(passthrough_model, tmp_path):
     """An 8 kHz upload must not acquire energy that was never in the recording.
 
@@ -312,9 +296,7 @@ def test_upsampling_does_not_inject_spectral_images(passthrough_model, tmp_path)
 
 def test_downsampled_length_is_preserved(passthrough_model, tmp_path):
     """Resampling must not change duration: 1 s in -> 1 s out (already holds)."""
-    result = _run_file(
-        passthrough_model, tmp_path, "hi.wav", _tone(1.0, 1000.0, 48000), 48000
-    )
+    result = _run_file(passthrough_model, tmp_path, "hi.wav", _tone(1.0, 1000.0, 48000), 48000)
     assert abs(len(result["stems"]["guitar"]) - SR) <= 2
 
 
@@ -365,23 +347,19 @@ def test_full_scale_noise_stems_stay_finite(mock_model):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-PERF-1: process_audio_file passes the whole file to the model; "
-    "cfg['audio']['chunk_duration_sec'] is only read by process_audio_streaming, "
-    "so a 10-min upload is one 51k-frame STFT (~14 GB projected peak RSS)",
-)
 def test_process_audio_file_honours_chunk_duration(mock_config, tmp_path):
     """Long files must be processed in ``chunk_duration_sec`` slices.
 
-    Measured with the production config: peak RSS grows ~23 MB per second of
-    audio (60 s -> 2346 MB), which projects to ~14 GB for the 10-minute limit
-    the API advertises. Chunking is the configured remedy and is currently
-    bypassed on the non-streaming path.
+    Measured with the production config: peak RSS grew ~23 MB per second of
+    audio (60 s -> 2346 MB), which projected to ~14 GB for the 10-minute limit
+    the API advertises. ``chunk_duration_sec`` was only read by the streaming
+    path; ``process_audio_file`` now chunks too, bounding the working set.
     """
     from main import StemMidiModel
 
-    model = StemMidiModel(mock_config).eval()
+    cfg = {**mock_config, "backends": {"separator": "mamba", "transcriber": "mamba"}}
+    model = StemMidiModel(cfg).eval()
+
     seen: list[int] = []
 
     class _Recording(torch.nn.Module):
@@ -397,27 +375,29 @@ def test_process_audio_file_honours_chunk_duration(mock_config, tmp_path):
     path = _write(tmp_path / "six.wav", np.zeros(6 * SR, dtype=np.float32))
     model.process_audio_file(path)
 
-    chunk_len = int(mock_config["audio"]["chunk_duration_sec"] * SR)
+    chunk_len = int(cfg["audio"]["chunk_duration_sec"] * SR)
+    assert seen, "separator was never called"
     assert max(seen) <= chunk_len, (
         f"largest single forward saw {max(seen)} samples "
         f"({max(seen) / SR:.1f}s) with chunk_duration_sec="
-        f"{mock_config['audio']['chunk_duration_sec']}"
+        f"{cfg['audio']['chunk_duration_sec']}"
     )
+    assert len(seen) >= 2, "a 6 s file with 2 s chunks must take more than one chunk"
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-PERF-1: peak RSS is linear in file length (~23 MB/s), so the "
-    "10-minute API limit needs ~14 GB — far beyond the 4-8 GB target",
-)
-def test_ten_minute_upload_fits_in_4gb():
-    """Project 10-minute memory from a cheap 12 s measurement.
+def test_one_minute_upload_fits_in_2gb(tmp_path):
+    """A 60 s file must not grow peak RSS by more than the chunk working set.
 
-    Measuring beats asserting: this uses the production config and extrapolates
-    from the observed slope instead of allocating the 10-minute tensor (which
-    would OOM the test runner itself). The 4 GB ceiling is the stated CPU
-    target's low end.
+    Regression for BUG-PERF-1. Before chunking, ``process_audio_file`` passed
+    the whole file to the model: peak RSS grew ~23 MB per audio-second
+    (60 s -> 2346 MB), projecting to ~14 GB for the 10-minute limit the API
+    advertises. With ``chunk_duration_sec`` honoured, peak RSS plateaus:
+    measured 880 MB at 4 s and 966 MB at 64 s with the production config.
+
+    Asserted as growth-over-baseline rather than an extrapolated slope, because
+    ``ru_maxrss`` is a high-water mark and a fitted slope through a plateau is
+    dominated by allocator noise.
     """
     import yaml
 
@@ -426,19 +406,17 @@ def test_ten_minute_upload_fits_in_4gb():
     with open("configs/model_config.yaml", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     model = StemMidiModel(cfg).eval()
+    sr = int(cfg["audio"]["sample_rate"])
 
+    path = _write(tmp_path / "sixty.wav", _tone(60.0, 220.0, sr))
     baseline = _rss_mb()
-    peaks = []
-    for seconds in (4, 12):
-        with torch.inference_mode():
-            model(torch.randn(1, 1, seconds * SR) * 0.05)
-        peaks.append((seconds, _rss_mb()))
+    model.process_audio_file(path)
+    growth = _rss_mb() - baseline
 
-    (s1, m1), (s2, m2) = peaks
-    mb_per_second = (m2 - m1) / (s2 - s1)
-    projected = m2 + mb_per_second * (600 - s2)
-    assert projected < 4096, (
-        f"projected peak RSS for a 10-min upload is {projected:.0f} MB "
-        f"({mb_per_second:.1f} MB per audio-second); target is < 4096 MB"
+    # The output stems alone are ~21 MB for 60 s; the chunk working set is a few
+    # hundred MB. 800 MB leaves headroom for allocator variance while still
+    # failing on the old linear-growth behaviour (~1 500 MB for 60 s).
+    assert growth < 800, (
+        f"60 s upload grew peak RSS by {growth:.0f} MB (baseline {baseline:.0f} MB); "
+        "chunking is no longer bounding the working set"
     )
-    assert baseline > 0  # keep the baseline measurement referenced for clarity

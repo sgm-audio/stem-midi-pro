@@ -29,6 +29,8 @@ import textwrap
 
 import pytest
 
+MAMBA_BACKEND_CHOICES = {"mamba-ssm", "pure-torch"}
+
 
 def _mamba_backend() -> str:
     from models._mamba_compat import MAMBA_BACKEND
@@ -53,9 +55,9 @@ def mamba_ssm_installed() -> bool:
 def test_backend_identity_matches_availability():
     """``MAMBA_BACKEND`` must agree with what is actually importable."""
     expected = "mamba-ssm" if mamba_ssm_installed() else "pure-torch"
-    assert _mamba_backend() == expected, (
-        f"MAMBA_BACKEND={_mamba_backend()!r} but mamba_ssm installed={mamba_ssm_installed()}"
-    )
+    assert (
+        _mamba_backend() == expected
+    ), f"MAMBA_BACKEND={_mamba_backend()!r} but mamba_ssm installed={mamba_ssm_installed()}"
 
 
 def test_importing_the_model_does_not_require_mamba_ssm():
@@ -65,8 +67,7 @@ def test_importing_the_model_does_not_require_mamba_ssm():
     blocks a module for the lifetime of a process. Run in a subprocess so the
     blocker cannot leak into other tests.
     """
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import sys
 
         sys.modules["mamba_ssm"] = None  # makes `from mamba_ssm import ...` raise
@@ -78,8 +79,7 @@ def test_importing_the_model_does_not_require_mamba_ssm():
 
         from main import StemMidiModel
         print("OK", compat.MAMBA_BACKEND)
-        """
-    )
+        """)
     proc = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=300
     )
@@ -198,21 +198,13 @@ def test_real_and_fallback_paths_agree_on_shapes(mock_config):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-HONESTY-2: MAMBA_BACKEND is computed then never read — no log line, "
-    "no /model-info field, no report field",
-)
 def test_runtime_exposes_which_mamba_implementation_ran():
-    """An operator must be able to tell the reference scan from the CUDA kernel.
+    """``StemMidiModel`` must publish the Mamba implementation that is live.
 
-    The two differ by roughly an order of magnitude in throughput and can differ
-    numerically; "which one is live" belongs in ``/model-info`` next to the
-    existing separator/transcriber config.
+    The string is surfaced by ``/model-info`` and the processing report so an
+    operator can tell the CUDA kernel from the reference scan.
     """
-    import api  # noqa: F401  (imported for its side-effect-free config access)
-
     from main import StemMidiModel
 
-    model = StemMidiModel.__new__(StemMidiModel)  # no init: provenance must be static
-    assert getattr(model, "mamba_backend", None) == _mamba_backend()
+    assert StemMidiModel.mamba_backend == _mamba_backend()
+    assert {_mamba_backend()} <= MAMBA_BACKEND_CHOICES

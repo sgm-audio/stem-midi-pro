@@ -61,32 +61,62 @@ def build_midi_from_events(
     track.append(MetaMessage("instrument_name", name=instrument))
     track.append(MetaMessage("marker", text=f"{stem_type.capitalize()} - Stem+MIDI Pro"))
 
-    # 120 BPM -> 2 beats/sec -> ticks_per_beat * 2 ticks per second
-    ticks_per_second = ticks_per_beat * (60.0 / (DEFAULT_TEMPO_US / 1_000_000.0))
+    # Tempo: DEFAULT_TEMPO_US is microseconds per beat, i.e. 2 beats/sec at
+    # 120 BPM -> 480 * 2 = 960 ticks/second. (Was 480 * (60/0.5) = 57600, which
+    # placed every note 60x too late in the bar; see BUG-MIDI-1.)
+    bpm = 60_000_000.0 / DEFAULT_TEMPO_US
+    ticks_per_second = ticks_per_beat * bpm / 60.0
 
     events = midi_data.get("midi_events", [])
-    # Mido `time` is delta-ticks, not absolute. Track a running cursor so that
-    # multi-event files do not drift (B2: was writing absolute ticks as deltas).
-    current_tick = 0
-    for ev in events:
-        tick = int(ev["onset_frame"] * hop_length / sample_rate * ticks_per_second)
-        delta = tick - current_tick
-        current_tick = tick
-        note = int(ev["note"])
+
+    # Mido `time` is delta-ticks, not absolute, so build the absolute-tick
+    # schedule first and convert to deltas in a single monotone pass. Scheduling
+    # note_on/note_off independently keeps *simultaneous* notes simultaneous:
+    # advancing a single cursor past each note_off (the previous approach)
+    # serialised chords into arpeggios (BUG-MIDI-2).
+    #
+    # Sort key: tick, then kind (note_off before note_on before control_change
+    # so a re-triggered pitch is released before it is struck), then insertion
+    # order for stability.
+    _ORDER_OFF, _ORDER_ON, _ORDER_CC = 0, 1, 2
+    schedule: list[tuple[int, int, int, Message]] = []
+
+    for seq, ev in enumerate(events):
+        tick = max(0, round(ev["onset_frame"] * hop_length / sample_rate * ticks_per_second))
+        note = max(0, min(127, int(ev["note"])))
         velocity = min(127, max(1, int(ev["velocity"])))
-        track.append(Message("note_on", note=note, velocity=velocity, time=max(0, delta)))
 
         duration_frames = ev.get("duration_frames")
         if duration_frames:
-            dur_ticks = max(1, int(duration_frames * hop_length / sample_rate * ticks_per_second))
+            dur_ticks = max(1, round(duration_frames * hop_length / sample_rate * ticks_per_second))
         else:
             dur_ticks = max(1, int(default_duration_beats * ticks_per_beat))
-        track.append(Message("note_off", note=note, velocity=0, time=dur_ticks))
-        current_tick += dur_ticks
+
+        schedule.append(
+            (tick + dur_ticks, _ORDER_OFF, seq, Message("note_off", note=note, velocity=0, time=0))
+        )
+        schedule.append(
+            (
+                tick,
+                _ORDER_ON,
+                seq,
+                Message("note_on", note=note, velocity=velocity, time=0),
+            )
+        )
 
         cc_val = ev.get("cc_127_value", int(ev.get("confidence", 0.0) * 127))
         cc_clamped = min(127, max(0, int(cc_val)))
-        track.append(Message("control_change", control=127, value=cc_clamped, time=0))
+        schedule.append(
+            (tick, _ORDER_CC, seq, Message("control_change", control=127, value=cc_clamped, time=0))
+        )
+
+    schedule.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    current_tick = 0
+    for tick, _kind, _seq, msg in schedule:
+        msg.time = max(0, tick - current_tick)
+        current_tick = max(current_tick, tick)
+        track.append(msg)
 
     track.append(MetaMessage("end_of_track"))
 

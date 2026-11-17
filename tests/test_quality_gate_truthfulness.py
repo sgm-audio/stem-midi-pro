@@ -99,8 +99,12 @@ def test_gate_thresholds_are_config_driven():
         artifact_flags=["none"],
         low_confidence_notes=0,
     )
-    lenient = ProcessingReport(config={"quality_gates": {"studio_confidence_threshold": 0.75}}, **kwargs)
-    strict = ProcessingReport(config={"quality_gates": {"studio_confidence_threshold": 0.90}}, **kwargs)
+    lenient = ProcessingReport(
+        config={"quality_gates": {"studio_confidence_threshold": 0.75}}, **kwargs
+    )
+    strict = ProcessingReport(
+        config={"quality_gates": {"studio_confidence_threshold": 0.90}}, **kwargs
+    )
     assert lenient.quality_tier is QualityTier.STUDIO
     assert strict.quality_tier is not QualityTier.STUDIO
     assert route_by_quality(strict)["editor_launch"] is True
@@ -123,11 +127,6 @@ def test_any_artifact_flag_blocks_studio():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-GATE-3: needs_review = confidence * sigmoid(energy*10) < min_confidence, "
-    "so a quiet-but-confident passage is always flagged for review",
-)
 def test_review_flag_is_independent_of_output_gain():
     """Scaling a stem up or down must not change which notes need review.
 
@@ -146,24 +145,17 @@ def test_review_flag_is_independent_of_output_gain():
 
     quiet_flags = [e["needs_review"] for e in quiet["midi_events"]]
     loud_flags = [e["needs_review"] for e in loud["midi_events"]]
-    assert quiet_flags == loud_flags, (
-        f"review flags changed with gain alone: quiet={quiet_flags} loud={loud_flags}"
-    )
+    assert (
+        quiet_flags == loud_flags
+    ), f"review flags changed with gain alone: quiet={quiet_flags} loud={loud_flags}"
 
 
 def test_low_confidence_notes_are_flagged():
     injector = ConfidenceInjector(min_confidence=0.6)
-    out = injector.inject_midi_metadata(
-        _events(2), torch.full((64,), 0.05), torch.full((64,), 1.0)
-    )
+    out = injector.inject_midi_metadata(_events(2), torch.full((64,), 0.05), torch.full((64,), 1.0))
     assert all(e["needs_review"] for e in out["midi_events"])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-GATE-4: low_confidence_count counts low-confidence *frames* "
-    "(64) but is reported to users as a count of low-confidence *notes* (2)",
-)
 def test_low_confidence_count_counts_notes_not_frames():
     """``ProcessingReport.low_confidence_notes`` must count notes.
 
@@ -171,17 +163,13 @@ def test_low_confidence_count_counts_notes_not_frames():
     the UI can claim more low-confidence notes than the MIDI contains.
     """
     injector = ConfidenceInjector(min_confidence=0.6)
-    out = injector.inject_midi_metadata(
-        _events(2), torch.full((64,), 0.05), torch.full((64,), 1.0)
-    )
+    out = injector.inject_midi_metadata(_events(2), torch.full((64,), 0.05), torch.full((64,), 1.0))
     assert out["summary"]["low_confidence_count"] == 2
 
 
 def test_high_confidence_loud_notes_are_not_flagged():
     injector = ConfidenceInjector(min_confidence=0.6)
-    out = injector.inject_midi_metadata(
-        _events(2), torch.full((64,), 0.99), torch.full((64,), 1.0)
-    )
+    out = injector.inject_midi_metadata(_events(2), torch.full((64,), 0.99), torch.full((64,), 1.0))
     assert not any(e["needs_review"] for e in out["midi_events"])
 
 
@@ -209,11 +197,6 @@ def test_events_outside_the_confidence_grid_are_handled_safely():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-HONESTY-1: no weights/backend provenance anywhere in the report, "
-    "yet the API serves a ZIP for a randomly-initialised model",
-)
 def test_report_records_weights_provenance(mock_model):
     """The delivered report must state whether real weights were loaded.
 

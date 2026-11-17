@@ -33,11 +33,6 @@ def test_factory_selects_the_configured_backend(mock_config):
     assert isinstance(build_transcriber(mock_config), FakeTranscriberBackend)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-WIRING-1: StemMidiModel.__init__ constructs MambaSeparator/"
-    "MambaTranscriber directly and never consults cfg['backends']",
-)
 def test_stem_midi_model_uses_the_configured_backend(mock_config):
     """A model configured with ``backends.separator='fake'`` must use it.
 
@@ -53,8 +48,7 @@ def test_stem_midi_model_uses_the_configured_backend(mock_config):
 
     model = StemMidiModel(mock_config)
     assert isinstance(model.separator, FakeSeparatorBackend), (
-        f"separator is {type(model.separator).__name__} despite "
-        f"backends.separator='fake'"
+        f"separator is {type(model.separator).__name__} despite " f"backends.separator='fake'"
     )
     assert isinstance(model.transcriber, FakeTranscriberBackend)
 
@@ -70,11 +64,6 @@ def test_cpu_config_still_declares_external_backends():
     assert backends.get("transcriber") == "basic_pitch"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-WIRING-2: ProcessingReport carries no backend identity, so a fake "
-    "or fallback run is indistinguishable from a real Demucs run in the ZIP",
-)
 def test_report_identifies_the_backend_that_produced_it(mock_config):
     """The delivered report must name the separator/transcriber that ran.
 

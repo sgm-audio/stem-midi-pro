@@ -121,3 +121,41 @@ class STFTModule(nn.Module):
 
     def inverse(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
         return compute_istft(spec, self.n_fft, self.hop_length, self.window, length)
+
+
+def resample_audio(audio: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
+    """Band-limited resampling for (B, C, T) tensors or 1-D input.
+
+    ``F.interpolate(mode="linear")`` is a triangle filter with no anti-imaging
+    or anti-aliasing, so an 8 kHz upload acquired a -4 dB spectral image at
+    4.5 kHz (BUG-AUDIO-6) and a 48 kHz source could fold content above the new
+    Nyquist back into the audible band. Both corrupt the mel input the
+    transcriber sees, so the sample-rate conversion must be band-limited.
+
+    Uses ``librosa.resample`` (polyphase / soxr) when available, which is a
+    project dependency; falls back to linear interpolation only if librosa is
+    missing, so an install without it degrades rather than crashes.
+    """
+    if orig_sr == target_sr:
+        return audio
+
+    squeeze = audio.dim() == 1
+    x = audio.unsqueeze(0).unsqueeze(0) if squeeze else audio
+    if x.dim() != 3:
+        raise ValueError(f"expected (B, C, T) or (T,) audio, got shape {tuple(x.shape)}")
+
+    n_out = max(1, round(x.shape[-1] * target_sr / orig_sr))
+    flat = x.reshape(-1, x.shape[-1]).cpu().numpy()
+
+    try:
+        import librosa
+
+        out = librosa.resample(flat, orig_sr=orig_sr, target_sr=target_sr, axis=-1)
+        resampled = torch.from_numpy(out).to(dtype=x.dtype).reshape(x.shape[0], x.shape[1], -1)
+    except ImportError:  # pragma: no cover - librosa is a hard dependency
+        resampled = torch.nn.functional.interpolate(
+            x, size=n_out, mode="linear", align_corners=False
+        )
+
+    resampled = resampled.to(device=x.device).reshape(*x.shape[:-1], -1)
+    return resampled.squeeze(0).squeeze(0) if squeeze else resampled

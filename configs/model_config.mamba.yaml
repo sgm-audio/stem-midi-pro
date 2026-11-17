@@ -24,6 +24,9 @@ separator:
   expand: 2
 
 transcriber:
+  # Onset refractory: one note per 50 ms max (caps density at 20 notes/s and
+  # merges the multi-frame smear of a single attack). BUG-MIDI-7.
+  min_onset_interval_ms: 50
   d_model: 512
   n_layer: 8
   d_state: 12
