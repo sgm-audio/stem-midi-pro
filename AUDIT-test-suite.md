@@ -39,8 +39,77 @@ correctness gate can actually go red.
 $ make test-cpu            # pytest -m "not cuda" --strict-deps --fail-on-skip
 192 passed, 1 skipped, 1 deselected, 65 xfailed in 13.5s
 ```
+(against `6ab1a1e`). After merging PR #11 the same command reads:
+```
+$ pytest -q -m "not cuda" --strict-deps --fail-on-skip
+254 passed, 1 skipped, 1 deselected, 40 xfailed, exit 0 in 14.7s
+```
+40 of the original 65 locks survive, 25 became XPASS failures because #11 fixed the
+underlying defects, and 11 of the 33 TODO IDs are now marked resolved. See §0.1.
+```
 
 ---
+
+## 0.1 Reconciliation with `main` after the audit (PR #11 merged into this branch)
+
+The audit and its suite were written against `6ab1a1e`. `origin/main` has since landed
+PR #11 (`00cd285`), which fixes a third of what I indicted. This section is the diff
+between "what the audit said" and "what the suite locks today", written because the
+numbers in §0-§5 are otherwise misleading to a reader who starts here.
+
+**Fixed upstream, markers deleted, tests kept as pass-today guards** (each of these
+turned into an XPASS-strict failure on the merged tree first — the mechanism this audit
+proposed, doing its job): `MIDI-1` (tick math: `ticks_per_beat * 1e6 / tempo_us`),
+`MIDI-2` (per-note timelines + sort by absolute tick), `MIDI-3` (confidence CC now rides
+immediately *with* its `note_on`, and moved off CC#127 onto CC#16 = General Purpose 1),
+`MIDI-6` (reader applies the parsed tempo), `STEM-1` (H-8 transcribes each stem,
+`midi_metadata = {guitar, bass, summary}`), `API-1` (`_stem_midi_data` selects per stem),
+`IO-1` (`models/mamba_separator.py:101-108` validates rank/channels/length and raises
+`ValueError` before `torch.stft` can die), `BACK-1`/`BACK-2` (`main` builds backends from
+`cfg["backends"]` via `models.backends.factory` and consumes the `SeparateOut` /
+`TranscribeOut` dicts), `CFG-2` (`mock_config` is 512/128, so the real separator runs on
+the fast config), and half of `CFG-3`.
+
+**New defect found while reconciling, fixed on this branch:** `CFG-3`'s other half.
+`main` wired `training.gradient_checkpointing` into `models/_mamba_compat.py` but called
+`torch.utils.checkpoint.checkpoint(...)` without importing the submodule — `import torch`
+does not bind it — so the CPU memory mitigation raised `AttributeError` on first use and
+`main`'s own `tests/test_review_fixes.py::test_gradient_checkpointing_training_path` was
+reddening merged main while its CI step is `continue-on-error`. This branch adds the one
+missing import and guards it with
+`tests/test_memory_ceiling.py::test_gradient_checkpointing_call_resolves_in_a_fresh_interpreter`,
+which deliberately probes in a **subprocess**: inside a shared session, `torch.utils.checkpoint`
+becomes importable for the whole run as soon as *any* test imports it, so an in-process
+probe passes depending on test order. Verified both ways: commenting the import out reddens
+the guard, restoring it greens it. This is the only non-test file this audit touches; drop
+that commit if you want the fix to travel separately.
+
+**Two IDs added:** `MIDI-7` (the reader honours one tempo for the whole file and ignores a
+`set_tempo` in the middle of a tempo map — measured: a note at tick 1440 of a 120→60 BPM
+file lands on frame 129 instead of 215, a one-second drift) and `EXPR-1` (the expression
+head is discarded and no `pitch_bend`/CC1 ever reaches the SMF, while the README promises
+per-note vibrato and slide).
+
+**Two of the audit's own claims were wrong, and are retracted here.** Both were caught by
+the merged tree, not by me in advance, which is the argument for running the suite against
+`main` rather than reasoning about it:
+
+1. *"parsed note onsets must be non-decreasing"* — not a product bug. The writer resolves
+   same-pitch re-articulation as **release-then-strike inside one tick**, so a re-parsed
+   note list is in *closing* order, not striking order, and multi-track files interleave.
+   `assert ons == sorted(ons)` and `parsed["notes"][1]` ("the second note") are both
+   meaningless against this design; the guards now compare onsets as a multiset and select
+   notes by pitch.
+2. *"PPQ propagation must be exact to 1e-3 s"* — also not a bug. 96-PPQ quantisation moves a
+   0.232292 s onset to 0.234375 s, i.e. 2.08 ms = 0.2 ticks. A tick-grid tolerance
+   (`<= 2` ticks at the file's PPQ) is the musically honest criterion; "fixing" the writer
+   to beat 1e-3 would be *wrong*, since SMF ticks are integers.
+
+One refinement the audit should have made: `MIDI-4` is not a one-line `int() -> round()` in
+`utils/midi.py`. `models/confidence_injector.py:72` computes `int(conf_score * 127)` and
+hands the writer an already-truncated `confidence_cc_value`, so rounding only the writer
+changes nothing for a model-produced event. The `xfail` reason now names both call sites.
+
 
 ## 1. Baseline re-verification (the brief asked me not to trust the stated numbers)
 
@@ -84,7 +153,7 @@ still worth keeping and now has company.
 | Test | Asserts |
 | --- | --- |
 | `test_audio_edge_cases.py::test_separator_survives_the_adversarial_corpus[10 cases]` | for silence, DC, impulse, hard-clipped square, 8× overflow, −140 dB, pink/white noise, pluck line, 12-voice chord: finite output, exact length `== T`, no stem louder than the input peak, metrics inside `[0, 30]` |
-| `test_audio_edge_cases.py::test_sub_window_input_raises_typed_error` | T ≤ 2·n_fft must fail with a domain error (IO-1: today it is `RuntimeError: Argument #4: Padding size…` — from both separator *and* transcriber) |
+| `test_audio_edge_cases.py::test_sub_window_input_raises_typed_error` *(resolved by #11)* | T ≤ 2·n_fft must fail with a domain error (IO-1: today it is `RuntimeError: Argument #4: Padding size…` — from both separator *and* transcriber) |
 | `test_audio_edge_cases.py::test_property_scale_invariance_is_bounded`, `…_length_contract`, `…_mask_sum_is_bounded` | seeded property checks over random filters/noise: masks stay in `[0,1]`, the frame law `1 + T//hop` holds, stems never exceed the input |
 | `test_backend_contracts.py::test_mamba_block_is_causal` | feeding a changed tail must leave the prefix **bit-identical**. This is the only test in the repo that can catch a non-causal conv/scan, which would make every onset anticipatory (and it passes today: maxdiff 0.0) |
 | `test_backend_contracts.py::test_mamba_block_is_stateless_between_calls` | no hidden recurrent state survives a forward |
@@ -109,7 +178,7 @@ forwarding) and `test_api_zip.py` (the MIDI *inside the download*).
 
 Findings locked there — each of these is invisible to any count-based assertion:
 
-* **MIDI-1 (P0).** `utils/midi.py:65` computes `ticks_per_second =
+* **MIDI-1 (P0).** *(resolved by PR #11; now a pass-today guard.)* `utils/midi.py:65` computes `ticks_per_second =
   ticks_per_beat * (60 / (tempo_us / 1e6))` = **57 600** where the correct value at
   120 BPM/480 PPQ is **960**. A 1-second render becomes a 60-second SMF (2-second
   upload → `guitar.mid` claims 119.94 s). `midi_to_targets` recovers **0 of 4**
@@ -124,7 +193,7 @@ Findings locked there — each of these is invisible to any count-based assertio
 * **MIDI-5.** `api.create_response_zip` calls the writer with its module defaults
   (hop 512 / 44.1 kHz) while the frames come from the configured grid → any other
   config shifts every note (2.75× at 16 kHz/hop 128).
-* **MIDI-6.** `midi_to_targets` parses `set_tempo` and then `pass`es: non-120-BPM
+* **MIDI-6.** *(resolved by PR #11; the mid-file tempo map is still open as MIDI-7.)* `midi_to_targets` parses `set_tempo` and then `pass`es: non-120-BPM
   sources land on the wrong frames. Silent label corruption.
 * **EXPR-1.** the transcriber has `expression_heads: [bend, vibrato, slide]` and the
   docs advertise expression, but `_forward_impl` discards the head and the writer
@@ -185,7 +254,8 @@ Files whose green status proves nothing on its own (each now has a real counterp
    **never posted**; `create_response_zip` is never called; the ZIP is never unzipped.
 3. **`test_backends.py`** — `test_stem_midi_model_with_fake_backends` and
    `test_process_audio_file_fake` assert *key presence* on a model that ignores the
-   `backends` config entirely (BACK-1), so they exercise the real Mamba while being
+   `backends` config entirely (BACK-1, *honoured since PR #11*), so they exercise the real
+   Mamba while being
    named for the fake path. `FakeBackend`'s metrics are constants (FAKE-1).
 4. **`test_confidence_injector.py`, `test_quality_gates.py`, `test_losses.py`** —
    correct unit tests over synthetic tensors; none of them reaches a decision that a
@@ -275,7 +345,8 @@ deleting the comments when such a runner exists, not by adding a skip.
 
 ## 5. Requirement 3+5 — new tests, and why each was needed
 
-Full index: **§18 of `TODO.md`** lists all 33 defect IDs with severity, one-line
+Full index: **§18 of `TODO.md`** lists all defect IDs (22 still open, 11 resolved by
+PR #11 plus 1 by this branch — see §0.1) with severity, one-line
 root cause, and the file:line to fix. Below: the rationale per new file, in the
 brief's own frame (bad stems · useless MIDI · OOM · dishonest success).
 

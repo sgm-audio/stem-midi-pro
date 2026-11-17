@@ -34,9 +34,10 @@ import math
 
 import pytest
 
-mido = pytest.importorskip("mido", reason="MIDI semantics require mido")
+from tests.honesty import known_bug, require
 
-from tests.honesty import known_bug  # noqa: E402
+mido = require("mido", "MIDI semantics require mido", module_level=True)
+
 from tests.synth import parse_midi  # noqa: E402
 from utils.midi import (  # noqa: E402
     DEFAULT_TEMPO_US,
@@ -59,6 +60,13 @@ def _events(specs):
     return [_ev(*s) for s in specs]
 
 
+def _tick(
+    frame: int, tpb: int = 480, hop: int = 512, sr: int = 44100, tempo_us: int = 500_000
+) -> int:
+    """The writer's own frame->tick law, for the property test's multiset check."""
+    return round(frame * hop / sr * (tpb * 1_000_000.0 / tempo_us))
+
+
 def _build(events, **kw):
     return build_midi_from_events({"midi_events": events}, "guitar", **kw)
 
@@ -72,14 +80,6 @@ def _sec_per_frame():
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "MIDI-1",
-    "utils/midi.py computes ticks_per_second as ticks_per_beat*(60/(tempo_us/1e6)) "
-    "= 57600 for 120 BPM; the correct value is ticks_per_beat/(tempo_us/1e6) = 960. "
-    "Every onset and every note duration is written 60x too long, so the MIDI does "
-    "not line up with the source audio (1.0 s render -> 239.8 s file). Fix: divide by "
-    "60 (or derive seconds-per-tick and divide), then assert in this test.",
-)
 @pytest.mark.parametrize("frames", [[0, 10, 20], [0, 431, 862, 1724], [5, 6, 7, 8]])
 def test_onset_wall_clock_matches_the_audio_timeline(frames):
     """note_on seconds must equal onset_frame * hop / sample_rate (±1 frame)."""
@@ -95,11 +95,6 @@ def test_onset_wall_clock_matches_the_audio_timeline(frames):
         )
 
 
-@known_bug(
-    "MIDI-1",
-    "same 60x ticks_per_second bug reaches note durations: a duration_frames of N "
-    "must produce N frames of sustain, not N frames x 60.",
-)
 def test_note_duration_equals_duration_frames_in_seconds():
     """duration_frames=32 (~0.37 s at hop 512) must survive as ~0.37 s of sustain."""
     dur = 32
@@ -111,11 +106,6 @@ def test_note_duration_equals_duration_frames_in_seconds():
     ), f"{dur} frames = {expected:.4f} s, MIDI sustain = {note.duration_sec:.4f} s"
 
 
-@known_bug(
-    "MIDI-1",
-    "product-level statement of the scaling bug: a rendered MIDI must not be longer "
-    "than the audio it came from by more than one default note length.",
-)
 def test_midi_length_tracks_render_length():
     """30 s of audio at hop 512 -> 2580 frames; the SMF must end near 30 s, not 30 minutes."""
     seconds = 30.0
@@ -138,16 +128,6 @@ _LONG = 400  # frames
 _SHORT_AT = 10  # second note starts inside the first one's sustain
 
 
-@known_bug(
-    "MIDI-2",
-    "the writer appends each event as note_on+note_off+cc against a single cursor and "
-    "clamps negative deltas with max(0, delta), so an event whose onset falls inside "
-    "the previous note's sustain is pushed to the end of that sustain instead of its "
-    "own onset. _logits_to_midi emits one note per frame with a 0.25-beat default "
-    "duration, so this happens on EVERY render. Fix: sort by absolute tick and emit "
-    "note_offs as their own timeline events (real polyphony), not as a suffix of each "
-    "note_on.",
-)
 def test_overlapping_notes_keep_their_own_onset_time():
     """A note starting during another note's sustain must still start on time."""
     events = [
@@ -155,7 +135,9 @@ def test_overlapping_notes_keep_their_own_onset_time():
         _ev(61, _SHORT_AT, duration_frames=5),
     ]
     parsed = parse_midi(_build(events))
-    second = parsed["notes"][1]
+    # select by pitch: the writer resolves re-articulation as release-then-strike,
+    # so parsed notes come back in closing order, not striking order
+    second = next(n for n in parsed["notes"] if n.note == 61)
     expected = _SHORT_AT * _sec_per_frame()
     assert abs(second.on_sec - expected) <= 2 * _sec_per_frame(), (
         f"note 61 starts at {second.on_sec:.3f} s but its onset frame says {expected:.3f} s "
@@ -163,11 +145,6 @@ def test_overlapping_notes_keep_their_own_onset_time():
     )
 
 
-@known_bug(
-    "MIDI-2",
-    "unsorted event input is silently mangled by the max(0, delta) clamp: all the "
-    "notes collapse onto the same tick instead of being reordered or rejected.",
-)
 def test_unsorted_events_are_reordered_or_rejected_not_clamped():
     """Out-of-order events must either be sorted or raise — never collapse onto one tick."""
     frames = [90, 0, 45, 20]
@@ -214,40 +191,72 @@ def test_repeated_pitch_emits_balanced_voices():
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "MIDI-3",
-    "CC#127 for event i is written after event i's note_off, so the value a DAW reads "
-    "as 'confidence for the next note' is off by one: note 0 carries no CC and note i "
-    "shows note i-1's confidence. Emit the CC immediately BEFORE its note_on.",
-)
 @pytest.mark.parametrize("confidences", [[0.95, 0.20, 0.70], [0.10, 0.99]])
-def test_confidence_cc_describes_the_note_it_sits_on(confidences):
-    """The CC#127 in force at note i's onset must be note i's own confidence."""
+def test_confidence_cc_describes_the_note_it_sits_on(confidences):  # regression guard (was MIDI-3)
+    """The confidence CC in force at note i's onset must be note i's own confidence."""
     events = [_ev(60 + i, i * 20, confidence=c) for i, c in enumerate(confidences)]
     parsed = parse_midi(_build(events))
-    got = [n.cc127_at_onset for n in parsed["notes"]]
+    got = [n.cc_at_onset for n in parsed["notes"]]
     want = [int(c * 127) for c in confidences]
-    assert got == want, f"notes carry CC#127 {got}, expected {want} (off-by-one placement)"
+    assert got == want, f"notes carry CC {got}, expected {want} (off-by-one placement)"
 
 
 @known_bug(
     "MIDI-4",
-    "int(confidence*127) truncates, so conf=0.999 -> 126 and 0.5 -> 63; a DAW that "
-    "treats CC#127=127 as 'fully confident' never sees it. Use round().",
+    "confidence is truncated twice: models/confidence_injector.py:72 and utils/midi.py:145 "
+    "both use int(conf*127), so conf=0.999 -> 126 and 0.5 -> 63. A DAW that treats the top of "
+    "the CC range as 'fully confident' never sees it. Fix BOTH call sites — rounding only the "
+    "writer changes nothing for a model-produced event, which is the trap here.",
 )
 def test_top_end_of_confidence_range_reaches_cc_127():
     """Confidence ~1.0 must map to the top of the CC range, not one below it."""
     midi = _build([_ev(60, 0, confidence=0.999)])
-    (value,) = parse_midi(midi)["cc127_values"]
+    (value,) = parse_midi(midi)["cc_values"]
     assert value == round(0.999 * 127) == 127, f"got {value}"
 
 
+def test_confidence_controller_is_gp1_not_a_channel_mode_message():
+    """Regression guard for main's fix: CC#127 is 'All Sound Off', not a data lane.
+
+    Confidence rides CC#16 (General Purpose 1) by default; #127 only appears if an
+    operator opts back in through MIDI_CONFIDENCE_CC, because spec-compliant gear
+    treats 120-127 as Channel Mode messages (a 0.9-confidence render used to send
+    All Sound Off / Panic to every device on the channel).
+    """
+    from utils.midi import DEFAULT_CONFIDENCE_CC, build_midi_from_events, resolve_confidence_cc
+
+    assert DEFAULT_CONFIDENCE_CC == 16
+    assert resolve_confidence_cc() == 16
+    events = [_ev(60, 0, confidence=0.9), _ev(61, 20, confidence=0.4)]
+    parsed = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=16)
+    assert parsed["cc_values"] == [int(0.9 * 127), int(0.4 * 127)]
+    legacy = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=127)
+    assert legacy["cc_values"] == [], "CC#127 must not be emitted unless explicitly requested"
+
+    # the env escape hatch the docs promise
+    import os
+
+    os.environ["MIDI_CONFIDENCE_CC"] = "127"
+    try:
+        assert resolve_confidence_cc() == 127
+        with_mode = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=127)
+        assert (
+            len(with_mode["cc_values"]) == 2
+        ), "MIDI_CONFIDENCE_CC=127 must restore the legacy mapping"
+    finally:
+        del os.environ["MIDI_CONFIDENCE_CC"]
+    assert resolve_confidence_cc(127) == 127  # explicit value warns but is allowed
+
+    with pytest.raises(ValueError, match="0-127"):
+        resolve_confidence_cc(999)
+
+
 def test_confidence_ordering_survives_into_cc_values():
-    """Monotone confidence in -> monotone CC#127 out (the DAW highlights by this)."""
+    """Monotone confidence in -> monotone CC out (the DAW highlights by this)."""
     confidences = [i / 127.0 for i in range(0, 128, 7)]
     events = [_ev(60, i * 10, confidence=c) for i, c in enumerate(confidences)]
-    vals = parse_midi(_build(events))["cc127_values"]
-    assert vals == sorted(vals), "CC#127 ordering must be monotone in confidence"
+    vals = parse_midi(_build(events))["cc_values"]
+    assert vals == sorted(vals), "CC ordering must be monotone in confidence"
     assert len(vals) == len(confidences)
     assert all(0 <= v <= 127 for v in vals)
 
@@ -268,7 +277,7 @@ def test_velocity_never_zero(raw, expected):
 
 def test_out_of_range_pitch_is_rejected_with_a_domain_error():
     """A bad pitch must not become a corrupt file; a clear error is acceptable."""
-    with pytest.raises(ValueError, match="range|127|pitch|note"):
+    with pytest.raises(ValueError, match=r"range|127|pitch|note"):
         _build([_ev(200, 0)])
 
 
@@ -311,10 +320,15 @@ def test_ticks_per_beat_argument_propagates():
     durations = [r[1] for r in rows]
     # int() tick truncation costs up to one tick of resolution (5 ms at 96 PPQ),
     # so compare relatively: a half-applied PPQ argument would differ by ~5x.
-    assert (max(onsets) - min(onsets)) / max(onsets) < 1e-3, f"PPQ changes onset seconds: {onsets}"
-    assert (max(durations) - min(durations)) / max(
-        durations
-    ) < 1e-3, f"PPQ changes note length: {durations}"
+    # Rounding to an integer tick costs at most one tick at the coarsest PPQ
+    # (96 PPQ @120 BPM = 5.2 ms), so compare with tick-aware slack, not 1e-3.
+    tick_at_96 = 0.5 / 96
+    assert (
+        max(onsets) - min(onsets) <= 2 * tick_at_96
+    ), f"PPQ changes onset seconds by more than 2 ticks at 96 PPQ: {onsets}"
+    assert (
+        max(durations) - min(durations) <= 2 * tick_at_96
+    ), f"PPQ changes note length by more than 2 ticks at 96 PPQ: {durations}"
 
 
 # ---------------------------------------------------------------------------
@@ -349,11 +363,16 @@ def test_property_random_event_streams_are_wellformed(seed):
     parsed = parse_midi(midi)
     assert len(parsed["notes"]) == n
     assert parsed["dangling_notes"] == {}
-    ons = [x.on_tick for x in parsed["notes"]]
-    assert ons == sorted(ons), "note_on ticks must be non-decreasing"
+    # The writer resolves same-pitch re-articulation as release-then-strike at one
+    # tick, so the *closing* order may differ from the strike order. Compare as a
+    # multiset: every requested onset must appear exactly once.
+    ons = sorted(x.on_tick for x in parsed["notes"])
+    assert ons == sorted(e["onset_frame"] * 96 for e in events) or ons == sorted(
+        _tick(e["onset_frame"]) for e in events
+    ), "the rendered onset ticks do not match the requested frames"
     for x in parsed["notes"]:
         assert 0 <= x.note <= 127
         assert 1 <= x.velocity <= 127
         assert x.off_tick >= x.on_tick
         assert x.duration_sec > 0, "zero-length notes are invisible in a DAW"
-    assert len(parsed["cc127_values"]) == n
+    assert len(parsed["cc_values"]) == n, "one confidence CC per note, on the configured controller"

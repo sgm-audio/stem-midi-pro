@@ -61,25 +61,61 @@ def _model_with_stems(pipeline_config, guitar, bass, onsets, pitches, n_frames=N
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "STEM-1",
-    "main._forward_impl sets enhanced_midi = {**enhanced_midi, 'guitar': enhanced_midi, "
-    "'bass': enhanced_midi} and process_audio_file returns the same object as both "
-    "midi_guitar and midi_bass, while transcription only ever runs on the guitar stem. "
-    "Users therefore get bass.mid containing the guitar part (and the two MIDI files in "
-    "the ZIP differ only in their track-name meta). Transcribe each stem, key the result "
-    "per stem, and keep this guard.",
-)
+def _stem_aware_transcriber(guitar_stem, bass_stem, plan, n_frames):
+    """A transcriber double that answers differently for each stem it is handed.
+
+    A stem-blind stub cannot detect STEM-1: if the model transcribes the guitar
+    twice, an identical-on-both-calls double still produces "correct-looking"
+    per-stem dicts. The double has to be the thing that varies.
+    """
+
+    def tr(stem):
+        is_bass = stem is bass_stem or bool(torch.equal(stem, bass_stem))
+        onsets, pitches = plan["bass" if is_bass else "guitar"]
+        onset = torch.full((1, n_frames, 1), -10.0)
+        pitch = torch.zeros((1, n_frames, 128))
+        vel = torch.full((1, n_frames, 1), 0.7)
+        expr = torch.zeros((1, n_frames, 3))
+        conf = torch.full((1, n_frames), 0.9)
+        for f, pid in zip(onsets, pitches, strict=False):
+            onset[0, f, 0] = 10.0
+            pitch[0, f, pid] = 10.0
+        return onset, pitch, vel, expr, conf
+
+    return tr
+
+
 def test_guitar_and_bass_midi_are_different_renders(pipeline_config):
-    """Guitar and bass MIDI must not be the same object, nor the same notes."""
+    """Regression guard (was STEM-1, fixed by H-8): each stem gets its own transcription.
+
+    The original defect aliased enhanced_midi into both per-stem keys and only ever
+    transcribed the guitar, so bass.mid carried the guitar part. A stub transcriber
+    that ignores its input would pass that bug unnoticed, hence the per-stem double.
+    """
+    from main import StemMidiModel
+
     t = torch.arange(SR).float() / SR
     guitar = (0.4 * torch.sin(2 * 3.14159 * 220 * t))[None, None]
     bass = (0.4 * torch.sin(2 * 3.14159 * 55 * t))[None, None]
-    model = _model_with_stems(pipeline_config, guitar, bass, onsets=[10, 40], pitches=[64, 71])
+    plan = {"guitar": ([10, 40], [64, 71]), "bass": ([12, 44], [40, 43])}
+    model = StemMidiModel(pipeline_config)
+    model.eval()
+    inject(model, "separator", StubSeparator(guitar, bass))
+    inject(
+        model,
+        "transcriber",
+        _stem_aware_transcriber(guitar, bass, plan, frame_count(SR, HOP)),
+    )
     with torch.inference_mode():
         out = model(guitar)
     md = out["midi_metadata"]
+    assert (
+        md["guitar"]["midi_events"] and md["bass"]["midi_events"]
+    ), "a stem produced no MIDI at all"
     assert md["guitar"] is not md["bass"], "both stems alias the same metadata dict"
+    assert [e["note"] for e in md["bass"]["midi_events"]] == plan["bass"][
+        1
+    ], "the bass events are not the bass plan - the model re-used the guitar transcription"
     g = build_midi_from_events(md["guitar"], "guitar")
     b = build_midi_from_events(md["bass"], "bass")
     gn = [n.note for n in parse_midi(g)["notes"]]
@@ -87,14 +123,14 @@ def test_guitar_and_bass_midi_are_different_renders(pipeline_config):
     assert gn != bn or gn == [], f"guitar.mid and bass.mid carry identical notes {gn}"
 
 
-@known_bug(
-    "API-1",
-    "api.create_response_zip writes both guitar.mid and bass.mid from outputs['midi'], "
-    "ignoring the per-stem keys (midi_guitar / midi_bass) that main.process_audio_file "
-    "already returns. Even after STEM-1 is fixed, the shipped API still zips the same "
-    "render twice.",
-)
 def test_api_zip_uses_per_stem_midi(monkeypatch):
+    """Regression guard (was API-1, fixed by H-8): the ZIP picks each stem out of `midi`.
+
+    api.create_response_zip reads outputs["midi"] and hands it to _stem_midi_data(pkg,
+    stem), which selects pkg["guitar"] / pkg["bass"]. The legacy flat payload is still
+    accepted on purpose - and that fallback is the one place the two files can still
+    alias, so it is pinned here as documented behaviour, not as a bug.
+    """
     require("fastapi", "api import")
     import api
 
@@ -105,9 +141,11 @@ def test_api_zip_uses_per_stem_midi(monkeypatch):
             "guitar": np.zeros(1024, dtype="float32"),
             "bass": np.zeros(1024, dtype="float32"),
         },
-        "midi": {"midi_events": guitar_events, "summary": {}},
-        "midi_guitar": {"midi_events": guitar_events, "summary": {}},
-        "midi_bass": {"midi_events": bass_events, "summary": {}},
+        "midi": {
+            "guitar": {"midi_events": guitar_events, "summary": {}},
+            "bass": {"midi_events": bass_events, "summary": {}},
+            "summary": {"avg_confidence": 0.9, "low_confidence_count": 0, "alignment_warnings": 0},
+        },
         "report": StubReport(),
         "routing": {"action": "editor_launch"},
         "sample_rate": SR,
@@ -122,14 +160,25 @@ def test_api_zip_uses_per_stem_midi(monkeypatch):
     assert b == [40], f"bass.mid should hold the bass render (40), got {b}"
     assert g == [64], f"guitar.mid should hold the guitar render (64), got {g}"
 
+    # And the documented legacy fallback: a flat payload must not crash the endpoint;
+    # it just means the caller had no per-stem data, and both files alias by design.
+    # Pinning it here means the day someone removes the fallback, this assertion is
+    # the thing that says "a legacy caller now 500s".
+    import zipfile
+
+    flat = dict(outputs, midi={"midi_events": guitar_events, "summary": {}})
+    zf2 = zipfile.ZipFile(io.BytesIO(api.create_response_zip(flat).read()))
+    legacy = [n.note for n in parse_midi(io.BytesIO(zf2.read("bass.mid")))["notes"]]
+    assert legacy == [64], f"legacy flat payload should alias to the same render, got {legacy}"
+
 
 # ---------------------------------------------------------------------------
 # 2. confidence / energy / counts plumbing (units, not model quality)
 # ---------------------------------------------------------------------------
 
 
-def test_model_confidence_reaches_cc127_unchanged(pipeline_config):
-    """Per-frame confidence must arrive in the SMF as CC#127 with no re-scaling.
+def test_model_confidence_reaches_the_confidence_controller_unchanged(pipeline_config):
+    """Per-frame confidence must arrive in the SMF as a CC byte with no re-scaling.
 
     Pass-today regression lock: it is the only test in the suite that follows a
     confidence value from the transcriber output to the MIDI bytes. It fails if
@@ -157,15 +206,18 @@ def test_model_confidence_reaches_cc127_unchanged(pipeline_config):
     inject(model, "transcriber", lambda stem: (onset, pitch, vel, expr, conf))
     with torch.inference_mode():
         out = model(guitar)
-    events = out["midi_metadata"]["midi_events"]
+    events = out["midi_metadata"]["guitar"]["midi_events"]
     assert [e["onset_frame"] for e in events] == frames
     got_cc = [e["cc_127_value"] for e in events]
     assert got_cc == [
         int(c * 127) for c in confs
     ], f"CC#127 {got_cc} != the transcriber confidence mapping {confs}"
-    midi = build_midi_from_events(out["midi_metadata"], "guitar")
+    midi = build_midi_from_events(out["midi_metadata"]["guitar"], "guitar")
     parsed = parse_midi(midi)
-    assert parsed["cc127_values"] == got_cc, "CC#127 values changed on the way into the SMF"
+    assert parsed["cc_values"] == got_cc, (
+        f"the confidence CC changed on the way into the SMF (CC#16): events say {got_cc}, "
+        f"the file carries {parsed['cc_values']}"
+    )
     assert (
         abs(out["processing_report"].avg_confidence - float(conf.mean())) < 1e-6
     ), "report.avg_confidence must be the transcriber's mean confidence, not a constant"
@@ -250,11 +302,16 @@ def test_summary_and_alignment_counts_agree(pipeline_config):
     with torch.inference_mode():
         out = model(guitar)
     md = out["midi_metadata"]
-    assert md["summary"]["alignment_warnings"] == sum(
-        1 for e in md["midi_events"] if e["needs_review"]
+    per_stem = sum(
+        1 for stem in ("guitar", "bass") for e in md[stem]["midi_events"] if e["needs_review"]
+    )
+    assert md["summary"]["alignment_warnings"] == per_stem, (
+        f"summary reports {md['summary']['alignment_warnings']} alignment warnings but the "
+        f"per-stem events carry {per_stem}"
     )
     assert json.dumps({"n": md["summary"]})  # summary must be plain JSON types
-    assert all(0.0 <= e["confidence"] <= 1.0 for e in md["midi_events"])
+    events = md["guitar"]["midi_events"]
+    assert all(0.0 <= e["confidence"] <= 1.0 for e in events)
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +482,7 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     model = _model_with_stems(pipeline_config, guitar, guitar * 0.5, onsets=[], pitches=[])
     with torch.inference_mode():
         out = model(guitar)
-    events = out["midi_metadata"]["midi_events"]
+    events = out["midi_metadata"]["guitar"]["midi_events"]
     report = out["processing_report"]
     assert len(events) == 0, "fixture broke: expected no notes"
     assert report.quality_tier.value == "complex", (
@@ -542,7 +599,7 @@ def test_expression_head_output_reaches_the_midi(pipeline_config):
     )
     with torch.inference_mode():
         out = model(guitar)
-    events = out["midi_metadata"]["midi_events"]
+    events = out["midi_metadata"]["guitar"]["midi_events"]
     assert any(
         "expression" in e or "bend" in e for e in events
     ), "the transcriber's expression output never reaches the MIDI events at all"

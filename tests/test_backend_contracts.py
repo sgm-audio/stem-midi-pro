@@ -80,15 +80,12 @@ def test_backend_names_are_validated_and_never_silently_downgraded(mock_config):
         factory._SEPARATORS["demucs"] = real
 
 
-@known_bug(
-    "BACK-1",
-    "StemMidiModel.__init__ hard-wires MambaSeparator/MambaTranscriber and never calls "
-    "models.backends.factory.build_separator/build_transcriber, so cfg['backends'] is dead "
-    "config: configs/model_config.cpu.yaml (separator: demucs, transcriber: basic_pitch) "
-    "silently runs the untrained Mamba instead of the pretrained path the README sells, and "
-    "no fake-backend test can ever prove the wiring. Build the backends from config.",
-)
 def test_pretrained_backends_are_reachable_from_main(pipeline_config):
+    """Regression guard (was BACK-1, fixed on main): cfg["backends"] must be honoured.
+
+    ``StemMidiModel.__init__`` now builds through models/backends/factory when the
+    key is present, and the pure-Mamba path stays the default when it is absent.
+    """
     from main import StemMidiModel
     from models.backends.fake_backend import FakeSeparatorBackend, FakeTranscriberBackend
 
@@ -98,23 +95,33 @@ def test_pretrained_backends_are_reachable_from_main(pipeline_config):
     }
     model = StemMidiModel(cfg)
     assert isinstance(
-        model.separator, FakeSeparatorBackend
-    ), f"backends.separator='fake' was ignored: got {type(model.separator).__name__}"
+        model.separator_backend, FakeSeparatorBackend
+    ), f"backends.separator='fake' was ignored: got {type(model.separator_backend).__name__}"
     assert isinstance(
-        model.transcriber, FakeTranscriberBackend
-    ), f"backends.transcriber='fake' was ignored: got {type(model.transcriber).__name__}"
+        model.transcriber_backend, FakeTranscriberBackend
+    ), f"backends.transcriber='fake' was ignored: got {type(model.transcriber_backend).__name__}"
+
+    # ...and the built-in path must still be the DEFAULT: an unset `backends` key may
+    # not silently fall through to a fake, or every "real model" run would be theatre.
+    plain = StemMidiModel(pipeline_config)
+    assert not hasattr(
+        plain, "separator_backend"
+    ), "with no backends: key the model must use its own MambaSeparator, not a wrapper"
+    assert type(plain.separator).__name__ == "MambaSeparator", type(plain.separator).__name__
+    assert (
+        "mamba" in plain.backend_name.lower()
+    ), f"the model must report the backend it actually runs, got {plain.backend_name!r}"
 
 
-@known_bug(
-    "BACK-2",
-    "the backend protocol returns dicts (SeparateOut/TranscribeOut, with `events` "
-    "optionally carrying pre-built note events) while _forward_impl unpacks a 5-tuple "
-    "(`guitar, bass, residual, cache, metrics = self.separator(audio)`), so even after "
-    "BACK-1 is fixed, wiring a real backend raises on unpack and Basic-Pitch style "
-    "per-note events (with duration_frames) can never reach the MIDI. Normalise on the "
-    "TypedDicts and prefer `events` as models/backends/base.py documents.",
-)
 def test_model_consumes_a_protocol_conformant_backend(pipeline_config):
+    """Regression guard for BACK-2 (fixed by PR #11): the TypedDict contract is consumed.
+
+    `models/backends/base.py` promises SeparateOut / TranscribeOut dicts with pre-built
+    `events`; `_forward_impl` used to unpack a 5-tuple, which made a real backend
+    impossible to wire in even after cfg["backends"] was honoured. This asserts the
+    dict-shaped output (including a backend-supplied event list) reaches the MIDI, so a
+    re-tupling of the contract fails here rather than in a downstream integration.
+    """
     from main import StemMidiModel
 
     model = StemMidiModel(
@@ -124,8 +131,8 @@ def test_model_consumes_a_protocol_conformant_backend(pipeline_config):
     from models.backends.fake_backend import FakeSeparatorBackend, FakeTranscriberBackend
 
     audio = torch.full((1, 1, SR), 0.2)
-    inject(model, "separator", FakeSeparatorBackend(pipeline_config))
-    inject(model, "transcriber", FakeTranscriberBackend(pipeline_config))
+    inject(model, "separator_backend", FakeSeparatorBackend(pipeline_config))
+    inject(model, "transcriber_backend", FakeTranscriberBackend(pipeline_config))
     with torch.inference_mode():
         out = model(audio)
     # the fake backend pre-builds one note (60) with duration_frames=40; the

@@ -10,16 +10,17 @@ writes the instance ``__dict__`` so normal attribute lookup finds the double.
 
 from __future__ import annotations
 
+import contextlib
+from typing import ClassVar
+
 
 def inject(obj, name: str, value) -> None:
     """Replace a registered nn.Module child with a test double (restores nothing)."""
     import torch.nn as nn
 
     assert isinstance(obj, nn.Module), "inject() targets nn.Module instances"
-    try:
+    with contextlib.suppress(AttributeError):
         delattr(obj, name)  # pops from _modules
-    except AttributeError:
-        pass
     object.__setattr__(obj, name, value)
 
 
@@ -115,11 +116,11 @@ def frame_count(n_samples: int, hop: int) -> int:
 class StubReport:
     """A ProcessingReport-shaped stub for API-level packaging tests."""
 
-    si_sdr = 25.0
-    phase_coherence = 0.9
-    avg_confidence = 0.9
-    artifact_flags = ["none"]
-    low_confidence_notes = 0
+    si_sdr: ClassVar[float] = 25.0
+    phase_coherence: ClassVar[float] = 0.9
+    avg_confidence: ClassVar[float] = 0.9
+    artifact_flags: ClassVar[list[str]] = ["none"]
+    low_confidence_notes: ClassVar[int] = 0
 
     @property
     def quality_tier(self):

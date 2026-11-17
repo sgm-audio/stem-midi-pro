@@ -238,14 +238,44 @@ def test_correlated_stems_are_not_phase_cancellation(synth):
     assert "phase_cancellation" in StemMidiModel._detect_artifacts(None, x, -x)  # anti-phase
 
 
+def test_the_small_test_grid_is_runnable_by_the_real_separator(mock_config):
+    """Regression guard for CFG-2 (fixed by PR #11): `mock_config` must stay usable.
+
+    It used to pair n_fft=512 with hop_length=512, and `torch.istft` refuses a
+    non-overlapping Hann window ("window overlap add min: 1"), so the ONLY config a
+    fast unit test could build was one the real separator could not run — which is
+    precisely how a suite ends up testing nothing but a fake backend. Locked here so a
+    future audio-block edit cannot quietly make the real path untestable on CPU again.
+    """
+    from models.mamba_separator import MambaSeparator
+
+    hop, n_fft = mock_config["audio"]["hop_length"], mock_config["audio"]["n_fft"]
+    assert n_fft / hop >= 2, (
+        f"cfg audio block is n_fft={n_fft} hop={hop}: torch.istft needs overlap, so no real "
+        "separator can run on the fast test config (this is CFG-2)"
+    )
+    torch.manual_seed(0)
+    sep = MambaSeparator(mock_config).eval()
+    with torch.inference_mode():
+        guitar, bass, _residual, _cache, metrics = sep(torch.randn(1, 1, 8192))
+    for name, stem in (("guitar", guitar), ("bass", bass)):
+        assert stem.shape == (1, 1, 8192), f"{name}: {tuple(stem.shape)}"
+        assert torch.isfinite(stem).all(), f"{name} is non-finite on the small grid"
+    assert float(metrics.abs().max()) < 1e6, f"metrics blew up on the small grid: {metrics}"
+
+
 # ---------------------------------------------------------------------------
 # 4. length / shape contract
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("n_samples", [N_FFT - 1, N_FFT, N_FFT + 1, SR, SR + 1, 3 * SR + 7])
+@pytest.mark.parametrize("n_samples", [N_FFT, N_FFT + 1, SR, SR + 1, 3 * SR + 7])
 def test_output_length_equals_input_length_exactly(separator, n_samples):
-    """Off-by-one on a non-multiple length means truncated/ghost audio at the tail."""
+    """Off-by-one on a non-multiple length means truncated/ghost audio at the tail.
+
+    N_FFT - 1 is deliberately excluded: inputs shorter than one window are now
+    refused with a typed ValueError (locked by test_sub_window_input_gets_a_domain_error).
+    """
     x = (0.2 * torch.sin(2 * math.pi * 200 * torch.arange(n_samples).float() / SR))[None, None]
     with torch.inference_mode():
         g, b, r, _c, _m = separator(x)
@@ -253,15 +283,13 @@ def test_output_length_equals_input_length_exactly(separator, n_samples):
         assert stem.shape[-1] == n_samples, f"{name}: {stem.shape[-1]} samples for {n_samples} in"
 
 
-@known_bug(
-    "IO-1",
-    "an input shorter than the STFT padding (n_samples <= n_fft//2 = 1024, i.e. under ~23 ms "
-    "at hop 512) crashes torch.stft's reflect padding with 'Padding size should be less than "
-    "the corresponding input dimension'. main.process_audio_file / the API surface the raw "
-    "RuntimeError (HTTP 500, no guidance). Validate a minimum duration (>= n_fft samples) and "
-    "raise AudioValidationError with the number of milliseconds needed.",
-)
 def test_sub_window_input_gets_a_domain_error(pipeline_config, make_wav, synth):
+    """Regression guard (was IO-1): short input is refused with a domain error.
+
+    models/mamba_separator.py now validates shape, channels and length before
+    touching torch.stft, so a 5 ms impulse and a 2047-sample file both raise
+    ValueError instead of leaking a raw torch padding RuntimeError.
+    """
     from main import StemMidiModel
 
     path = make_wav(synth.impulse(0.005), name="5ms.wav")  # 220 samples
@@ -285,7 +313,7 @@ def test_sub_window_input_gets_a_domain_error(pipeline_config, make_wav, synth):
 def test_separator_rejects_wrong_rank_or_channels_with_a_useful_message(separator, shape, expect):
     """The assert messages are the API for misuse — pin them, they are load-bearing."""
     x = torch.zeros(*shape)
-    with pytest.raises(AssertionError) as exc_info:
+    with pytest.raises((ValueError, AssertionError)) as exc_info:
         separator(x)
     assert (
         expect in str(exc_info.value).lower()

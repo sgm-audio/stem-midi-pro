@@ -223,16 +223,22 @@ class NoteEvent:
     # importer reads as "the confidence for this note" (last-one-wins before
     # note_on). None when no CC#127 precedes the note. Off-by-one emission of
     # confidence CCs is exactly what tests/test_midi_semantics.py guards.
-    cc127_at_onset: int | None = None
-    cc127_after: int | None = None  # value written between this note_off and the next note_on
+    cc_at_onset: int | None = None
+    cc_after: int | None = None  # value written between this note_off and the next note_on
 
     @property
     def duration_sec(self) -> float:
         return self.off_sec - self.on_sec
 
 
-def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
+def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0, cc: int | None = 16) -> dict:
     """Decode an SMF into notes + absolute time in ticks and seconds.
+
+    ``cc`` selects which control-change stream to attribute to each note. The
+    product writes confidence to **CC#16** (General Purpose 1) by default —
+    ``utils.midi.DEFAULT_CONFIDENCE_CC``; CC#127 is a Channel Mode message and is
+    only emitted when ``MIDI_CONFIDENCE_CC=127`` restores the legacy mapping, so
+    pass ``cc=127`` for that. ``cc=None`` collects every control_change.
 
     Returns {"notes": [NoteEvent], "ticks_per_beat": int, "tempo_us": int,
              "all_messages": [mido.Message], "length_sec": float,
@@ -252,7 +258,7 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
     messages = []
     open_stack: dict[int, list] = {}
     notes: list[list] = []  # mutable rows, frozen into NoteEvent below
-    cc127_events: list[tuple[int, int]] = []  # (abs_tick, value)
+    cc_events: list[tuple[int, int]] = []  # (abs_tick, value)
 
     for msg in trk:
         tick += msg.time
@@ -262,8 +268,8 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
             sec_per_tick = tempo_us / 1e6 / tpb
             continue
         if msg.type == "control_change":
-            if msg.control == 127:
-                cc127_events.append((tick, msg.value))
+            if cc is None or msg.control == cc:
+                cc_events.append((tick, msg.value))
             continue
         if msg.type == "note_on" and msg.velocity > 0:
             open_stack.setdefault(msg.note, []).append((tick, msg.velocity))
@@ -277,7 +283,7 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
 
     def cc_before(t: int) -> int | None:
         val = None
-        for ct, cv in cc127_events:
+        for ct, cv in cc_events:
             if ct <= t:
                 val = cv
             else:
@@ -285,7 +291,7 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
         return val
 
     def cc_after(off_t: int) -> int | None:
-        for ct, cv in cc127_events:
+        for ct, cv in cc_events:
             if ct > off_t:
                 return cv
         return None
@@ -298,8 +304,8 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
             off_tick=off_t,
             on_sec=on_t * sec_per_tick,
             off_sec=off_t * sec_per_tick,
-            cc127_at_onset=cc_before(on_t),
-            cc127_after=cc_after(off_t),
+            cc_at_onset=cc_before(on_t),
+            cc_after=cc_after(off_t),
         )
         for (n, v, on_t, off_t) in notes
     ]
@@ -310,5 +316,5 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0) -> dict:
         "all_messages": messages,
         "length_sec": tick * sec_per_tick,
         "dangling_notes": {n: len(v) for n, v in open_stack.items()},
-        "cc127_values": [cv for _ct, cv in cc127_events],
+        "cc_values": [cv for _ct, cv in cc_events],
     }

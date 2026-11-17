@@ -325,21 +325,15 @@ def test_zip_report_is_strict_json(api_env, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "MIDI-1",
-    "create_response_zip writes guitar.mid/bass.mid through build_midi_from_events, whose tick "
-    "math is wrong (ticks_per_second = ticks_per_beat * 60/(tempo_us/1e6) = 57600 instead of "
-    "960 at 120 BPM), so a 3-second upload comes back as a ~209-second MIDI file: every DAW "
-    "import opens a multi-minute empty project. Fix utils/midi.py and re-run this test.",
-)
 def test_zip_midi_duration_matches_the_uploaded_audio(api_env, tmp_path):
+    """Regression guard (was MIDI-1): the writer's tick math now matches wall clock."""
     api, _ = api_env
     zf = _zip(_post(api, tmp_path, _wav_bytes()))
     mid = mido.MidiFile(file=io.BytesIO(zf.read("guitar.mid")))
     expected = (EVENTS["guitar"][-1]["onset_frame"] + 60) * HOP / SR  # last note-off, in seconds
     assert mid.length == pytest.approx(expected, rel=0.05), (
         f"{SECONDS}s of audio produced a {mid.length:.1f}s MIDI file "
-        f"(expected ~{expected:.2f}s; ratio {mid.length / expected:.1f}×)"
+        f"(expected ~{expected:.2f}s; ratio {mid.length / expected:.1f}x)"
     )
 
 
@@ -348,7 +342,7 @@ def test_zip_midi_duration_matches_the_uploaded_audio(api_env, tmp_path):
     "create_response_zip calls build_midi_from_events(midi_data, stem) and lets the writer fall "
     "back to its module defaults (hop_length=512, sample_rate=44100) even though the frames came "
     "from the configured grid and outputs['sample_rate'] is right there in the dict — a "
-    "16kHz/hop=128 model ships MIDI with every event ~2.75× off in time. Forward the pipeline's "
+    "16kHz/hop=128 model ships MIDI with every event ~2.75x off in time. Forward the pipeline's "
     "hop_length/sample_rate into the builder.",
 )
 def test_zip_forwards_the_pipeline_grid_to_the_midi_writer(api_env, tmp_path, monkeypatch):
@@ -368,16 +362,8 @@ def test_zip_forwards_the_pipeline_grid_to_the_midi_writer(api_env, tmp_path, mo
         assert kwargs.get("sample_rate") == SR, f"{stem}: sample_rate not forwarded → {kwargs}"
 
 
-@known_bug(
-    "API-1",
-    "outputs['midi'] is main's midi_metadata: a dict holding a MERGED 'midi_events' list "
-    "(both stems concatenated) alongside the per-stem sub-dicts, and build_midi_from_events "
-    "reads only the top-level key. So guitar.mid and bass.mid are the same 5-note performance "
-    "twice (measured on the real pipeline: both files carry all 172 events, differing only in "
-    "the track-name bytes), and per-stem MIDI — the one thing that makes a stem pack usable — "
-    "is structurally impossible at the boundary. Pass outputs['midi'][stem] instead.",
-)
 def test_zip_midi_is_per_stem(api_env, tmp_path):
+    """Regression guard (was API-1): each .mid is built from its own stem's events."""
     api, _ = api_env
     zf = _zip(_post(api, tmp_path, _wav_bytes()))
     for stem in ("guitar", "bass"):

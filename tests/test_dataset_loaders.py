@@ -9,6 +9,8 @@ works without torch installed.
 
 import pytest
 
+from tests.honesty import require
+
 
 def _import_datasets():
     # T-8.1.3 honesty fix (converges with main's removal of the torchaudio gate):
@@ -18,8 +20,6 @@ def _import_datasets():
     # no torchaudio, so 6 tests silently did not run. require() skips with a
     # registered reason on convenience runs and ERRORS under --strict-deps, which is
     # what CI uses.
-    from tests.honesty import require
-
     require("torch", "dataset tensors")
     require("soundfile", "dataset audio reads")
     require("librosa", "dataset resampling")
@@ -32,7 +32,7 @@ def _import_datasets():
 
 def test_synthetic_dataset():
     """AudioDataset should produce synthetic data when root doesn't exist."""
-    torch = pytest.importorskip("torch")
+    torch = require("torch", "dataset tensor assertions")
     datasets = _import_datasets()
 
     dataset = datasets.AudioDataset(
@@ -54,7 +54,7 @@ def test_synthetic_dataset():
 
 def test_dataset_getitem_shape():
     """Dataset items should have matching shapes."""
-    pytest.importorskip("torch")
+    require("torch", "dataset shape assertions")
     datasets = _import_datasets()
 
     dataset = datasets.AudioDataset(

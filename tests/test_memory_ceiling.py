@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU practicality: does a 4–8 GB i5 actually survive a real song?
+"""CPU practicality: does a 4-8 GB i5 actually survive a real song?
 
 The suite's only memory test (``tests/test_perf_smoke.py``) builds the tiny
 ``mock_config`` model, forwards **one second** of audio and compares a single RSS
@@ -28,7 +28,7 @@ yaml = require("yaml", "config-vs-code checks")
 ROOT = Path(__file__).resolve().parents[1]
 SR = 44100
 HOP = 512
-CPU_TARGET_BYTES = 4 * 1024**3  # the low end of the advertised 4–8 GB budget
+CPU_TARGET_BYTES = 4 * 1024**3  # the low end of the advertised 4-8 GB budget
 
 
 def _shipped() -> dict:
@@ -85,7 +85,7 @@ def test_scan_activations_for_two_seconds_fit_the_cpu_budget():
     "CPU-1",
     "the shipped architecture cannot hold a song: models/_mamba_compat.py materialises dA and "
     "dB*x as (B, L, d_inner, d_state) fp32 per layer, which at configs/model_config.yaml "
-    "(768×2 d_inner, 12 layers + 512×2, 8 layers, d_state 16/12 on the 44.1k/512 grid) costs "
+    "(768x2 d_inner, 12 layers + 512x2, 8 layers, d_state 16/12 on the 44.1k/512 grid) costs "
     "271 MB per second of audio — 0.54 GB for 2 s, 8.1 GB for a 30 s clip, 16.3 GB for a minute, "
     "162 GB for five — so anything past ~15 s blows the 4-8 GB target before the STFT masks, the "
     "waveform copies and the autograd graph are counted at all. Chunked/streaming inference is "
@@ -114,36 +114,53 @@ def test_scan_activation_cost_is_linear_in_song_length():
     )
 
 
-@known_bug(
-    "CFG-3",
-    "all three configs advertise `training.gradient_checkpointing: true # Enable for 60s+ "
-    "sequences`, but no product code reads `training` — models/_mamba_compat.py has no "
-    "checkpointing hook and main.py never consults cfg['training'] (only "
-    "research/mamba3_per_track/train.py sets layer.gradient_checkpointing). The one documented "
-    "mitigation for the CPU memory ceiling is a no-op, so the config over-promises what the "
-    "runtime does. Wire it to torch.utils.checkpoint or delete the key.",
-)
-def test_gradient_checkpointing_flag_is_actually_wired():
+def test_gradient_checkpointing_call_resolves_in_a_fresh_interpreter():
+    """Regression guard for CFG-3 (wired in PR #11, import fixed on this branch): the
+    mitigation must actually be callable.
+
+    main's fix for CPU-1 added a `torch.utils.checkpoint.checkpoint(...)` branch to the
+    pure-Torch scan, but `import torch` does not bind `torch.utils.checkpoint` — so until
+    `models/_mamba_compat.py` imports the submodule, enabling
+    `training.gradient_checkpointing` raised AttributeError at the first training step.
+    Checked in a SUBPROCESS on purpose: inside a shared session `torch.utils.checkpoint`
+    becomes importable as soon as any other test imports it, so an in-process probe passes
+    depending on test order and cannot pin the bug.
+    """
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
     cfg = _shipped()
     assert cfg["training"]["gradient_checkpointing"] is True, "config no longer claims it"
-    import main
     import models._mamba_compat as compat
 
-    src = Path(compat.__file__).read_text(encoding="utf-8") + Path(main.__file__).read_text(
-        encoding="utf-8"
+    src = Path(compat.__file__).read_text(encoding="utf-8")
+    if "torch.utils.checkpoint.checkpoint" in src:
+        assert (
+            "import torch.utils.checkpoint" in src
+            or "from torch.utils.checkpoint" in src
+            or "from torch.utils import checkpoint" in src
+        ), f"{compat.__file__} calls torch.utils.checkpoint.checkpoint(...) without importing it"
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            f"sys.path.insert(0, {str(root)!r})\n"
+            "import models._mamba_compat as m\n"
+            "assert hasattr(m.torch.utils, 'checkpoint'), 'torch.utils unbound'\n"
+            "assert callable(m.torch.utils.checkpoint.checkpoint)\n",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
-    assert any(
-        needle in src
-        for needle in (
-            "torch.utils.checkpoint",
-            "checkpoint_sequential",
-            "gradient_checkpointing",
-            "set_checkpoint_activations",
-        )
-    ), (
-        "configs/model_config.yaml promises gradient checkpointing for 60s+ sequences, but "
-        "neither models/_mamba_compat.py nor main.py implements or reads it: the flag is "
-        "dead config and the documented memory mitigation does not exist"
+    assert probe.returncode == 0, (
+        "importing models._mamba_compat in a clean interpreter leaves torch.utils.checkpoint "
+        "unbound, so gradient_checkpointing=True raises AttributeError: "
+        f"{probe.stderr.strip()[-300:]}"
     )
 
 
@@ -376,8 +393,8 @@ def test_streaming_render_length_matches_the_input(pipeline_config, make_wav, sy
 @known_bug(
     "PERF-1",
     "tests/test_perf_smoke.py is the only memory/latency gate and it proves nothing about the "
-    "CPU target: it builds `mock_config` (d_model 64, 2 layers — 12× fewer parameters per layer "
-    "than the shipped 768×12), forwards 1 s (44 100 samples, ~1/180 of a song), asserts "
+    "CPU target: it builds `mock_config` (d_model 64, 2 layers — 12x fewer parameters per layer "
+    "than the shipped 768x12), forwards 1 s (44 100 samples, ~1/180 of a song), asserts "
     "rss < 2500 MB and elapsed < 30 s, and its psutil branch reads *current* RSS after the "
     "forward while its `resource` fallback reads the process peak — so the same test measures "
     "two different quantities depending on whether psutil happens to be installed. Neither "
@@ -395,6 +412,6 @@ def test_perf_smoke_uses_the_shipped_shape_and_measures_a_peak():
     assert "peak" in src.lower(), "RSS is sampled once after the forward; measure the peak"
     assert "352800" in src or "8 * " in src, (
         "the perf gate forwards 44100 samples (1 s); a 4-8 GB CPU target must be checked at "
-        "least at 8 s, where the monolithic forward is already 8× larger"
+        "least at 8 s, where the monolithic forward is already 8x larger"
     )
     assert cfg["separator"]["d_model"] >= 64, "sanity: shipped model is the big one"

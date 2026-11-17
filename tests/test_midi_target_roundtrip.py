@@ -28,9 +28,10 @@ import io
 
 import pytest
 
-mido = pytest.importorskip("mido", reason="round-trip tests require mido")
+from tests.honesty import known_bug, require
 
-from tests.honesty import known_bug, require  # noqa: E402
+mido = require("mido", "round-trip tests require mido", module_level=True)
+
 from tests.synth import parse_midi  # noqa: E402
 from utils.midi import DEFAULT_TEMPO_US, HOP_LENGTH, build_midi_from_events  # noqa: E402
 from utils.midi_targets import DEFAULT_TEMPO_US as READER_DEFAULT_TEMPO_US  # noqa: E402
@@ -63,13 +64,6 @@ def _roundtrip(events, tmp_path, hop=HOP, sr=SR, n_frames=4000, pitch_vocab=128)
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "MIDI-1",
-    "build_midi_from_events -> midi_to_targets does not return the input events: the "
-    "writer's 60x ticks_per_second stamps every onset 60x late on the reader's grid "
-    "(usually outside the window, i.e. an all-zero target tensor), so a model trained "
-    "on these targets learns to fire onsets 60x late.",
-)
 @pytest.mark.parametrize("hop", [512, 128, 256])
 def test_roundtrip_recovers_onsets_and_pitches(tmp_path, hop):
     """N events in -> the same N (frame, pitch, velocity) triples out, ±1 frame."""
@@ -86,27 +80,17 @@ def test_roundtrip_recovers_onsets_and_pitches(tmp_path, hop):
         assert abs(velocity[0, gframe, 0].item() - 100 / 127.0) < 1e-5
 
 
-@known_bug(
-    "MIDI-1",
-    "the pitch target must be exactly one hot bin per recovered onset frame; on the "
-    "mis-scaled timeline the reader's pitch row is empty at the real frame, so this "
-    "one-hot invariant fails before anything else does.",
-)
 def test_roundtrip_pitch_rows_are_one_hot(tmp_path):
+    # frames 315/350/399 -> n_frames must cover them (MIDI-5 keeps the writer on
+    # its own 512/44100 defaults, which is what _roundtrip asks the reader for)
     events = [_ev(n, n * 7, duration_frames=9) for n in (45, 50, 57)]
-    _midi, onset, pitch, _v = _roundtrip(events, tmp_path, n_frames=300)
+    _midi, onset, pitch, _v = _roundtrip(events, tmp_path, n_frames=500)
     rows = [i for i in range(onset.shape[1]) if onset[0, i, 0] > 0]
     assert rows, "no onsets recovered at all"
     for i in rows:
         assert float(pitch[0, i].sum()) == 1.0, f"frame {i} pitch mass {float(pitch[0, i].sum())}"
 
 
-@known_bug(
-    "MIDI-1",
-    "note duration must also survive the circle: duration_frames -> MIDI -> the span "
-    "of the pitch row. Check by re-reading the SMF: the note_on->note_off gap in frames "
-    "must equal the requested duration_frames (±1).",
-)
 def test_roundtrip_duration_matches_requested_frames(tmp_path):
     for dur in (5, 40, 200):
         events = [_ev(60, 0, duration_frames=dur)]
@@ -200,19 +184,19 @@ def test_reader_handles_120bpm_exactly(tmp_path):
     assert int(pitch[0, f].argmax()) == 60
 
 
-@known_bug(
-    "MIDI-6",
-    "midi_to_targets parses set_tempo and discards it (`elif msg.type == 'set_tempo': "
-    "pass`), so it always assumes 120 BPM. Every non-120-BPM source MIDI gets its "
-    "onsets stamped on the wrong frames — a silent label corruption in the Slakh/MUSDB "
-    "training path, and a wrong-target generator for whatever the model learns.",
-)
 @pytest.mark.parametrize(
     "tempo_us,beats",
     [(600_000, 1), (428_571, 1), (750_000, 2)],
     ids=["100bpm", "140bpm", "80bpm-2beats"],  # 120 BPM is the passing baseline above
 )
 def test_reader_honours_the_files_tempo(tmp_path, tempo_us, beats):
+    """Regression guard for MIDI-6 (fixed by PR #11): the parsed set_tempo is applied.
+
+    `utils/midi_targets.py` used to read `set_tempo` and then convert ticks with the
+    120-BPM default, stamping every non-120-BPM source MIDI (i.e. all of Slakh) onto
+    the wrong frames — silent training-label corruption that no count-based test could
+    see. A tempo *change* mid-file is still ignored; that is MIDI-7 and stays an xfail.
+    """
     seconds = beats * (tempo_us / 1e6)  # beats x microseconds-per-beat
     p = _write_midi(tmp_path / f"t{tempo_us}_{beats}.mid", tempo_us, [(480 * beats, 61, 100)])
     onset, _pitch, _v = midi_to_targets(p, 200, hop_length=HOP, sample_rate=SR)
@@ -226,22 +210,32 @@ def test_reader_honours_the_files_tempo(tmp_path, tempo_us, beats):
 
 
 @known_bug(
-    "MIDI-6",
-    "a tempo change mid-file must rescale all later notes; the reader ignores every "
-    "set_tempo after the first, so the second note lands ~2x early.",
+    "MIDI-7",
+    "utils/midi_targets.py reads ONE tempo (DEFAULT_TEMPO_US / the file's first set_tempo, "
+    "whichever it picks) and converts every message's tick offset with it, so a tempo MAP in "
+    "the middle of a file is ignored: measured on a 480-PPQ file with 120 BPM at tick 0, "
+    "60 BPM from tick 480 and a note at tick 1440, midi_to_targets reports frame 129 (=1.500 s, "
+    "the 120 BPM answer) where the correct onset is 2.500 s (frame 215) — a 1-second drift on a "
+    "60 BPM ballad movement. Anything exported from a DAW with a tempo change lands off-grid. "
+    "Accumulate time per track while applying each set_tempo at its own tick.",
 )
 def test_reader_handles_a_tempo_change_mid_file(tmp_path):
     p = _write_midi(
         tmp_path / "map.mid",
         500_000,
-        [(480, 60, 100), (960, 62, 100)],
+        [(240, 60, 100), (1440, 62, 100)],
         extra_tempo_events=[{"time": 480, "tempo": 1_000_000}],  # 60 BPM from beat 1
     )
-    onset, _p, _v = midi_to_targets(p, 200, hop_length=HOP, sample_rate=SR)
-    frames = [i for i in range(200) if onset[0, i, 0] > 0]
+    onset, _p, _v = midi_to_targets(p, 300, hop_length=HOP, sample_rate=SR)
+    frames = [i for i in range(300) if onset[0, i, 0] > 0]
     assert len(frames) == 2, frames
-    # beat 0->1 at 120 BPM = 0.5 s, then one beat at 60 BPM = +1.0 s => 1.5 s
-    assert abs(frames[1] - round(1.5 * SR / HOP)) <= 1, f"second note at frame {frames[1]}"
+    # note 1: half a beat at 120 BPM = 0.25 s (frame 22). note 2: 0.25 s + 2 beats
+    # at 60 BPM = 2.500 s (frame 215) — the reader must apply the tempo map per tick.
+    assert abs(frames[0] - round(0.25 * SR / HOP)) <= 1, f"first note at frame {frames[0]}"
+    assert abs(frames[1] - round(2.50 * SR / HOP)) <= 1, (
+        f"second note at frame {frames[1]}; 2.500 s is frame {round(2.50 * SR / HOP)} — "
+        f"frame {frames[1]} is where it lands if the 60 BPM change is ignored"
+    )
 
 
 def test_reader_marks_velocity_only_on_onset_frames(tmp_path):

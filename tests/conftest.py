@@ -285,12 +285,21 @@ def pipeline_config(mock_config):
       * ``mock_config`` has hop_length=128 while ``utils.midi.HOP_LENGTH`` is 512, so
         any frame→tick→frame round trip through MIDI silently mixes units (see
         MIDI-5); with this fixture the writer's default is the model's grid.
-      * ``mock_config`` pairs n_fft=512 with hop=512, and torch.istft rejects a
-        non-overlapping Hann hop ("window overlap add min"), so the real separator
-        cannot run on it at all — see CFG-2 in test_audio_edge_cases.py.
+      * the artifact / gate thresholds and the STFT resolution were tuned on the
+        shipped 2048/512 grid; a numerical pass on a 4x-finer hop proves nothing about
+        the product. (It used to be that the real separator could not run on
+        ``mock_config`` at all — n_fft=512 with hop=512 is rejected by ``torch.istft``.
+        That was CFG-2, fixed by PR #11; ``test_audio_edge_cases.py`` now guards that
+        the small grid stays runnable so the fast config remains usable for unit tests.)
     """
     audio = {**mock_config["audio"], "n_fft": 2048, "hop_length": 512, "n_mels": 80}
-    return {**mock_config, "audio": audio}
+    cfg = {**mock_config, "audio": audio}
+    # Deliberately NO "backends" key here. main.StemMidiModel now honours cfg["backends"]
+    # (PR #11 / BACK-1), so inheriting mock_config's fake backends would route every
+    # "model + injected double" test through FakeSeparatorBackend and silently bypass the
+    # doubles — the assertions would then be describing the fake backend's canned output.
+    cfg.pop("backends", None)
+    return cfg
 
 
 # ---------------------------------------------------------------------------
