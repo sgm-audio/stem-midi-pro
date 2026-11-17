@@ -102,9 +102,7 @@ def test_model_expression_fields_reach_midi_serializer(mock_config):
         torch.tensor([[[0.75, 1.0, 0.0]]]),
     )
     assert events[0]["expression"] == {"bend": 0.75, "vibrato": 1.0, "slide": 0.0}
-    mid = mido.MidiFile(
-        file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar"))
-    )
+    mid = mido.MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
     assert any(message.type == "pitchwheel" for message in mid.tracks[0])
     assert {message.control for message in mid.tracks[0] if message.type == "control_change"} == {
         1,
@@ -119,9 +117,7 @@ def test_confidence_count_is_limited_to_emitted_notes():
     confidence[2] = 0.9
     confidence[80] = 0.7
     energy = torch.ones(100)
-    result = ConfidenceInjector(min_confidence=0.6).inject_midi_metadata(
-        events, confidence, energy
-    )
+    result = ConfidenceInjector(min_confidence=0.6).inject_midi_metadata(events, confidence, energy)
 
     assert len(result["midi_events"]) == 2
     assert result["summary"]["low_confidence_count"] == 0

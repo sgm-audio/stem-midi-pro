@@ -13,8 +13,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import yaml  # noqa: E402
-
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
@@ -28,8 +26,6 @@ def main() -> int:
         return 2
 
     cfg_path = args.config if args.config.is_absolute() else _ROOT / args.config
-    with open(cfg_path, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
 
     from main import load_from_checkpoint
 

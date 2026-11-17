@@ -643,9 +643,7 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
         bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
             "guitar.mid",
-            build_midi_from_events(
-                guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr
-            ),
+            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
         )
         zip_file.writestr(
             "bass.mid",

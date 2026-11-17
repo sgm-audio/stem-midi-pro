@@ -153,7 +153,7 @@ def build_midi_from_events(
             continue
         if key in active_until and onset_tick < active_until[key]:
             old_index = note_off_entry[key]
-            old_tick, old_priority, old_sequence, old_message = scheduled[old_index]
+            _old_tick, old_priority, old_sequence, old_message = scheduled[old_index]
             scheduled[old_index] = (onset_tick, old_priority, old_sequence, old_message)
 
         duration_frames = ev.get("duration_frames")

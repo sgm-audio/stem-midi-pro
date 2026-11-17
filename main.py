@@ -94,10 +94,9 @@ class StemMidiModel(nn.Module):
         # only when both constructors explicitly attest that their own weights
         # are available. Native Mamba/fake backends never make that claim.
         if self._use_backends:
-            self._weights_loaded = (
-                bool(getattr(self.separator_backend, "weights_loaded", False))
-                and bool(getattr(self.transcriber_backend, "weights_loaded", False))
-            )
+            self._weights_loaded = bool(
+                getattr(self.separator_backend, "weights_loaded", False)
+            ) and bool(getattr(self.transcriber_backend, "weights_loaded", False))
 
         self.confidence_injector = ConfidenceInjector(
             onset_threshold=self.cfg["transcriber"].get("onset_threshold", 0.5),
@@ -228,8 +227,8 @@ class StemMidiModel(nn.Module):
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
 
-        guitar_meta, guitar_conf = self._enhance(guitar_tr, guitar_stem)
-        bass_meta, bass_conf = self._enhance(bass_tr, bass_stem)
+        guitar_meta, _ = self._enhance(guitar_tr, guitar_stem)
+        bass_meta, _ = self._enhance(bass_tr, bass_stem)
 
         guitar_notes = len(guitar_meta["midi_events"])
         bass_notes = len(bass_meta["midi_events"])
@@ -449,9 +448,7 @@ class StemMidiModel(nn.Module):
     # Decoding
     # ------------------------------------------------------------------
 
-    def _logits_to_midi(
-        self, onset_logits, pitch_logits, velocity, confidence, expression=None
-    ):
+    def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence, expression=None):
         """Convert network outputs to a FLAT MIDI event list.
 
         Onset peak-picking (H-6): sigmoid probability is thresholded and an
@@ -751,8 +748,8 @@ class StemMidiModel(nn.Module):
         bass_tr = self._transcribe(full_bass, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
-        guitar_meta, guitar_conf = self._enhance(guitar_tr, full_guitar)
-        bass_meta, bass_conf = self._enhance(bass_tr, full_bass)
+        guitar_meta, _ = self._enhance(guitar_tr, full_guitar)
+        bass_meta, _ = self._enhance(bass_tr, full_bass)
 
         guitar_notes = len(guitar_meta["midi_events"])
         bass_notes = len(bass_meta["midi_events"])
@@ -880,8 +877,10 @@ def cli() -> None:
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    checkpoint = args.checkpoint or os.environ.get("MODEL_CHECKPOINT_PATH") or config.get(
-        "restore_from_path"
+    checkpoint = (
+        args.checkpoint
+        or os.environ.get("MODEL_CHECKPOINT_PATH")
+        or config.get("restore_from_path")
     )
     if checkpoint:
         model = load_from_checkpoint(checkpoint, args.config)
@@ -904,10 +903,7 @@ def cli() -> None:
     # Print summary
     print("Processing complete!")
     print(f"Quality: {result['report'].quality_tier.value}")
-    print(
-        f"Centroid separation proxy (not SI-SDR): "
-        f"{result['report'].separation_proxy:.1f}"
-    )
+    print(f"Centroid separation proxy (not SI-SDR): " f"{result['report'].separation_proxy:.1f}")
     print(f"Backend: {result['report'].backend}")
     print(f"Avg Confidence: {result['report'].avg_confidence:.0%}")
     print(f"Routing: {result['routing']['action']}")
