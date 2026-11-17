@@ -29,7 +29,7 @@ BASS_NOTE = 40  # E2 — inside the bass register
 BASS_RANGE = range(24, 68)  # E1..G4; a bass stem should live here
 
 
-class _RegisterSeparator(torch.nn.Module):
+class _RegisterSeparator(torch.nn.Module):  # type: ignore[name-defined]
     """Emits a fixed 220 Hz "guitar" stem and a 55 Hz "bass" stem.
 
     Known registers make the bass assertions deterministic: a register-aware
@@ -50,7 +50,7 @@ class _RegisterSeparator(torch.nn.Module):
         return guitar, bass, torch.zeros_like(guitar), None, metrics
 
 
-class _RegisterTranscriber(torch.nn.Module):
+class _RegisterTranscriber(torch.nn.Module):  # type: ignore[name-defined]
     """Eager onsets on every frame; pitch chosen by the stem's zero-crossing rate.
 
     220 Hz -> zcr ~0.010, 55 Hz -> zcr ~0.0025 (zcr = 2f/sr), so the pitch

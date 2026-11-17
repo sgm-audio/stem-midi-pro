@@ -23,7 +23,7 @@ from utils.quality_gates import (  # noqa: E402
 SR = 44100
 
 
-def _sine(seconds: float = 1.0, amp: float = 0.3) -> torch.Tensor:
+def _sine(seconds: float = 1.0, amp: float = 0.3) -> torch.Tensor:  # type: ignore[name-defined]
     t = torch.arange(int(seconds * SR)) / SR
     return (amp * torch.sin(2 * torch.pi * 220 * t)).reshape(1, 1, -1)
 

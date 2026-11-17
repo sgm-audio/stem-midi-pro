@@ -55,7 +55,7 @@ def frames_for_seconds(seconds: float) -> int:
     return round(seconds * FRAMES_PER_SECOND)
 
 
-def load(midi_bytes: bytes) -> "mido.MidiFile":
+def load(midi_bytes: bytes) -> "mido.MidiFile":  # type: ignore[name-defined]
     return mido.MidiFile(file=io.BytesIO(midi_bytes))
 
 
