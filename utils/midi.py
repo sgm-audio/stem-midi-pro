@@ -93,8 +93,9 @@ def build_midi_from_events(
     """Convert MIDI event metadata to SMF bytes.
 
     Events are scheduled on an absolute tick timeline before being written as
-    Mido delta times. This preserves chords and overlapping notes instead of
-    forcing every note-off to occur before the next note-on. Audio-frame timing
+    Mido delta times. This preserves chords and overlapping different-pitch
+    notes, while truncating duplicate same-channel/pitch retriggers so ordinary
+    MIDI receivers do not see ambiguous overlapping note-ons. Audio-frame timing
     uses ``ticks_per_beat * 1_000_000 / tempo_us``; at 120 BPM and 480 PPQ,
     that is 960 ticks/sec.
 
@@ -128,19 +129,32 @@ def build_midi_from_events(
     # expression follow the note-on at that tick.
     scheduled: list[tuple[int, int, int, Message]] = []
     sequence = 0
+    active_until: dict[tuple[int, int], int] = {}
+    last_onset: dict[tuple[int, int], int] = {}
+    note_off_entry: dict[tuple[int, int], int] = {}
     events = sorted(midi_data.get("midi_events", []), key=lambda e: int(e["onset_frame"]))
     for ev in events:
         note = int(ev["note"])
         if not 0 <= note <= 127:
-            raise ValueError(f"MIDI note must be in [0, 127], got {note}")
+            raise ValueError(f"MIDI note outside MIDI range [0, 127]: {note}")
         channel = int(ev.get("channel", 0))
         if not 0 <= channel <= 15:
-            raise ValueError(f"MIDI channel must be in [0, 15], got {channel}")
+            raise ValueError(f"MIDI channel outside MIDI range [0, 15]: {channel}")
 
         onset_frame = int(ev["onset_frame"])
         if onset_frame < 0:
             raise ValueError(f"onset_frame must be non-negative, got {onset_frame}")
         onset_tick = max(0, round(onset_frame * hop_length / sample_rate * ticks_per_second))
+        key = (channel, note)
+        # Drop exact duplicate retriggers and truncate a prior same-pitch note
+        # before opening the next one. Different pitches remain fully
+        # overlapping, preserving chords and polyphonic durations.
+        if last_onset.get(key) == onset_tick:
+            continue
+        if key in active_until and onset_tick < active_until[key]:
+            old_index = note_off_entry[key]
+            old_tick, old_priority, old_sequence, old_message = scheduled[old_index]
+            scheduled[old_index] = (onset_tick, old_priority, old_sequence, old_message)
 
         duration_frames = ev.get("duration_frames")
         if duration_frames is not None:
@@ -198,6 +212,7 @@ def build_midi_from_events(
             scheduled.append((onset_tick, 3, sequence, expression_message))
 
         sequence += 1
+        note_off_entry[key] = len(scheduled)
         scheduled.append(
             (
                 off_tick,
@@ -206,6 +221,8 @@ def build_midi_from_events(
                 Message("note_off", channel=channel, note=note, velocity=0, time=0),
             )
         )
+        active_until[key] = off_tick
+        last_onset[key] = onset_tick
 
     scheduled.sort(key=lambda item: (item[0], item[1], item[2]))
     current_tick = 0

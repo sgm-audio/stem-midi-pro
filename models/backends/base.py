@@ -14,8 +14,8 @@ class SeparateOut(TypedDict):
     guitar: torch.Tensor
     bass: torch.Tensor
     residual: torch.Tensor
-    # (B, 2) — [centroid_separation_proxy, phase_coherence]. The first value
-    # is a heuristic score, not reference-based SI-SDR or a dB certification.
+    # (B, 2) — [separation_proxy, phase_coherence]. The first value is a
+    # heuristic score, not reference-based SI-SDR or a dB certification.
     metrics: torch.Tensor
 
 

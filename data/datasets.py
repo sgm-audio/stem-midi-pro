@@ -2,10 +2,20 @@
 """
 Dataset loaders for Stem+MIDI Pro.
 Supports Slakh2100-YourMT3-16k and MUSDB18-HQ with synthetic fallback.
-The Slakh2100 / MUSDB18-HQ subsets we ship are weighted toward Canadian artists
-as part of the project mission; see config/curation policy in ARCHITECTURE.md.
+
+Label policy (C-4 / C-5):
+  * Real Slakh tracks with MIDI files get REAL onset/pitch/velocity targets
+    via ``utils.midi_targets.midi_to_targets`` (the periodic A2 impulse train
+    is only used as a last-resort fallback, loudly logged and counted).
+  * MUSDB18-HQ ships no MIDI, so transcription targets are NOT available:
+    the mixture is the true sum of stems and ``target_bass`` is the real
+    bass stem, but onset/pitch targets fall back to the synthetic periodic
+    pattern unless ``strict=True`` — strict mode refuses instead.
+  * ``train.py`` refuses to save checkpoints trained on any synthetic-fallback
+    split unless ``--allow-synthetic`` is passed explicitly.
 """
 
+import glob
 import logging
 import os
 import random
@@ -16,7 +26,13 @@ import soundfile as sf
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from utils.midi_targets import midi_to_targets
+
 logger = logging.getLogger(__name__)
+
+# Frame grid used by the dataset targets (matches the model hop_length).
+TARGET_HOP_LENGTH = 512
+SYNTHETIC_ONSET_VELOCITY = 0.8
 
 
 class AudioDataset(Dataset):
@@ -32,6 +48,7 @@ class AudioDataset(Dataset):
         segment_length: float = 6.0,  # seconds
         instruments: list[str] | None = None,
         augment: bool = True,
+        strict: bool = False,
     ):
         """
         Args:
@@ -40,18 +57,24 @@ class AudioDataset(Dataset):
             segment_length: Length of audio segments in seconds
             instruments: List of stem instruments to separate
             augment: Whether to apply data augmentation
+            strict: Refuse (raise) instead of falling back when labels are
+                missing; used by train.py --strict-data (C-5).
         """
         self.root_dir = root_dir
         self.sample_rate = sample_rate
         self.segment_length = segment_length
         self.instruments = instruments if instruments is not None else ["guitar", "bass"]
         self.augment = augment
+        self.strict = strict
 
         # Validate dataset existence; sets self.synthetic only (C-2.3).
         self._validate_dataset()
 
         # Build file list (short-circuits with synthetic names when needed)
         self.file_list = self._build_file_list()
+
+        # Count of real items that had to fall back to synthetic labels (C-4).
+        self.items_missing_labels = 0
 
         # Augmentation parameters
         self.time_stretch_range = (0.9, 1.1)
@@ -68,7 +91,9 @@ class AudioDataset(Dataset):
         if self.synthetic:
             logger.warning(f"Dataset not found at {self.root_dir}")
             logger.warning(
-                "Using synthetic data for development. Replace with real Canadian artist data."
+                "Falling back to SYNTHETIC data for this split. Training on "
+                "synthetic data requires an explicit --allow-synthetic in "
+                "train.py; the resulting checkpoint is not usable for real music."
             )
 
     def _build_file_list(self) -> list[str]:
@@ -76,12 +101,9 @@ class AudioDataset(Dataset):
         if self.synthetic:
             return [f"synthetic_{i}" for i in range(100)]
 
-        # Implement based on actual dataset structure
-        # For Slakh2100-YourMT3-16k: each item is a track directory (Track00001/, Track00002/, ...)
-        # For MUSDB18-HQ: look for train/test subdirectories
+        # Walk through directory and find track directories (containing mix.wav)
         file_list = []
 
-        # Walk through directory and find track directories (containing mix.wav)
         for entry in os.listdir(self.root_dir):
             track_dir = os.path.join(self.root_dir, entry)
             if os.path.isdir(track_dir) and os.path.exists(os.path.join(track_dir, "mix.wav")):
@@ -102,8 +124,57 @@ class AudioDataset(Dataset):
         """Get a training sample."""
         if self.synthetic:
             return self._get_synthetic_item(idx)
-        else:
-            return self._get_real_item(idx)
+        return self._get_real_item(idx)
+
+    # ------------------------------------------------------------------
+    # Synthetic items and target fallbacks
+    # ------------------------------------------------------------------
+
+    def _periodic_targets(self, n_frames: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Synthetic periodic onset/pitch/velocity targets (A2 every 0.5 s).
+
+        FABRICATED LABELS — used only for the synthetic generator and, loudly
+        logged, as a last-resort fallback for real tracks without MIDI
+        (counted in ``self.items_missing_labels``). Never silent (C-4).
+        """
+        target_onsets = torch.zeros((1, n_frames, 1))
+        target_pitch = torch.zeros((1, n_frames, 128))
+        target_velocity = torch.zeros((1, n_frames, 1))
+        onset_interval_frames = max(1, int(0.5 * self.sample_rate / TARGET_HOP_LENGTH))
+        for f in range(0, n_frames, onset_interval_frames):
+            target_onsets[0, f, 0] = 1.0
+            target_pitch[0, f, 45] = 1.0  # MIDI note 45 (A2 ~ 110Hz)
+            target_velocity[0, f, 0] = SYNTHETIC_ONSET_VELOCITY
+        return target_onsets, target_pitch, target_velocity
+
+    def _handle_missing_labels(self, track_dir: str, n_frames: int):
+        """Strict raises; otherwise loud per-track fallback + count (C-4/C-5)."""
+        self.items_missing_labels += 1
+        if self.strict:
+            raise FileNotFoundError(
+                f"--strict-data: track {track_dir!r} provides no MIDI metadata, so no "
+                "real transcription targets can be built. Add the MIDI files, drop "
+                "the track, or run without --strict-data."
+            )
+        logger.warning(
+            "Track %s has no MIDI metadata: using FABRICATED periodic "
+            "onset/pitch/velocity targets (A2 @ 0.5s). This split trains on "
+            "synthetic labels; train.py will refuse to checkpoint without "
+            "--allow-synthetic. (%d tracks affected so far)",
+            track_dir,
+            self.items_missing_labels,
+        )
+        return self._periodic_targets(n_frames)
+
+    def _find_midi_files(self, track_dir: str) -> list[str]:
+        """Collect per-track MIDI candidates (Slakh layouts vary; be explicit)."""
+        paths: list[str] = []
+        for sub in ("midi", "MIDI", "metadata"):
+            d = os.path.join(track_dir, sub)
+            if os.path.isdir(d):
+                paths.extend(sorted(glob.glob(os.path.join(d, "**", "*.mid"), recursive=True)))
+        paths.extend(sorted(glob.glob(os.path.join(track_dir, "*.mid"))))
+        return paths
 
     def _get_synthetic_item(self, idx: int) -> dict[str, torch.Tensor]:
         """Generate synthetic audio for development/testing."""
@@ -143,16 +214,9 @@ class AudioDataset(Dataset):
         bass = torch.from_numpy(bass).float().unsqueeze(0)
 
         # Compute frame dimension for transcription targets (matches model hop_length)
-        hop_length = 512
-        n_frames = mixture.shape[-1] // hop_length
+        n_frames = mixture.shape[-1] // TARGET_HOP_LENGTH
 
-        # Generate synthetic onset targets at regular intervals
-        target_onsets = torch.zeros((1, n_frames, 1))
-        target_pitch = torch.zeros((1, n_frames, 128))
-        onset_interval_frames = int(0.5 * self.sample_rate / hop_length)
-        for f in range(0, n_frames, onset_interval_frames):
-            target_onsets[0, f, 0] = 1.0
-            target_pitch[0, f, 45] = 1.0  # MIDI note 45 (A2 ~ 110Hz)
+        target_onsets, target_pitch, target_velocity = self._periodic_targets(n_frames)
 
         return {
             "audio": mixture,
@@ -160,6 +224,7 @@ class AudioDataset(Dataset):
             "target_bass": bass,
             "target_onsets": target_onsets,
             "target_pitch": target_pitch,
+            "target_velocity": target_velocity,
         }
 
     def _get_real_item(self, idx: int) -> dict[str, torch.Tensor]:
@@ -184,7 +249,11 @@ class AudioDataset(Dataset):
     def _augment_audio(
         self, mixture: np.ndarray, guitar: np.ndarray, bass: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Apply data augmentation to audio signals."""
+        """Apply data augmentation to audio signals.
+
+        NOTE: time-stretch / pitch-shift invalidate frame-aligned MIDI
+        targets, so subclasses use real-target items WITHOUT augmentation.
+        """
         # Time stretching
         if random.random() < 0.5:
             orig_len = len(mixture)
@@ -223,10 +292,23 @@ class AudioDataset(Dataset):
 
         return mixture, guitar, bass
 
+    @staticmethod
+    def _slice_targets(onset, pitch, velocity, frame_start: int, n_frames: int):
+        """Crop/pad frame-aligned targets to [frame_start, frame_start + n_frames)."""
+        out = []
+        for t in (onset, pitch, velocity):
+            t = t[:, frame_start : frame_start + n_frames]
+            if t.shape[1] < n_frames:
+                t = torch.nn.functional.pad(t, (0, n_frames - t.shape[1]))
+            out.append(t)
+        return out
 
-def get_data_loaders(data_config: dict) -> tuple[DataLoader, DataLoader, DataLoader]:
+
+def get_data_loaders(
+    data_config: dict, strict: bool = False, allow_synthetic: bool = True
+) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Create train, validation, and test data loaders for Canadian artist datasets.
+    Create train, validation, and test data loaders for the configured datasets.
 
     Args:
         data_config: Dictionary containing:
@@ -236,6 +318,12 @@ def get_data_loaders(data_config: dict) -> tuple[DataLoader, DataLoader, DataLoa
             - num_workers: Number of DataLoader workers
             - sample_rate: Target sample rate
             - segment_length: Segment length in seconds
+        strict: Raise instead of falling back when a split directory is
+            missing (C-5). MUSDB18-HQ has no 'val' split upstream — strict
+            mode surfaces that instead of silently training on synthetic data.
+        allow_synthetic: Whether missing split directories may fall back to
+            synthetic data. train.py passes False by default so a silent
+            synthetic split cannot produce a "real-looking" checkpoint.
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
@@ -252,53 +340,85 @@ def get_data_loaders(data_config: dict) -> tuple[DataLoader, DataLoader, DataLoa
         "musdb18hq": "musdb18hq",
     }.get(dataset_type, "")
 
+    def _split_path(split: str) -> str:
+        return os.path.join(root_dir, dataset_subdir, split)
+
+    def _build_split(split: str, augment: bool, cls):
+        split_dir = _split_path(split)
+        if dataset_type != "synthetic" and not os.path.isdir(split_dir):
+            if strict:
+                raise FileNotFoundError(
+                    f"--strict-data: {dataset_type} split directory not found: "
+                    f"{split_dir!r}. Note: MUSDB18-HQ ships only train/ and "
+                    "test/ — there is no upstream 'val' split (M-13)."
+                )
+            logger.warning(
+                "Split directory %s not found — falling back to SYNTHETIC data "
+                "for the '%s' split (C-5). Pass strict=True to refuse instead.",
+                split_dir,
+                split,
+            )
+        return cls(
+            root_dir=split_dir,
+            sample_rate=sample_rate,
+            segment_length=segment_length,
+            augment=augment,
+            strict=strict,
+        )
+
     if dataset_type == "slakh2100_yourmt3":
-        train_dataset = Slakh2100YourMT3Dataset(
-            root_dir=os.path.join(root_dir, dataset_subdir, "train"),
-            sample_rate=sample_rate,
-            segment_length=segment_length,
-            augment=True,
-        )
-        val_dataset = Slakh2100YourMT3Dataset(
-            root_dir=os.path.join(root_dir, dataset_subdir, "val"),
-            sample_rate=sample_rate,
-            segment_length=segment_length,
-            augment=False,
-        )
-        test_dataset = Slakh2100YourMT3Dataset(
-            root_dir=os.path.join(root_dir, dataset_subdir, "test"),
-            sample_rate=sample_rate,
-            segment_length=segment_length,
-            augment=False,
-        )
+        train_dataset = _build_split("train", True, Slakh2100YourMT3Dataset)
+        val_dataset = _build_split("val", False, Slakh2100YourMT3Dataset)
+        test_dataset = _build_split("test", False, Slakh2100YourMT3Dataset)
     elif dataset_type == "musdb18hq":
-        train_dataset = MUSDB18HQDataset(
-            root_dir=os.path.join(root_dir, dataset_subdir, "train"),
-            sample_rate=sample_rate,
-            segment_length=segment_length,
-            augment=True,
-        )
-        val_dataset = MUSDB18HQDataset(
-            root_dir=os.path.join(root_dir, dataset_subdir, "val"),
-            sample_rate=sample_rate,
-            segment_length=segment_length,
-            augment=False,
-        )
-        test_dataset = MUSDB18HQDataset(
-            root_dir=os.path.join(root_dir, dataset_subdir, "test"),
-            sample_rate=sample_rate,
-            segment_length=segment_length,
-            augment=False,
-        )
+        train_dataset = _build_split("train", True, MUSDB18HQDataset)
+        val_dataset = _build_split("val", False, MUSDB18HQDataset)
+        test_dataset = _build_split("test", False, MUSDB18HQDataset)
     else:  # synthetic
         train_dataset = AudioDataset(
-            root_dir=root_dir, sample_rate=sample_rate, segment_length=segment_length, augment=True
+            root_dir=root_dir,
+            sample_rate=sample_rate,
+            segment_length=segment_length,
+            augment=True,
+            strict=strict,
         )
         val_dataset = AudioDataset(
-            root_dir=root_dir, sample_rate=sample_rate, segment_length=segment_length, augment=False
+            root_dir=root_dir,
+            sample_rate=sample_rate,
+            segment_length=segment_length,
+            augment=False,
+            strict=strict,
         )
         test_dataset = AudioDataset(
-            root_dir=root_dir, sample_rate=sample_rate, segment_length=segment_length, augment=False
+            root_dir=root_dir,
+            sample_rate=sample_rate,
+            segment_length=segment_length,
+            augment=False,
+            strict=strict,
+        )
+
+    # C-5: refuse synthetic fallback unless it is explicitly allowed.
+    if not allow_synthetic:
+        offenders = [
+            (name, ds)
+            for name, ds in (("train", train_dataset), ("val", val_dataset), ("test", test_dataset))
+            if getattr(ds, "synthetic", False)
+        ]
+        if offenders:
+            details = ", ".join(f"{name}={ds.root_dir}" for name, ds in offenders)
+            raise FileNotFoundError(
+                "Refusing to train on SYNTHETIC fallback data (allow_synthetic=False): "
+                f"{details}. Provide the real dataset paths or pass "
+                "--allow-synthetic to proceed knowingly."
+            )
+
+    for name, ds in (("train", train_dataset), ("val", val_dataset), ("test", test_dataset)):
+        logger.info(
+            "Dataset[%s]: synthetic=%s tracks=%d missing_labels=%d",
+            name,
+            getattr(ds, "synthetic", "?"),
+            len(ds),
+            getattr(ds, "items_missing_labels", 0),
         )
 
     # Create data loaders
@@ -328,15 +448,14 @@ class Slakh2100YourMT3Dataset(AudioDataset):
     Structure:
         root/
             Track00001/
-                mix.wav             # mixture audio at 16kHz
+                mix.wav             # mixture audio
                 stems/
                     bass.wav        # individual stem audio
                     drums.wav
                     guitar.wav
                     vocals.wav
                     ...
-                metadata/
-                    Track00001.yaml
+                midi/  (or metadata/)   # per-track MIDI used for REAL targets
             Track00002/
                 ...
     """
@@ -354,8 +473,6 @@ class Slakh2100YourMT3Dataset(AudioDataset):
         mix_path = os.path.join(track_dir, "mix.wav")
         if not os.path.exists(mix_path):
             return self._get_synthetic_item(idx)
-
-        import soundfile as sf
 
         mix, sr = sf.read(mix_path)
 
@@ -385,6 +502,33 @@ class Slakh2100YourMT3Dataset(AudioDataset):
             bass = librosa.resample(bass, orig_sr=sr, target_sr=self.sample_rate)
             sr = self.sample_rate
 
+        # Ensure mono (mix from sf.read may be (T, C) — mean-downmix)
+        if mix.ndim > 1:
+            mix = mix.mean(axis=1)
+        if guitar.ndim > 1:
+            guitar = guitar.mean(axis=1)
+        if bass.ndim > 1:
+            bass = bass.mean(axis=1)
+
+        # ------------------------------------------------------------------
+        # Real transcription targets from the track's MIDI (C-4).
+        # ------------------------------------------------------------------
+        midi_paths = self._find_midi_files(track_dir)
+        if midi_paths:
+            # Time-stretch/pitch-shift augmentation invalidates frame-aligned
+            # MIDI targets — augmentation is disabled on real-target items.
+            augment = False
+            n_frames_total = len(mix) // TARGET_HOP_LENGTH
+            onset_full, pitch_full, velocity_full = midi_to_targets(
+                midi_paths,
+                n_frames_total,
+                hop_length=TARGET_HOP_LENGTH,
+                sample_rate=self.sample_rate,
+            )
+        else:
+            augment = self.augment
+            onset_full = pitch_full = velocity_full = None
+
         # Random segment crop
         seg_len = int(self.segment_length * sr)
         if len(mix) > seg_len:
@@ -393,22 +537,15 @@ class Slakh2100YourMT3Dataset(AudioDataset):
             mix = mix[start:end]
             guitar = guitar[start:end]
             bass = bass[start:end]
+            frame_start = start // TARGET_HOP_LENGTH
         else:
-            # Pad if too short
             mix = np.pad(mix, (0, seg_len - len(mix)))
             guitar = np.pad(guitar, (0, seg_len - len(guitar)))
             bass = np.pad(bass, (0, seg_len - len(bass)))
+            frame_start = 0
 
-        # Ensure mono
-        if mix.ndim > 1:
-            mix = mix.mean(axis=1)
-        if guitar.ndim > 1:
-            guitar = guitar.mean(axis=1)
-        if bass.ndim > 1:
-            bass = bass.mean(axis=1)
-
-        # Apply augmentation
-        if self.augment:
+        # Apply augmentation (only when targets are not MIDI-aligned)
+        if augment:
             mix, guitar, bass = self._augment_audio(mix, guitar, bass)
 
         # Re-crop/pad to segment length after augmentation (B6: pitch_shift /
@@ -423,20 +560,19 @@ class Slakh2100YourMT3Dataset(AudioDataset):
             guitar = np.pad(guitar, (0, seg_len - len(guitar)))
             bass = np.pad(bass, (0, seg_len - len(bass)))
 
-        # Convert to tensors
         mix_t = torch.from_numpy(mix).float().unsqueeze(0)
         guitar_t = torch.from_numpy(guitar).float().unsqueeze(0)
         bass_t = torch.from_numpy(bass).float().unsqueeze(0)
 
-        # Generate synthetic onsets (simplified — just periodic)
-        hop_length = 512
-        n_frames = mix_t.shape[-1] // hop_length
-        target_onsets = torch.zeros((1, n_frames, 1))
-        target_pitch = torch.zeros((1, n_frames, 128))
-        onset_interval_frames = int(0.5 * sr / hop_length)
-        for f in range(0, n_frames, onset_interval_frames):
-            target_onsets[0, f, 0] = 1.0
-            target_pitch[0, f, 45] = 1.0  # A2
+        n_frames = seg_len // TARGET_HOP_LENGTH
+        if onset_full is not None:
+            target_onsets, target_pitch, target_velocity = self._slice_targets(
+                onset_full, pitch_full, velocity_full, frame_start, n_frames
+            )
+        else:
+            target_onsets, target_pitch, target_velocity = self._handle_missing_labels(
+                track_dir, n_frames
+            )
 
         return {
             "audio": mix_t,
@@ -444,11 +580,19 @@ class Slakh2100YourMT3Dataset(AudioDataset):
             "target_bass": bass_t,
             "target_onsets": target_onsets,
             "target_pitch": target_pitch,
+            "target_velocity": target_velocity,
         }
 
 
 class MUSDB18HQDataset(AudioDataset):
-    """MUSDB18-HQ dataset loader with CREPE pitch features pre-extracted."""
+    """MUSDB18-HQ dataset loader.
+
+    MUSDB18-HQ stems: bass.wav, drums.wav, vocals.wav, other.wav; the mixture
+    is the SUM of the four stems (C-4: previously divided by 4, training on an
+    attenuated mixture). ``guitar`` is mapped to ``other`` — MUSDB has no
+    isolated guitar stem. No MIDI exists in MUSDB, so transcription targets
+    fall back to the (loudly logged) periodic pattern; strict mode refuses.
+    """
 
     def _build_file_list(self) -> list[str]:
         """Override: MUSDB18-HQ uses stem .wav files (bass.wav, drums.wav, etc.) in track dirs."""
@@ -478,6 +622,7 @@ class MUSDB18HQDataset(AudioDataset):
         }
 
         stem_wavs = {}
+        sr_orig = None
         for stem_name in ["bass", "drums", "vocals", "other"]:
             path = os.path.join(track_dir, f"{stem_name}.wav")
             if os.path.exists(path):
@@ -494,23 +639,29 @@ class MUSDB18HQDataset(AudioDataset):
             if len(stem_wavs[k]) < max_len:
                 stem_wavs[k] = np.pad(stem_wavs[k], (0, max_len - len(stem_wavs[k])))
 
-        # Explicit 1-D accumulate (C-2.7): avoids the int-0 accumulator of
-        # sum(...) which can produce surprising 0-d / broadcast behavior.
+        # Explicit sum (C-2.7 / C-4): the MUSDB mixture is the sum of its
+        # stems. Dividing by the count trains on an attenuated mixture whose
+        # statistics never match full-scale inference input.
         stem_list = list(stem_wavs.values())
         total = stem_list[0].copy()
         for wav in stem_list[1:]:
             total = total + wav
-        mixture = total / len(stem_list)
-        assert mixture.ndim == 1, f"mixture must be 1-D, got shape {mixture.shape}"
+        mixture = total
+        if mixture.ndim != 1:
+            raise ValueError(f"mixture must be 1-D, got shape {mixture.shape}")
 
         target_name = self.instruments[0]
-        target_stem = stem_wavs.get(stem_map.get(target_name, target_name))
-        if target_stem is None:
-            target_stem = np.zeros_like(mixture)
+        guitar_stem = stem_wavs.get(stem_map.get(target_name, target_name))
+        if guitar_stem is None:
+            guitar_stem = np.zeros_like(mixture)
+        bass_stem = stem_wavs.get("bass")
+        if bass_stem is None:
+            bass_stem = np.zeros_like(mixture)
 
         if sr_orig != self.sample_rate:
             mixture = librosa.resample(mixture, orig_sr=sr_orig, target_sr=self.sample_rate)
-            target_stem = librosa.resample(target_stem, orig_sr=sr_orig, target_sr=self.sample_rate)
+            guitar_stem = librosa.resample(guitar_stem, orig_sr=sr_orig, target_sr=self.sample_rate)
+            bass_stem = librosa.resample(bass_stem, orig_sr=sr_orig, target_sr=self.sample_rate)
             sr = self.sample_rate
         else:
             sr = sr_orig
@@ -519,36 +670,37 @@ class MUSDB18HQDataset(AudioDataset):
         if len(mixture) > seg_len:
             start = random.randint(0, len(mixture) - seg_len)
             mixture = mixture[start : start + seg_len]
-            target_stem = target_stem[start : start + seg_len]
+            guitar_stem = guitar_stem[start : start + seg_len]
+            bass_stem = bass_stem[start : start + seg_len]
         else:
             mixture = np.pad(mixture, (0, seg_len - len(mixture)))
-            target_stem = np.pad(target_stem, (0, seg_len - len(target_stem)))
+            guitar_stem = np.pad(guitar_stem, (0, seg_len - len(guitar_stem)))
+            bass_stem = np.pad(bass_stem, (0, seg_len - len(bass_stem)))
 
-        hop_length = 512
-        n_frames = seg_len // hop_length
-        target_onsets = torch.zeros((1, n_frames, 1))
-        target_pitch = torch.zeros((1, n_frames, 128))
-        onset_interval_frames = int(0.5 * sr / hop_length)
-        for f in range(0, n_frames, onset_interval_frames):
-            target_onsets[0, f, 0] = 1.0
-            target_pitch[0, f, 45] = 1.0
+        n_frames = seg_len // TARGET_HOP_LENGTH
+        target_onsets, target_pitch, target_velocity = self._handle_missing_labels(
+            track_dir, n_frames
+        )
 
         if self.augment:
-            mixture, target_stem, _ = self._augment_audio(mixture, target_stem, target_stem)
+            mixture, guitar_stem, bass_stem = self._augment_audio(mixture, guitar_stem, bass_stem)
 
         # Re-crop/pad to segment length after augmentation (B6: pitch_shift /
         # time_stretch can change array length, breaking batch collation).
         if len(mixture) > seg_len:
             mixture = mixture[:seg_len]
-            target_stem = target_stem[:seg_len]
+            guitar_stem = guitar_stem[:seg_len]
+            bass_stem = bass_stem[:seg_len]
         else:
             mixture = np.pad(mixture, (0, seg_len - len(mixture)))
-            target_stem = np.pad(target_stem, (0, seg_len - len(target_stem)))
+            guitar_stem = np.pad(guitar_stem, (0, seg_len - len(guitar_stem)))
+            bass_stem = np.pad(bass_stem, (0, seg_len - len(bass_stem)))
 
         return {
             "audio": torch.from_numpy(mixture).float().unsqueeze(0),
-            "target_guitar": torch.from_numpy(target_stem).float().unsqueeze(0),
-            "target_bass": torch.zeros(1, seg_len),
+            "target_guitar": torch.from_numpy(guitar_stem).float().unsqueeze(0),
+            "target_bass": torch.from_numpy(bass_stem).float().unsqueeze(0),
             "target_onsets": target_onsets,
             "target_pitch": target_pitch,
+            "target_velocity": target_velocity,
         }

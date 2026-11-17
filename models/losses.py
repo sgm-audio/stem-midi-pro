@@ -4,8 +4,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _stft_input_2d(t: torch.Tensor) -> torch.Tensor:
+    """Coerce (B, 1, T) → (B, T) for torch.stft; raise on non-mono."""
+    if t.dim() == 3:
+        if t.shape[1] != 1:
+            raise ValueError(f"loss expects mono stems (B, 1, T), got shape {tuple(t.shape)}")
+        return t.squeeze(1)
+    if t.dim() != 2:
+        raise ValueError(f"loss expects (B, 1, T) or (B, T), got shape {tuple(t.shape)}")
+    return t
+
+
 class MultiResolutionSTFTLoss(nn.Module):
-    """MR-STFT loss for perceptual stem fidelity (6 resolutions)."""
+    """MR-STFT loss for perceptual stem fidelity (3 resolutions).
+
+    Per resolution: log-magnitude L1 + normalized spectral convergence
+    (||Y|-|X||_F / ||Y||_F), with a Hann window — matching the standard
+    MR-STFT formulation (Yamamoto et al., 2020). Each resolution's STFT is
+    computed once and reused for both terms (M-3).
+    """
 
     def __init__(self, resolutions=None):
         super().__init__()
@@ -13,32 +30,35 @@ class MultiResolutionSTFTLoss(nn.Module):
 
     def forward(self, x, y):
         # torch.stft accepts only 1D/2D input; flatten (B, C, T) -> (B, T)
-        if x.dim() == 3:
-            x = x.squeeze(1)
-        if y.dim() == 3:
-            y = y.squeeze(1)
+        x = _stft_input_2d(x)
+        y = _stft_input_2d(y)
         # pad so the largest resolution window fits
         max_fft = max(r[0] for r in self.resolutions)
         if x.shape[-1] < max_fft:
             pad = max_fft - x.shape[-1]
             x = F.pad(x, (0, pad))
             y = F.pad(y, (0, pad))
-        loss = 0
+        loss = x.new_zeros(())
         for n_fft, hop in self.resolutions:
+            window = torch.hann_window(n_fft, device=x.device, dtype=x.dtype)
+            X_mag = torch.stft(x, n_fft, hop, window=window, return_complex=True).abs()
+            Y_mag = torch.stft(y, n_fft, hop, window=window, return_complex=True).abs()
             # Log-magnitude loss
-            X = torch.log(torch.stft(x, n_fft, hop, return_complex=True).abs() + 1e-8)
-            Y = torch.log(torch.stft(y, n_fft, hop, return_complex=True).abs() + 1e-8)
-            loss += F.l1_loss(X, Y)
-
-            # Spectral convergence (L2 on magnitude)
-            X_mag = torch.stft(x, n_fft, hop, return_complex=True).abs()
-            Y_mag = torch.stft(y, n_fft, hop, return_complex=True).abs()
-            loss += F.mse_loss(X_mag, Y_mag)
+            loss = loss + F.l1_loss(torch.log(X_mag + 1e-8), torch.log(Y_mag + 1e-8))
+            # Spectral convergence: normalized Frobenius magnitude distance
+            loss = loss + torch.norm(Y_mag - X_mag, p="fro") / (torch.norm(Y_mag, p="fro") + 1e-8)
         return loss / len(self.resolutions)
 
 
 class PerceptualAudioLoss(nn.Module):
-    """Composite loss: MR-STFT + spectral flatness + crest factor + onset alignment."""
+    """Composite loss: MR-STFT + spectral flatness + crest factor + onset alignment.
+
+    Transcription components are optional and only active when the
+    corresponding targets are supplied by the caller (C-3): pitch CE requires
+    ``target_pitches`` (class indices or one-hot), velocity MAE requires
+    ``target_velocities``. Duration IoU and expression losses remain
+    unwired — no dataset currently emits those targets (see TODO ARCH-11.6).
+    """
 
     def __init__(self, cfg: dict):
         super().__init__()
@@ -76,17 +96,18 @@ class PerceptualAudioLoss(nn.Module):
         # Onset F1 loss (1 - F1 of binarized onset predictions vs targets)
         onset_f1_loss = 0
         if pred_onsets is not None and target_onsets is not None:
-            onset_f1_loss = onset_f1_loss_fn(pred_onsets, target_onsets)
+            onset_f1_loss = onset_f1_loss_fn(pred_onsets, target_onsets, is_logits=True)
 
         # Pitch cross-entropy (128-way MIDI pitch)
         pitch_ce_loss = 0
         if pred_pitch_logits is not None and target_pitches is not None:
             pitch_ce_loss = pitch_ce_loss_fn(pred_pitch_logits, target_pitches)
 
-        # Velocity MAE
+        # Velocity MAE (masked to frames where a velocity target exists)
         velocity_mae_loss = 0
         if pred_velocities is not None and target_velocities is not None:
-            velocity_mae_loss = velocity_mae_loss_fn(pred_velocities, target_velocities)
+            mask = (target_velocities > 0).to(pred_velocities.dtype)
+            velocity_mae_loss = velocity_mae_loss_fn(pred_velocities, target_velocities, mask=mask)
 
         # Duration IoU (1 - mean IoU of predicted vs target note durations)
         duration_iou_loss = 0
@@ -128,24 +149,29 @@ class PerceptualAudioLoss(nn.Module):
         }
 
     def _spectral_flatness_loss(self, x, y):
-        """Penalize unnatural spectral smoothing (preserves transient detail)."""
-        # torch.stft accepts only 1D/2D input; flatten (B, C, T) -> (B, T)
-        if x.dim() == 3:
-            x = x.squeeze(1)
-        if y.dim() == 3:
-            y = y.squeeze(1)
+        """Penalize unnatural spectral smoothing (preserves transient detail).
+
+        Flatness is computed ACROSS FREQUENCY bins per frame (dim=1 of the
+        (B, F, T_f) STFT output) — H-3. The previous implementation averaged
+        over time (the last dim), which measured temporal stationarity
+        instead of spectral shape.
+        """
+        x = _stft_input_2d(x)
+        y = _stft_input_2d(y)
         if x.shape[-1] < 2048:
             pad = 2048 - x.shape[-1]
             x = F.pad(x, (0, pad))
             y = F.pad(y, (0, pad))
 
         def flatness(spec):
-            geom = torch.exp(torch.mean(torch.log(spec + 1e-8), dim=-1))
-            arith = torch.mean(spec, dim=-1)
+            # spec: (B, F, T_f) — geometric/arithmetic mean over F per frame
+            geom = torch.exp(torch.mean(torch.log(spec + 1e-8), dim=1))
+            arith = torch.mean(spec, dim=1)
             return geom / (arith + 1e-8)
 
-        x_spec = torch.stft(x, 2048, 512, return_complex=True).abs()
-        y_spec = torch.stft(y, 2048, 512, return_complex=True).abs()
+        window = torch.hann_window(2048, device=x.device, dtype=x.dtype)
+        x_spec = torch.stft(x, 2048, 512, window=window, return_complex=True).abs()
+        y_spec = torch.stft(y, 2048, 512, window=window, return_complex=True).abs()
         return F.mse_loss(flatness(x_spec), flatness(y_spec))
 
     def _crest_factor_loss(self, x, y):
@@ -161,35 +187,46 @@ class PerceptualAudioLoss(nn.Module):
     def _onset_alignment_loss(self, pred_onsets, target_onsets, stem):
         """Ensure MIDI onsets align with stem energy peaks.
 
-        Compares the energy envelope at predicted onset frames against the
-        energy at target onset frames. If target_onsets is missing or
-        degenerate, falls back to zero alignment loss.
+        Compares the energy at predicted onset frames against the energy at
+        target onset frames — pointwise on the shared frame grid (H-1).
+        The previous implementation broadcast (B, T, 1) onsets against a
+        (B, 1, T) energy envelope, materializing an O(T²) tensor whose
+        global average compared two different statistics.
         """
         if target_onsets is None:
             return pred_onsets.new_zeros(())
-        # Normalize shapes for broadcasting against (B, 1, T) energy
-        if pred_onsets.dim() == 2:
-            pred_onsets = pred_onsets.unsqueeze(1)
-        if target_onsets.dim() == 2:
-            target_onsets = target_onsets.unsqueeze(1)
-        # Compute stem energy envelope
-        energy = torch.mean(stem**2, dim=1, keepdim=True)  # (B, 1, T)
-        energy_smooth = F.avg_pool1d(energy, kernel_size=101, padding=50, stride=1)
+        # Stem energy pooled onto the STFT frame grid (M-4: samples vs frames)
+        hop = int((self.cfg.get("audio") or {}).get("hop_length", 512))
+        energy = torch.mean(stem**2, dim=1)  # (B, T_samples)
+        energy_frames = F.avg_pool1d(
+            energy.unsqueeze(1), kernel_size=hop, stride=hop, ceil_mode=True
+        ).squeeze(
+            1
+        )  # (B, T_f)
 
-        tgt_len = min(pred_onsets.shape[-1], target_onsets.shape[-1], energy_smooth.shape[-1])
-        if tgt_len == 0:
-            return pred_onsets.new_zeros(())
-        pred_onsets = pred_onsets[..., :tgt_len]
-        target_onsets = target_onsets[..., :tgt_len]
-        energy_smooth = energy_smooth[..., :tgt_len]
+        pred = pred_onsets.reshape(pred_onsets.shape[0], -1)
+        tgt = target_onsets.reshape(target_onsets.shape[0], -1).clamp(0, 1).float()
 
-        # Onset-triggered energy attention, normalized per batch
-        pred_energy = (torch.sigmoid(pred_onsets) * energy_smooth).mean()
-        target_energy = (target_onsets.clamp(0, 1).float() * energy_smooth).mean()
+        n = min(pred.shape[-1], tgt.shape[-1], energy_frames.shape[-1])
+        if n == 0:
+            return pred.new_zeros(())
+        pred = pred[..., :n]
+        tgt = tgt[..., :n]
+        energy_frames = energy_frames[..., :n]
+
+        # Pointwise onset-gated energy, normalized over the batch
+        pred_energy = (torch.sigmoid(pred) * energy_frames).mean()
+        target_energy = (tgt * energy_frames).mean()
         return F.mse_loss(pred_energy, target_energy)
 
 
-def onset_f1_loss_fn(pred_onsets, target_onsets, threshold: float = 0.5, eps: float = 1e-8):
+def onset_f1_loss_fn(
+    pred_onsets,
+    target_onsets,
+    threshold: float = 0.5,
+    eps: float = 1e-8,
+    is_logits: bool | None = None,
+):
     """Onset F1 loss: 1 - F1 of binarized predictions vs binary targets.
 
     Shape-robust: inputs may be (B, T, 1), (B, T), or (B, 1, T, 1) — they are
@@ -197,20 +234,30 @@ def onset_f1_loss_fn(pred_onsets, target_onsets, threshold: float = 0.5, eps: fl
     frame grid is expected to happen at the caller for unequal lengths).
 
     Args:
-        pred_onsets: probabilities/logits, any shape
+        pred_onsets: probabilities or logits (see ``is_logits``)
         target_onsets: binary targets, same number of elements
+        is_logits: True → apply sigmoid first; False → inputs are already
+            probabilities; None (default) → infer from the data range
+            (M-2: prefer passing this explicitly; inference from data can
+            misclassify raw logits that happen to land in [0, 1]).
     Returns:
         Scalar loss in [0, 1].
     """
-    is_logits = pred_onsets.min() < 0 or pred_onsets.max() > 1
+    if is_logits is None:
+        is_logits = bool(pred_onsets.min() < 0 or pred_onsets.max() > 1)
     probs = torch.sigmoid(pred_onsets) if is_logits else pred_onsets
 
     pred_flat = probs.reshape(-1)
     target_flat = target_onsets.reshape(-1).float()
-    n = min(pred_flat.numel(), target_flat.numel())
+    if pred_flat.numel() != target_flat.numel():
+        raise ValueError(
+            "onset_f1_loss_fn: prediction and target element counts differ "
+            f"({pred_flat.numel()} vs {target_flat.numel()}); align the frame "
+            "grids at the caller instead of silently truncating."
+        )
 
-    pred_bin = (pred_flat[:n] >= threshold).float()
-    target_bin = (target_flat[:n] >= threshold).float().clamp(0, 1)
+    pred_bin = (pred_flat >= threshold).float()
+    target_bin = (target_flat >= threshold).float().clamp(0, 1)
 
     tp = (pred_bin * target_bin).sum()
     fp = (pred_bin * (1 - target_bin)).sum()
@@ -224,41 +271,72 @@ def pitch_ce_loss_fn(pred_pitch_logits, target_pitches, ignore_index: int = -100
     """128-way pitch cross-entropy loss.
 
     Args:
-        pred_pitch_logits: (B, T, 128) or (B, 128, T) pitch logits
-        target_pitches: (B, T) longs in [0, 127]
+        pred_pitch_logits: (B, T, V) pitch logits. (No layout guessing:
+            a (B, V, T) tensor must be transposed by the caller — M-1.)
+        target_pitches: (B, T) longs in [0, V), or one-hot (B, T, V).
+            Values outside [0, V) (including any negative sentinel such as
+            -100) are mapped to ``ignore_index`` instead of being silently
+            relabeled to a valid class.
     Returns:
         Scalar cross-entropy loss.
     """
     logits = pred_pitch_logits
+    if logits.dim() != 3:
+        raise ValueError(
+            f"pitch_ce_loss_fn expects pred_pitch_logits (B, T, V); got {tuple(logits.shape)}"
+        )
+    vocab = logits.shape[-1]
+    logits = logits.reshape(-1, vocab)
     targets = target_pitches
-    if logits.dim() == 3:
-        # Bring classes to dim=-1.
-        if logits.shape[-1] != 128 and logits.shape[1] == 128:
-            logits = logits.transpose(1, 2)
-        # Dataset targets are commonly one-hot (B, T, V); convert them to
-        # class indices before flattening for cross entropy.
-        if targets.dim() == logits.dim() and targets.shape[-1] == logits.shape[-1]:
-            targets = targets.argmax(dim=-1)
-        logits = logits.reshape(-1, logits.shape[-1])
-        targets = targets.reshape(-1)
-    else:
-        logits = logits.reshape(-1, logits.shape[-1])
-        targets = targets.reshape(-1)
-    return F.cross_entropy(
-        logits, targets.long().clamp(0, logits.shape[-1] - 1), ignore_index=ignore_index
-    )
+
+    if targets.dim() == 4 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)  # collated (B, 1, T, V) one-hot
+    if targets.dim() == 3:
+        if targets.shape[-1] != vocab:
+            raise ValueError(f"one-hot target vocab {targets.shape[-1]} != logits vocab {vocab}")
+        valid = targets.sum(dim=-1) > 0
+        targets = targets.argmax(dim=-1).masked_fill(~valid, ignore_index)
+    elif targets.dim() != 2:
+        targets = targets.reshape(targets.shape[0], -1) if targets.dim() > 2 else targets
+
+    flat = targets.reshape(-1).long()
+    out_of_range = (flat < 0) | (flat >= vocab)
+    flat = torch.where(out_of_range, torch.full_like(flat, ignore_index), flat)
+    if (flat != ignore_index).sum() == 0:
+        # All targets ignored (e.g. one-hot rows that are entirely zero):
+        # F.cross_entropy would return NaN over an empty reduction — return a
+        # zero that stays connected to the graph instead.
+        return logits.sum() * 0.0
+    return F.cross_entropy(logits, flat, ignore_index=ignore_index)
 
 
-def velocity_mae_loss_fn(pred_velocities, target_velocities):
+def velocity_mae_loss_fn(pred_velocities, target_velocities, mask=None):
     """Velocity mean absolute error.
 
     Args:
         pred_velocities: predicted velocities (any scale, e.g. [0,1] or [0,127])
-        target_velocities: target velocities, broadcastable to pred shape
+        target_velocities: target velocities, same shape as predictions
+        mask: optional boolean/float mask, broadcastable to the prediction
+            shape; only masked frames contribute (velocity targets are only
+            defined at onset frames).
     Returns:
         Scalar MAE >= 0.
     """
-    return F.l1_loss(pred_velocities.float(), target_velocities.float())
+    pred = pred_velocities.float().reshape(-1)
+    target = target_velocities.float().reshape(-1)
+    if pred.numel() != target.numel():
+        raise ValueError(
+            "velocity_mae_loss_fn: prediction and target element counts differ "
+            f"({pred.numel()} vs {target.numel()})"
+        )
+    if mask is None:
+        return F.l1_loss(pred, target)
+    m = mask.float().reshape(-1)
+    if m.numel() != pred.numel():
+        raise ValueError(f"velocity_mae_loss_fn: mask element count {m.numel()} != {pred.numel()}")
+    if m.sum() == 0:
+        return pred.sum() * 0.0  # zero, but connected to the graph
+    return F.l1_loss(pred[m > 0], target[m > 0])
 
 
 def duration_iou_loss_fn(pred_durations, target_durations, eps: float = 1e-8):

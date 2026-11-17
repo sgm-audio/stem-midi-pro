@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Mamba backends using the native module and its CPU fallback."""
+"""Mamba backends using the native module and its CPU fallback.
+
+These wrappers do not require the optional ``mamba_ssm`` CUDA package on the
+CPU target; the pure-PyTorch fallback in ``models/_mamba_compat.py`` is used
+when it is unavailable. Native Mamba weights still require a project
+checkpoint before file/API inference.
+"""
 
 from __future__ import annotations
 

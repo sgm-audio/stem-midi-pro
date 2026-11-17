@@ -14,9 +14,9 @@ class QualityTier(Enum):
 class ProcessingReport:
     """Processing metrics and the conservative routing decision.
 
-    ``separation_proxy`` is intentionally named as a proxy. ``si_sdr`` is a
-    deprecated compatibility alias for older callers and is never presented as
-    a true reference-based SI-SDR measurement by the current code.
+    ``separation_proxy`` is intentionally named as a proxy. ``si_sdr`` and
+    ``centroid_separation_db`` are deprecated compatibility aliases and are
+    never presented as true reference-based SI-SDR measurements.
     """
 
     separation_proxy: float | None = None
@@ -27,13 +27,22 @@ class ProcessingReport:
     config: dict[str, Any] | None = None
     model_weights_loaded: bool | None = None
     si_sdr: float | None = None  # deprecated input/output compatibility alias
+    centroid_separation_db: float | None = None  # deprecated compatibility alias
+    backend: str | None = None
 
     def __post_init__(self):
         if self.separation_proxy is None:
-            self.separation_proxy = float(self.si_sdr or 0.0)
-        # Keep old integrations readable while ensuring all routing uses the
-        # explicitly named proxy field.
-        self.si_sdr = float(self.separation_proxy)
+            self.separation_proxy = float(
+                self.centroid_separation_db
+                if self.centroid_separation_db is not None
+                else (self.si_sdr or 0.0)
+            )
+        proxy = float(self.separation_proxy)
+        self.separation_proxy = proxy
+        # Compatibility aliases for older callers. Routing always uses proxy.
+        self.si_sdr = proxy
+        self.centroid_separation_db = proxy
+
         if self.artifact_flags is None:
             self.artifact_flags = ["none"]
         else:
@@ -45,10 +54,12 @@ class ProcessingReport:
         self.studio_confidence_threshold = gates.get("studio_confidence_threshold", 0.85)
         self.draft_confidence_threshold = gates.get("draft_confidence_threshold", 0.70)
         self.min_separation_proxy = gates.get(
-            "min_separation_proxy", gates.get("min_si_sdr", 20.0)
+            "min_separation_proxy",
+            gates.get("min_centroid_separation_db", gates.get("min_si_sdr", 20.0)),
         )
-        # Deprecated config alias for callers that inspect the object.
+        # Deprecated config aliases for callers that inspect the object.
         self.min_si_sdr = self.min_separation_proxy
+        self.min_centroid_separation_db = self.min_separation_proxy
 
     @property
     def quality_tier(self) -> QualityTier:

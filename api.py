@@ -60,7 +60,7 @@ _request_ctx: "contextvars.ContextVar[dict[str, Any] | None]" = contextvars.Cont
     "request_ctx", default=None
 )
 
-try:  # optional dep — do NOT require it
+try:  # optional dep - do NOT require it
     import structlog  # type: ignore
 
     structlog.configure(
@@ -158,7 +158,7 @@ def log_event(level: str, event: str, **fields: Any) -> None:
 # Metrics (API-6.16): prometheus_client if installed; hand-rolled fallback.
 # ---------------------------------------------------------------------------
 
-try:  # optional dep — do NOT require it
+try:  # optional dep - do NOT require it
     from prometheus_client import (
         CONTENT_TYPE_LATEST,
         CollectorRegistry,
@@ -227,7 +227,7 @@ def _inc_in_flight(delta: int) -> None:
 # ---------------------------------------------------------------------------
 
 model = None  # StemMidiModel, lazily imported in load_model() (T-8.2.1)
-# Lazy module-level refs (T-8.2.1) — populated by _import_model()
+# Lazy module-level refs (T-8.2.1) - populated by _import_model()
 StemMidiModel = None  # type: ignore
 load_from_checkpoint = None  # type: ignore
 model_config: dict | None = None
@@ -397,7 +397,7 @@ if not _raw_origins or _raw_origins == ["*"]:
     _cors_credentials = False
 elif "*" in _raw_origins:
     # Mismatched config: wildcard mixed with explicit origins is ambiguous
-    # about credentials — fail fast instead of silently choosing (API-6.2).
+    # about credentials - fail fast instead of silently choosing (API-6.2).
     raise RuntimeError(
         "Invalid CORS_ORIGINS: '*' cannot be combined with explicit origins. "
         "Use '*' alone (no credentials) or a comma-separated origin list (with credentials)."
@@ -613,6 +613,18 @@ def validate_audio_file(file_path: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
+    """Extract per-stem MIDI metadata (H-8).
+
+    The orchestrator returns {"guitar": …, "bass": …, "summary": …}. Older
+    flat shapes ({\"midi_events\": [...]}) are accepted for compatibility —
+    in that case both stems receive the same (legacy) payload.
+    """
+    if isinstance(midi_pkg, dict) and stem in midi_pkg and "midi_events" in midi_pkg[stem]:
+        return midi_pkg[stem]
+    return midi_pkg  # legacy flat shape
+
+
 def create_response_zip(outputs: dict) -> io.BytesIO:
     """Create a ZIP in memory: stems (wav) + MIDI + processing report."""
     zip_buffer = io.BytesIO()
@@ -626,12 +638,14 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             sf.write(buf, outputs["stems"][stem_name], sr, format="WAV")
             zip_file.writestr(f"{stem_name}_stem.wav", buf.getvalue())
 
-        midi_data = outputs["midi"]
-        guitar_midi = midi_data.get("guitar", midi_data)
-        bass_midi = midi_data.get("bass", midi_data)
+        midi_pkg = outputs["midi"]
+        guitar_midi = _stem_midi_data(midi_pkg, "guitar")
+        bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
             "guitar.mid",
-            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr
+            ),
         )
         zip_file.writestr(
             "bass.mid",
@@ -640,32 +654,32 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
 
         report = outputs["report"]
         separation_proxy = float(
-            getattr(report, "separation_proxy", getattr(report, "si_sdr", 0.0))
+            getattr(
+                report,
+                "separation_proxy",
+                getattr(report, "centroid_separation_db", getattr(report, "si_sdr", 0.0)),
+            )
         )
-        # Keep the old key as a compatibility alias while making the honest
-        # metric name the primary report field.
-        zip_file.writestr(
-            "processing_report.json",
-            json.dumps(
-                {
-                    "separation_proxy": separation_proxy,
-                    # Deprecated compatibility alias. This value is not SI-SDR
-                    # and must not be read as a reference-based dB certification.
-                    "si_sdr": separation_proxy,
-                    "metric_semantics": "centroid_separation_proxy_not_si_sdr",
-                    "phase_coherence": float(report.phase_coherence),
-                    "avg_confidence": float(report.avg_confidence),
-                    "confidence_encoding": guitar_midi.get("summary", {}).get(
-                        "confidence_encoding", "polyphonic_key_pressure"
-                    ),
-                    "artifact_flags": report.artifact_flags,
-                    "low_confidence_notes": report.low_confidence_notes,
-                    "model_weights_loaded": getattr(report, "model_weights_loaded", None),
-                    "quality_tier": report.quality_tier.value,
-                },
-                indent=2,
+        report_json = {
+            "separation_proxy": separation_proxy,
+            # Deprecated compatibility alias. This value is not SI-SDR and
+            # must not be read as a reference-based dB certification.
+            "si_sdr": separation_proxy,
+            "metric_semantics": "centroid_separation_proxy_not_si_sdr",
+            "phase_coherence": float(report.phase_coherence),
+            "avg_confidence": float(report.avg_confidence),
+            "confidence_encoding": guitar_midi.get("summary", {}).get(
+                "confidence_encoding", "polyphonic_key_pressure"
             ),
-        )
+            "artifact_flags": report.artifact_flags,
+            "low_confidence_notes": report.low_confidence_notes,
+            "model_weights_loaded": getattr(report, "model_weights_loaded", None),
+            "quality_tier": report.quality_tier.value,
+        }
+        backend = getattr(report, "backend", None)
+        if backend:
+            report_json["backend"] = backend
+        zip_file.writestr("processing_report.json", json.dumps(report_json, indent=2))
 
     zip_buffer.seek(0)
     return zip_buffer
@@ -676,8 +690,14 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
 # ---------------------------------------------------------------------------
 
 
-async def _read_upload(request: Request, file: UploadFile) -> tuple[str, bytes]:
-    """Validate headers/extension and stream the upload with a size cap."""
+async def _read_upload(request: Request, file: UploadFile, out_path: str) -> str:
+    """Stream the upload straight to ``out_path`` with a size cap (M-9).
+
+    Buffering the whole upload in memory (the previous implementation joined
+    ~500 MB chunks into one bytes object, ~1.5 GB transient on the 4-8 GB
+    target) is avoided by spooling to the temp file as chunks arrive.
+    Returns the file extension.
+    """
     multipart_overhead = 1024 * 1024
     content_length = request.headers.get("content-length")
     if content_length is not None:
@@ -697,20 +717,20 @@ async def _read_upload(request: Request, file: UploadFile) -> tuple[str, bytes]:
             detail=f"Unsupported file format {file_ext}. Supported: {SUPPORTED_FORMATS}",
         )
 
-    chunks: list[bytes] = []
     total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
-            )
-        chunks.append(chunk)
-    return file_ext, b"".join(chunks)
+    with open(out_path, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Upload exceeds maximum size of {MAX_UPLOAD_BYTES} bytes",
+                )
+            out.write(chunk)
+    return file_ext
 
 
 async def _do_process(tmp_file_path: str, quantize: bool = False) -> io.BytesIO:
@@ -751,7 +771,11 @@ async def process_audio(
             headers={"Retry-After": RETRY_AFTER_SECONDS},
         )
 
-    # API-6.4: one concurrent processing job.
+    # API-6.4: one concurrent processing job. The semaphore is acquired
+    # BEFORE the upload is read (M-10): checking `locked()` and acquiring
+    # around the upload read left a window where two large uploads could
+    # both proceed and queue - on the 4-8 GB target, serializing uploads is
+    # the point of the cap, not a side effect.
     sem = _processing_sem
     if sem is not None and sem.locked():
         raise HTTPException(
@@ -760,28 +784,20 @@ async def process_audio(
             headers={"Retry-After": RETRY_AFTER_SECONDS},
         )
 
-    file_ext = content = None
-    try:
-        file_ext, content = await _read_upload(request, file)
-    finally:
-        await file.close()
-
     tmp_file_path: str | None = None
-    acquired = False
     try:
         if sem is not None:
             await sem.acquire()
-            acquired = True
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-                tmp_file.write(content)
-                tmp_file_path = tmp_file.name
 
-            log_event("info", "processing_started", filename=file.filename)
-            zip_buffer = await _do_process(tmp_file_path, quantize)
-        finally:
-            if acquired:
-                sem.release()
+        # Spool the upload straight to a temp file as it arrives (M-9) - no
+        # full request-body buffering in RAM.
+        fd, tmp_file_path = tempfile.mkstemp(prefix="stem_midi_upload_")
+        os.close(fd)
+        await _read_upload(request, file, tmp_file_path)
+        await file.close()
+
+        log_event("info", "processing_started", filename=file.filename)
+        zip_buffer = await _do_process(tmp_file_path, quantize)
 
         download_filename = f"{Path(file.filename or 'audio').stem}_stem-midi-package.zip"
         return StreamingResponse(
@@ -805,6 +821,10 @@ async def process_audio(
         log_event("error", "processing_failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Processing failed: {e!s}") from e
     finally:
+        if sem is not None:
+            sem.release()
+        with suppress(Exception):
+            await file.close()
         # ARCH-11.10.3: temp file removed on every path, success or failure.
         if tmp_file_path:
             with suppress(OSError):
@@ -870,8 +890,10 @@ async def get_model_info():
             headers={"Retry-After": RETRY_AFTER_SECONDS},
         )
     cfg = model_config or {}
+    backend = getattr(model, "backend_name", None)
     return {
         "model_name": cfg.get("name", "unknown"),
+        "backend": backend,  # Which implementation / backend pair produced output.
         "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
         "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),
@@ -890,7 +912,8 @@ def main() -> None:
         "api:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
-        reload=True,
+        # Reload is a DEV feature; default off in production, opt-in via env.
+        reload=os.getenv("UVICORN_RELOAD", "").lower() in {"1", "true", "yes"},
     )
 
 

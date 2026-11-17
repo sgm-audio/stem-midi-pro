@@ -46,8 +46,8 @@ The audit environment was **Python 3.11.2**, not the documented Python 3.13 targ
 
 | Command/probe | Observed result | What it does and does not establish |
 |---|---|---|
-| `.venv/bin/python -m pytest -q -m "not cuda"` | **101 passed, 8 skipped** in 4.71 s | Full non-CUDA regression run in Python 3.11.2, including the slow smoke test. Two checkpoint tests skip because `mamba_ssm` is absent; six dataset tests skip because `torchaudio` is absent. |
-| `.venv/bin/python -m pytest -q -m slow` | **1 passed, 108 deselected** in 1.49 s | Only `tests/test_perf_smoke.py`; it uses a downsized test config and a 1-second input, not the default model or an i5. |
+| `.venv/bin/python -m pytest -q -m "not cuda"` | **139 passed, 2 skipped** in 8.47 s | Full non-CUDA regression run in Python 3.11.2, including the review-fix and remediation suites. Two checkpoint tests skip because `mamba_ssm` is absent. |
+| `.venv/bin/python -m pytest -q -m slow` | **1 passed, 140 deselected** in 1.75 s | Only the slow-marked smoke test; it uses a downsized test config and a 1-second input, not the default model or an i5. |
 | Focused remediation regressions | Backend selection, checkpoint refusal/marking, independent guitar/bass events, absolute MIDI timing, polyphony, expression mapping, Poly Pressure confidence, proxy naming, and note-level counts | Verifies serialization/orchestration contracts with fake or random test fixtures. It does not establish learned audio quality. |
 | Default config / target-hardware probe | Not rerun as a production benchmark because no checkpoint is shipped and the sandbox is not the reference i5 | Correct decision: random-weight runtime and non-reference timing cannot certify quality or performance. |
 | Direct `utils.midi.build_midi_from_events` regression | Focused tests now verify approximately 960 ticks/sec at 120 BPM, duration timing, same-onset chords, overlaps, expression messages, and Polyphonic Key Pressure | Establishes the serializer contract; external DAW import evidence is still required. |
