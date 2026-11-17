@@ -30,7 +30,7 @@ def _load_api():
 
 
 class _FakeReport:
-    si_sdr: float = 22.0
+    centroid_separation_db: float = 22.0
     phase_coherence: float = 0.9
     avg_confidence: float = 0.9
     artifact_flags: ClassVar[list] = ["none"]
@@ -95,3 +95,5 @@ def test_process_returns_zip_with_five_entries(temp_audio_file, monkeypatch):
     report = json.loads(zf.read("processing_report.json"))
     assert report["quality_tier"] == "studio"
     assert report["avg_confidence"] == pytest.approx(0.9)
+    # C-2.6: the JSON key is honestly named (was `si_sdr`)
+    assert "centroid_separation_db" in report and "si_sdr" not in report

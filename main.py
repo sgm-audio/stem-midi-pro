@@ -212,7 +212,7 @@ class StemMidiModel(nn.Module):
         # 3. Processing report for quality gating (batch element 0 — B=1 is the
         #    supported inference shape; M-12)
         report = ProcessingReport(
-            si_sdr=sep_metrics[0, 0].item(),
+            centroid_separation_db=sep_metrics[0, 0].item(),
             phase_coherence=sep_metrics[0, 1].item(),
             avg_confidence=avg_confidence,
             artifact_flags=self._detect_artifacts(guitar_stem, bass_stem),
@@ -391,20 +391,45 @@ class StemMidiModel(nn.Module):
     def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence):
         """Convert network outputs to a FLAT MIDI event list.
 
+        Onset peak-picking (H-6): sigmoid probability is thresholded and an
+        event fires at each RISING EDGE (first frame of an above-threshold
+        run). A new onset can only fire after
+        ``transcriber.onset_refractory_frames`` (default 4 ≈ 46 ms at 86 fps)
+        consecutive below-threshold frames, so one physical onset whose
+        activation plateaus for many frames — or wiggles across the
+        threshold — emits ONE note_on, not several. Same-pitch duplicates
+        are also dropped downstream, but without peak-picking a jittered
+        argmax pitch mid-burst (e.g. 45,45,52,45) leaks a spurious extra
+        note. Velocity/confidence are sampled at the crossing frame.
+
         Single argmax pitch per onset frame — chords/polyphony are not
         modeled by this head layout (see MambaTranscriber docstring).
-        Vectorized with torch.nonzero (RF-3.1.6). Assumes B=1 for inference;
-        batch >1 still returns all batches' events with onset frames as-is.
+        Assumes B=1 for inference; batch >1 still returns all batches' events
+        with onset frames as-is. ``onset_refractory_frames: 0`` disables the
+        suppression entirely (every above-threshold frame fires — the
+        pre-H-6 behavior).
         """
-        onsets = (
-            torch.sigmoid(onset_logits) > self.cfg["transcriber"].get("onset_threshold", 0.5)
-        ).squeeze(-1)
+        onset_prob = torch.sigmoid(onset_logits).squeeze(-1)  # (B, T)
+        refractory = int(self.cfg["transcriber"].get("onset_refractory_frames", 4))
+        candidates = torch.nonzero(
+            onset_prob > self.cfg["transcriber"].get("onset_threshold", 0.5)
+        )  # (N, 2): [batch_idx, frame], sorted by batch then frame
         pitches = torch.argmax(pitch_logits, dim=-1)
         vel_values = (velocity * 127).long().squeeze(-1)
 
-        hits = torch.nonzero(onsets)  # (N, 2): [batch_idx, frame]
         events = []
-        for b, t in hits.tolist():
+        last_above: dict[int, int] = {}  # batch -> last candidate frame seen
+        for b, t in candidates.tolist():
+            if b not in last_above:
+                accepted = True  # first above-threshold frame of the batch
+            else:
+                # below-threshold frames between this candidate and the
+                # previous one; a rising edge needs >= refractory of them
+                below_gap = t - last_above[b] - 1
+                accepted = below_gap >= refractory
+            last_above[b] = t
+            if not accepted:
+                continue
             events.append(
                 {
                     "note": pitches[b, t].item(),
@@ -569,8 +594,11 @@ class StemMidiModel(nn.Module):
         crossfades over the overlap region (H-4). Chunks are separated
         independently — SSM state does NOT carry between chunks (C-2.5 /
         ARCH-11.8.1, planned); the crossfade hides the state-reset
-        discontinuity but boundary artifacts remain possible. Onsets near
-        chunk boundaries can still be emitted twice (ARCH-11.8.2, planned).
+        discontinuity but boundary artifacts in the STEM AUDIO remain
+        possible. MIDI cannot duplicate boundary notes (ARCH-11.8.2
+        resolved by design): transcription runs ONCE on the recombined
+        full timeline (C-2), so per-chunk MIDI events do not exist to
+        deduplicate.
 
         Transcription runs once on the recombined stems, so pitch/velocity/
         confidence are real model outputs on the full timeline (C-2) and the
@@ -671,7 +699,7 @@ class StemMidiModel(nn.Module):
         }
 
         report = ProcessingReport(
-            si_sdr=final_metrics[0].item(),
+            centroid_separation_db=final_metrics[0].item(),
             phase_coherence=final_metrics[1].item(),
             avg_confidence=avg_confidence,
             artifact_flags=self._detect_artifacts(full_guitar, full_bass),
@@ -753,7 +781,9 @@ def cli() -> None:
     # Print summary
     print("Processing complete!")
     print(f"Quality: {result['report'].quality_tier.value}")
-    print(f"Centroid separation (proxy, not SI-SDR): {result['report'].si_sdr:.1f}dB")
+    print(
+        f"Centroid separation (proxy, not SI-SDR): {result['report'].centroid_separation_db:.1f}dB"
+    )
     print(f"Backend: {result['report'].backend}")
     print(f"Avg Confidence: {result['report'].avg_confidence:.0%}")
     print(f"Routing: {result['routing']['action']}")

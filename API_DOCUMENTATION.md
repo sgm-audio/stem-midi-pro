@@ -137,7 +137,7 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 
 | Field | Type | Description |
 |---|---|---|
-| `si_sdr` | float | Separation-quality estimate in dB (currently a spectral-centroid proxy — see TODO C-2.6) |
+| `centroid_separation_db` | float | How spectrally distinct the two stems are, in dB (a centroid heuristic — NOT true SI-SDR, which needs ground truth; renamed from `si_sdr` per C-2.6) |
 | `phase_coherence` | float | Stem phase coherence, 0–1 |
 | `avg_confidence` | float | Mean transcription confidence, 0–1 |
 | `artifact_flags` | list[str] | e.g. `["clipping"]`, empty when clean |
@@ -146,7 +146,7 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 
 ## Quality Tiers
 
-1. **Studio** — `avg_confidence ≥ 0.85` **and** `si_sdr ≥ 20 dB`: direct download.
+1. **Studio** — `avg_confidence ≥ 0.85` **and** `centroid_separation_db ≥ 20 dB`: direct download.
 2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW (CC#127 tags them).
 3. **Complex** — `avg_confidence < 0.70` or artifact flags present: raw output plus review options.
 

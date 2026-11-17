@@ -40,7 +40,7 @@ def main() -> int:
     g_events = result.get("midi_guitar", {}).get("midi_events", [])
     b_events = result.get("midi_bass", {}).get("midi_events", [])
     print(f"quality_tier={report.quality_tier.value}")
-    print(f"si_sdr_proxy={report.si_sdr:.2f}")
+    print(f"centroid_separation_proxy={report.centroid_separation_db:.2f}")
     print(f"avg_confidence={report.avg_confidence:.3f}")
     print(f"artifacts={report.artifact_flags}")
     print(f"guitar_notes={len(g_events)} bass_notes={len(b_events)}")
