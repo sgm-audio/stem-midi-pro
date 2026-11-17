@@ -1,25 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
+import logging
 import math
 
 import torch
 import torch.nn as nn
 
-from models._mamba_compat import Mamba
+from models._mamba_compat import MAMBA_BACKEND, Mamba
+
+logger = logging.getLogger(__name__)
 
 
 class MambaTranscriber(nn.Module):
     """
-    Polyphonic audio-to-MIDI with expression detection.
+    Mono audio-to-MIDI with expression detection.
 
     Input:  stem (B, C=1, T)
     Outputs: onset_logits (B, T, 1), pitch_logits (B, T, V=128),
              velocity (B, T, 1), expression (B, T, E), confidence (B, T)
+
+    Decoder honesty: the downstream ``_logits_to_midi`` decoder takes a single
+    argmax pitch per onset frame — chords/polyphony are NOT modeled by this
+    head layout. True polyphonic decoding requires per-pitch event heads
+    (see TODO ARCH-11.5.x). The expression head exists but is untrained
+    (ARCH-11.4.4); its output is not encoded into MIDI by the orchestrator.
     """
 
     def __init__(self, cfg: dict):
         super().__init__()
         self.cfg = cfg  # needed by _mel_spectrogram (sample_rate etc.)
         d_model = cfg["transcriber"]["d_model"]
+
+        n_layers = cfg["transcriber"].get("n_layers", cfg["transcriber"].get("n_layer"))
+        if not n_layers or int(n_layers) <= 0:
+            raise ValueError(
+                "transcriber config must define a positive 'n_layers' (or legacy "
+                f"'n_layer') key, got {n_layers!r}"
+            )
+        n_layers = int(n_layers)
 
         # Input projection: mel spectrogram → Mamba dim
         self.n_mels = cfg["audio"]["n_mels"]
@@ -39,18 +56,21 @@ class MambaTranscriber(nn.Module):
         )
         self.input_proj = nn.Linear(self.n_mels, d_model)
 
+        gradient_checkpointing = bool(
+            (cfg.get("training") or {}).get("gradient_checkpointing", False)
+        )
+
         # Mamba backbone (valid mamba-ssm kwargs only; CPU reference impl)
-        self.mamba = nn.Sequential(
-            *[
+        self.mamba = nn.ModuleList(
+            [
                 Mamba(
                     d_model=d_model,
                     d_state=cfg["transcriber"]["d_state"],
-                    d_conv=4,
-                    expand=2,
+                    d_conv=int(cfg["transcriber"].get("d_conv", 4)),
+                    expand=int(cfg["transcriber"].get("expand", 2)),
+                    gradient_checkpointing=gradient_checkpointing,
                 )
-                for _ in range(
-                    cfg["transcriber"].get("n_layers", cfg["transcriber"].get("n_layer"))
-                )
+                for _ in range(n_layers)
             ]
         )
 
@@ -73,7 +93,17 @@ class MambaTranscriber(nn.Module):
         # Store config for inference
         self.onset_threshold = cfg["transcriber"].get("onset_threshold", 0.5)
 
+        logger.info("MambaTranscriber built: backend=%s n_layers=%d", MAMBA_BACKEND, n_layers)
+
     def forward(self, stem: torch.Tensor):
+        if stem.dim() != 3 or stem.shape[1] != 1:
+            raise ValueError(f"MambaTranscriber expects stem (B, 1, T), got {tuple(stem.shape)}")
+        if stem.shape[-1] < self.n_fft:
+            raise ValueError(
+                f"Stem length {stem.shape[-1]} is shorter than n_fft={self.n_fft}; "
+                "torch.stft cannot produce a frame. Pad or supply longer audio."
+            )
+
         # Mel spectrogram input: (B, C, T) → (B, T, n_mels)
         mel = self._mel_spectrogram(stem.squeeze(1)).transpose(1, 2)
         hidden = self.input_proj(mel)

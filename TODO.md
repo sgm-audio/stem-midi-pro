@@ -10,6 +10,8 @@
 
 > **Work stamp 2026-09-21:** ~95 P0/P1 items completed in parallel (Sections 2, 4, 5, 6, most of 7/8/9.1/9.2, 10, 12). Remaining open: RF-3.1.x refactors (3.1.1-3.1.3,3.1.6-3.1.9), RF-3.2.x inits/paths, API-6.13/6.19, PERF-7.5-7.8/7.11/7.12, TR-12.2-12.5/12.7, T-8.1.3/T-8.4.1, HYG-9.3.2 (repo is already a git checkout), most of Section 11/13+. See CHANGELOG.md.
 
+> **Work stamp 2026-11-17 (static-review resolution):** All 24 findings from the 2026-11-17 static review resolved (C-1..C-6, H-1..H-9, M-1..M-13, L). Highlights: chunked zero-alloc Mamba selective scan with a reference-oracle test; one-stem-at-a-time separator forward + persistent-buffer removal (1 min audio ≈ 1.8 GB, 5 min ≈ 2.8 GB peak RSS on CPU, down from OOM >120 s); MIDI writer absolute-timing fix (tempo-correct ticks/sec, was 60x too fast); same-pitch onset dedup; velocity-target pad-dim fix; NaN-guard; confidence CC moved to CC#16 (CC#120-127 are Channel Mode messages — CC#127 legacy alias only); train.py honors precision/device/grad_clip/val_every/n_steps; pyproject packages/api/main/train/demo fixed; semaphore-release regression in api.py caught by lint during the pass. Suite: 128 passed / 2 skipped (mamba_ssm-only); ruff + black clean.
+
 ---
 
 ## Legend

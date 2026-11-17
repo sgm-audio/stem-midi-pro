@@ -21,7 +21,11 @@ class ProcessingReport:
     avg_confidence: float
     artifact_flags: list[str]
     low_confidence_notes: int
-    config: dict[str, Any] = None
+    config: dict[str, Any] | None = None
+    # Which Mamba implementation / backend stack produced this result (M-7):
+    # "mamba (pure-torch)" vs "mamba (mamba-ssm)" vs a backend pair like
+    # "separator=demucs,transcriber=basic_pitch".
+    backend: str | None = None
 
     def __post_init__(self):
         gates = (self.config or {}).get("quality_gates", {})

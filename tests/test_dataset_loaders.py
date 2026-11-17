@@ -11,12 +11,13 @@ import pytest
 
 
 def _import_datasets():
-    # T-8.1.3 honesty fix: this used to gate on torchaudio, which data/datasets.py
-    # does not import (it uses librosa + soundfile only). The gate made the whole
-    # file skip on every spec-compliant CPU install — a clean `pip install -r
-    # requirements.txt` box has no torchaudio, so 6 tests silently did not run.
-    # require() skips with a registered reason on convenience runs and ERRORS
-    # under --strict-deps, which is what CI uses.
+    # T-8.1.3 honesty fix (converges with main's removal of the torchaudio gate):
+    # this used to gate on torchaudio, which data/datasets.py does not import (it
+    # uses librosa + soundfile only). The gate made the whole file skip on every
+    # spec-compliant CPU install — a clean `pip install -r requirements.txt` box has
+    # no torchaudio, so 6 tests silently did not run. require() skips with a
+    # registered reason on convenience runs and ERRORS under --strict-deps, which is
+    # what CI uses.
     from tests.honesty import require
 
     require("torch", "dataset tensors")
