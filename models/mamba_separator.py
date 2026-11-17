@@ -194,9 +194,7 @@ class MambaSeparator(nn.Module):
         """
         return mask_tf[:, start:stop]
 
-    def _masked_centroid(
-        self, mask_tf: torch.Tensor, spec: torch.Tensor
-    ) -> torch.Tensor:
+    def _masked_centroid(self, mask_tf: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
         """Spectral centroid of the masked stem, (B, T_f), computed windowed.
 
         The old path materialised a full ``(B, T_f, F)`` masked-magnitude
@@ -208,17 +206,13 @@ class MambaSeparator(nn.Module):
         freqs = torch.linspace(
             0, self.n_fft // 2, self.n_fft // 2 + 1, device=spec.device, dtype=spec.real.dtype
         ).view(1, -1)
-        out = torch.empty(
-            spec.shape[0], spec.shape[1], device=spec.device, dtype=spec.real.dtype
-        )
+        out = torch.empty(spec.shape[0], spec.shape[1], device=spec.device, dtype=spec.real.dtype)
         for start, stop in self._frame_windows(spec.shape[1]):
             mag = torch.abs(mask_tf[:, start:stop] * spec[:, start:stop])  # (B, c, F)
             out[:, start:stop] = (mag * freqs).sum(dim=-1) / (mag.sum(dim=-1) + 1e-8)
         return out
 
-    def _masked_stem(
-        self, mask_tf: torch.Tensor, spec: torch.Tensor, length: int
-    ) -> torch.Tensor:
+    def _masked_stem(self, mask_tf: torch.Tensor, spec: torch.Tensor, length: int) -> torch.Tensor:
         """istft of one masked stem; returns (B, T).
 
         The masked spectrogram is assembled window by window (so no full-size
@@ -257,9 +251,7 @@ class MambaSeparator(nn.Module):
         n_frames = spec.shape[-1]
         pad = (self.n_fft // 2 + self.hop_length - 1) // self.hop_length
         step = max(1, _ISTFT_CHUNK_FRAMES)
-        out = torch.zeros(
-            spec.shape[0], length, device=spec.device, dtype=spec.real.dtype
-        )
+        out = torch.zeros(spec.shape[0], length, device=spec.device, dtype=spec.real.dtype)
         for start in range(0, n_frames, step):
             stop = min(start + step, n_frames)
             # Outer boundaries need no padding: frame 0 / frame N-1 see the

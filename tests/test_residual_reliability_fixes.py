@@ -130,9 +130,9 @@ def test_log_mel_is_bounded_both_sides(mock_config):
         with torch.inference_mode():
             mel = tr._mel_spectrogram(audio)
         assert torch.isfinite(mel).all(), "log-mel produced NaN/Inf"
-        assert mel.max() <= math.log(1e3) + 1e-3, (
-            f"log-mel max {mel.max().item():.3f} exceeds the log(1e3) ceiling"
-        )
+        assert (
+            mel.max() <= math.log(1e3) + 1e-3
+        ), f"log-mel max {mel.max().item():.3f} exceeds the log(1e3) ceiling"
 
 
 def test_silent_input_does_not_raise(mock_config):

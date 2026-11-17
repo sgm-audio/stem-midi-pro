@@ -482,9 +482,11 @@ class StemMidiModel(nn.Module):
         flags = []
 
         if not (torch.isfinite(guitar).all() and torch.isfinite(bass).all()):
-            return ["non_finite", "silent_output"] if not (
-                guitar.abs().max() > 0 or bass.abs().max() > 0
-            ) else ["non_finite"]
+            return (
+                ["non_finite", "silent_output"]
+                if not (guitar.abs().max() > 0 or bass.abs().max() > 0)
+                else ["non_finite"]
+            )
 
         # Digital silence in both stems means nothing was separated (e.g. no
         # guitar in the mix). It must not reach STUDIO via the clamped proxy.

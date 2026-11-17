@@ -151,9 +151,7 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             hist = self.d_conv - 1
             out = torch.empty(B, L, self.d_model, device=x.device, dtype=x.dtype)
             A = -torch.exp(self.A_log)  # (d_inner, N), negative => contraction
-            h = torch.zeros(
-                B, self.d_inner, self.d_state, device=x.device, dtype=torch.float32
-            )
+            h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=torch.float32)
 
             for start in range(0, L, self.SCAN_CHUNK):
                 stop = min(start + self.SCAN_CHUNK, L)
@@ -183,9 +181,7 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
                 # the models plus the bounded log-mel input; see review §3.
                 dt = F.softplus(self.dt_proj(dt_raw))
 
-                y, h = self._selective_scan(
-                    xc, dt, Bmat, Cmat, A=A, h=h, return_state=True
-                )
+                y, h = self._selective_scan(xc, dt, Bmat, Cmat, A=A, h=h, return_state=True)
                 y = y + self.D.unsqueeze(0).unsqueeze(0) * xc  # skip connection
                 y = y * F.silu(z)  # gate
                 out[:, start:stop] = self.out_proj(y)

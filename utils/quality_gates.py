@@ -61,8 +61,7 @@ class ProcessingReport:
         # Normalise flags so an unknown flag can never silently bypass the
         # artifact check, and record the failure explicitly.
         self.artifact_flags = [
-            f if f in KNOWN_ARTIFACT_FLAGS else f"unknown:{f}"
-            for f in (self.artifact_flags or [])
+            f if f in KNOWN_ARTIFACT_FLAGS else f"unknown:{f}" for f in (self.artifact_flags or [])
         ]
         if self.invalid and "non_finite" not in self.artifact_flags:
             self.artifact_flags.append("non_finite")
