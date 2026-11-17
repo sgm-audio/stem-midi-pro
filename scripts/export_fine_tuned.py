@@ -71,7 +71,7 @@ def main():
         print("FINE-TUNED MODEL INFERENCE RESULTS")
         print("=" * 60)
         print(f"Quality tier: {result['report'].quality_tier.value}")
-        print(f"SI-SDR: {result['report'].si_sdr:.1f} dB")
+        print(f"Centroid separation (proxy): {result['report'].centroid_separation_db:.1f} dB")
         print(f"Avg confidence: {result['report'].avg_confidence:.0%}")
         print(f"Routing: {result['routing']['action']}")
         print(f"Artifacts: {result['report'].artifact_flags}")

@@ -161,6 +161,6 @@ python verify_structure.py                       # structural check (see Known q
 - **Dataset onset targets** carry a spurious `(1, T', 1)` batch dim and a hardcoded-hop frame count; `StemMidiModel._prepare_onset_target` normalizes them — keep new loss inputs shape-robust.
 - **mamba-ssm CPU path:** models use the pure-PyTorch reference impl via `models/_mamba_compat.py` (no `causal_conv1d`, no CUDA kernels). `mamba-ssm` is NOT a hard dependency (needs nvcc to build). Invalid kwargs like `causal_conv1d_impl` must never be passed.
 - **Streaming:** the old fake `_state_cache` activation-concat was removed (C-2.5); chunked inference restarts state per chunk — document, don't reintroduce.
-- **"si_sdr" in `ProcessingReport`** is a centroid-separation **proxy**, not real SI-SDR (needs ground truth). Don't present it as SI-SDR.
+- **`centroid_separation_db` in `ProcessingReport`** (renamed from `si_sdr`, C-2.6) is a centroid-separation **heuristic**, not real SI-SDR (needs ground truth). Don't present it as SI-SDR.
 - No real datasets ship; Slakh/MUSDB loaders fall back to synthetic data unless `--strict-data`.
 - **Line endings:** working tree is LF; `.gitattributes` enforces `eol=lf` for text files.

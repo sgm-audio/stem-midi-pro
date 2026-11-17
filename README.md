@@ -66,7 +66,7 @@ This project targets **bare-metal CPU**, not GPUs. Measured on the built-in pure
 | Input length | Wall time | Peak RSS |
 |---|---|---|
 | 1 min | ~13 s | ~1.8 GB |
-| 5 min | ~79 s | ~2.8 GB |
+| 5 min | ~61-79 s | ~2.8-3.3 GB |
 | 10 min | not measured on this box | ~3.5-4 GB (extrapolated) |
 
 - The reference i5 is untested hardware; expect the same order of magnitude (tens of seconds per minute of audio). The old "30-60 s per 1 min" claim was an estimate, not a benchmark.
