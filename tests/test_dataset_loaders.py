@@ -11,14 +11,21 @@ import pytest
 
 
 def _import_datasets():
-    pytest.importorskip("torch")
-    pytest.importorskip("soundfile")
-    pytest.importorskip("librosa")
-    pytest.importorskip("torchaudio")
+    # T-8.1.3 honesty fix: this used to gate on torchaudio, which data/datasets.py
+    # does not import (it uses librosa + soundfile only). The gate made the whole
+    # file skip on every spec-compliant CPU install — a clean `pip install -r
+    # requirements.txt` box has no torchaudio, so 6 tests silently did not run.
+    # require() skips with a registered reason on convenience runs and ERRORS
+    # under --strict-deps, which is what CI uses.
+    from tests.honesty import require
+
+    require("torch", "dataset tensors")
+    require("soundfile", "dataset audio reads")
+    require("librosa", "dataset resampling")
     try:
         from data import datasets
     except (ImportError, RuntimeError) as exc:
-        pytest.skip(f"Cannot import data.datasets: {exc}")
+        pytest.fail(f"data.datasets does not import ({exc.__class__.__name__}: {exc})")
     return datasets
 
 

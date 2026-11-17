@@ -224,7 +224,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 - [x] **T-8.1.1** · `test` · S · P0 · `tests/conftest.py` — populate with fixtures: `audio` (1-sec 44.1kHz mono tensor), `stereo_audio` (2-ch), `mock_config` (full YAML dict), `temp_audio_file` (WAV in tmp), `temp_flac_file`, `temp_mp3_file` (skip if no encoder), `mock_model` (StemMidiModel with small config).
 - [x] **T-8.1.2** · `test` · S · P0 · `pytest.ini` (new) — `testpaths=tests`, `addopts=-ra --strict-markers --tb=short`. Add markers: `slow`, `cuda`, `integration`.
-- [ ] **T-8.1.3** · `test` · S · P0 · `.github/workflows/ci.yml` — remove `continue-on-error: true` from test step. Add `pytest -m "not cuda"` as the default. Add a separate `cuda` job that only runs on a self-hosted runner.
+- [x] **T-8.1.3** · `test` · S · P0 · `.github/workflows/ci.yml` — remove `continue-on-error: true` from test step. Add `pytest -m "not cuda"` as the default. Add a separate `cuda` job that only runs on a self-hosted runner. (Done in the 2026-11-17 test-suite audit: the correctness step is now `pytest -m "not cuda" --strict-deps --fail-on-skip` with no `continue-on-error`; the coverage run is a separate step that may still go red without masking assertions; the `mamba-ssm`/GPU job is committed as a commented template because no runner exists yet.)
 
 ## 8.2 Un-skip existing tests
 
@@ -520,6 +520,9 @@ A TODO is "done" only when **all** of the following are true:
 - Section 10 (DOC-10.x) — full doc rewrite
 - Section 14.3 (MON-14.3.x) — Stripe + license-key activation (if time)
 
+
+---
+
 ---
 
 # SECTION 17 — AUDIT CHECKLIST CLOSEOUT
@@ -536,6 +539,66 @@ When all `[ ]` items above are `[x]`, run a final audit:
 
 ---
 
+# SECTION 18 — TEST-SUITE AUDIT (2026-11-17)
+
+Deliverable of the skeptical test audit. The suite grew from 98 collected tests
+(90 passed / 8 skipped) to 259 (192 passed / 65 `xfail(strict)` / 1 legitimately
+skipped / 1 deselected `cuda`). Every `xfail` below is a *reproduced* defect with
+measured evidence in its reason string; the marker IDs are the same IDs the tests
+cite, so `grep -rn "TODO MIDI-1" tests/` finds the locking tests.
+
+Full write-up: `AUDIT-test-suite.md`.
+
+## 18.1 Fixes the suite is waiting on (delete the marker when you land the fix)
+
+- [ ] **MIDI-1** · `bug` · M · **P0** · `utils/midi.py:65` — `ticks_per_second = ticks_per_beat * (60 / (tempo_us / 1e6))` evaluates to 57 600 instead of 960, so 1 s of audio renders a 60×-longer SMF and `midi_to_targets` recovers 0 onsets from it. Locked by 16 tests in `tests/test_midi_semantics.py` / `tests/test_midi_target_roundtrip.py` / `tests/test_api_zip.py`.
+- [ ] **MIDI-2** · `bug` · M · **P0** · `utils/midi.py` — one running cursor + `max(0, delta)`: notes whose onset falls inside the previous sustain are pushed to its end, and unsorted input collapses onto duplicate ticks. Emit per-note timelines (or sort by absolute tick and write note_offs as their own events).
+- [ ] **MIDI-3** · `bug` · S · P1 · `utils/midi.py` — CC#127 is appended *after* the note_off, so note *i* carries note *i-1*'s confidence and note 0 has none. Write the CC before its `note_on`.
+- [ ] **MIDI-4** · `bug` · S · P1 · `utils/midi.py` — `int(confidence * 127)` truncates (0.999 → 126); use `round()`.
+- [ ] **MIDI-5** · `bug` · S · **P0** · `api.py:597-599` — `create_response_zip` calls `build_midi_from_events(midi_data, stem)` with the writer's module defaults while the frames come from the configured grid; `outputs["sample_rate"]` is right there. Thread `hop_length`/`sample_rate` through.
+- [ ] **MIDI-6** · `bug` · S · **P0** · `utils/midi_targets.py` — parses `set_tempo` then discards it, so every non-120-BPM source MIDI (i.e. all of Slakh) gets its labels stamped on the wrong frames. Silent training-label corruption.
+- [ ] **STEM-1** · `bug` · M · **P0** · `main.py` `_forward_impl` — `enhanced_midi = {**enhanced_midi, "guitar": enhanced_midi, "bass": enhanced_midi}` aliases both stems to one dict and transcription only runs on the guitar stem: `bass.mid` contains the guitar part. Transcribe each stem, key per stem.
+- [ ] **API-1** · `bug` · S · **P0** · `api.py:create_response_zip` — reads `outputs["midi"]["midi_events"]` (the merged list) for both files and never looks at the per-stem sub-dicts, so `guitar.mid` and `bass.mid` are the same performance twice (measured: both carry all 172 events, differing only in track-name bytes).
+- [ ] **TRANS-1** · `bug` · M · **P0** · `main.py:_logits_to_midi` + pitch head — no minimum inter-onset gap, no per-frame dedup, no "no-note" class: 345 notes/s on music and 342-343 notes/s on digital silence. Add a frame-energy gate + minimum gap + a silence logit.
+- [ ] **GATE-3** · `bug` · S · **P0** · `utils/quality_gates.py` — the tier decision never looks at note count, so a 0-note render with confidence 0.95 is stamped STUDIO/`direct_download`, and silence reaches DRAFT with `editor_launch=True`. Carry `note_count` + input RMS into `ProcessingReport` and require a sane, non-empty stream.
+- [ ] **CONF-1** · `bug` · L · **P0** · transcriber confidence head + `mc_dropout_eval` — avg_confidence is 0.5164 for a hard-clipped square vs 0.2998 for clean music (untrained head ≈ 0.489 ± 0.0045 regardless of content), and `mc_dropout_eval` reports the *mean* of the passes (0.500 vs 0.420 single) so STUDIO's ≥ 0.85 can never fire. Calibrate, then tier.
+- [ ] **REPRO-1** · `bug` · S · P1 · `main.py` — the confidence head is non-deterministic under `.eval()` (Dropout still active: max |Δconf| = 6.46e-3 between two identical calls; onset/pitch/velocity/expression are bit-identical), so a paid retry of the same file can change tier. Seed per request or make the estimate deterministic.
+- [ ] **GATE-4** · `bug` · M · P1 · `models/mamba_separator.py:_centroid_separation` — the `si_sdr` the gate compares against `min_si_sdr=20` is a spectral-centroid ratio clamped to [0, 30]: 17.75 dB for a hard-clipped square vs 0.00 dB for the clean sine (24.75 dB for the 2 s corpus case, i.e. a Studio badge for clipping). Replace with a reference-free separation measure (mask sum / residual energy / MR-STFT).
+- [ ] **ZIP-1** · `bug` · S · **P0** · `api.py:create_response_zip` — `sf.write(buf, stem, sr, format="WAV")` with no subtype picks PCM_16: float32 stems are quantised and any |x| > 1 is hard-clipped *in the delivery layer* (measured: a 3.0 peak decodes as exactly 1.0). Write `subtype="FLOAT"`.
+- [ ] **JSON-1** · `bug` · S · P1 · `api.py:create_response_zip` — `json.dumps(..., allow_nan=True)` emits bare `NaN` for the (common) non-finite metrics, which `JSON.parse` rejects: the whole download is unparseable by standard clients. Sanitise + `allow_nan=False`.
+- [ ] **IO-1** · `bug` · S · P1 · `models/mamba_separator.py` / `models/mamba_transcriber.py` — inputs shorter than one STFT window (T ≤ 1024 ≈ 23 ms) crash as a raw `RuntimeError` (reflection padding) through `process_audio_file` and the API. Pad-or-passthrough and raise a typed validation error instead.
+- [ ] **IO-2** · `bug` · S · P1 · `audio_io.py:open_and_validate` — a 0-frame WAV validates clean (`frames: 0`), then torch raises `Expected 2D or 3D … but got: [1, 1, 0]` → HTTP 500 with internals in the body. Reject in validation → 400.
+- [ ] **IO-3** · `bug` · S · **P0** · `audio_io.py` + `main._detect_artifacts` — NaN/Inf input passes validation and is *delivered successfully*: `artifact_flags=['none']`, tier `complex`, report metrics NaN, and the PCM_16 encoding turns it into a constant −1.0 full-scale "stem". Assert `np.isfinite(data).all()`; flag non-finite renders as `corrupt`.
+- [ ] **IO-4** · `bug` · S · P2 · `audio_io.py` — anti-phase stereo mean-downmixes to rms 1.5e-5 with no warning; detect and flag cancellation before the model sees it.
+- [ ] **GATE-1/ART-1** · `bug` · M · P1 · `main.py:_detect_artifacts` — `mean(stem**2) > 0.1` as a *noise-floor* test flags a clean 0.5-amplitude sine (and full-scale input as `clipping`), and any flag forces COMPLEX before the thresholds, so quiet-but-correct renders are upsold. Compare against input level, not an absolute constant.
+- [ ] **SEP-1** · `bug` · M · P1 · `models/mamba_separator.py` — three independent sigmoid masks ⇒ `‖g+b+r − mix‖ / ‖mix‖ = 0.46-0.51`; define `residual = mix − guitar − bass` or train for sum-consistency.
+- [ ] **ALIGN-1** · `bug` · S · **P0** · `main.py:_forward_impl` — `stem_energy = mean(stem**2, dim=1)` is per-*sample* (channel dim) but indexed by `onset_frame`: cross-modal alignment reads one waveform sample ~11 ms into the file. Pool over the hop.
+- [ ] **GATE-2/REPORT-1** · `bug` · S · P1 · `utils/confidence_injector.py` + `main.py` — `low_confidence_count` counts *frames* (reported to users as "notes"), and the batched report reads `metrics[0, 0]` under a "Average over batch" comment: item 1's garbage render is stamped with item 0's numbers.
+- [ ] **BATCH-1** · `bug` · S · P1 · `main.py:_logits_to_midi` — merges all batch items into one timeline with raw per-item frame indices; reject B > 1 or key events per item.
+- [ ] **CKPT-1** · `bug` · S · **P0** · `main.py:load_from_checkpoint` unwraps only `ckpt["state_dict"]`, while `scripts/export_fine_tuned.py`, `scripts/fine_tune_demucs.py` and `scripts/verify_cpu_export.py` save `model_state_dict` → `Missing/Unexpected key(s)` for every fine-tune export a user follows the docs to produce. Accept both keys (and error on neither).
+- [ ] **BACK-1** · `arch` · M · P1 · `main.py` — `StemMidiModel` never calls `models/backends/factory.build_*`, so `cfg["backends"]` is dead: `configs/model_config.cpu.yaml` says `demucs` + `basic_pitch` and silently runs the untrained Mamba. Build from config or delete the layer and the docs claim.
+- [ ] **BACK-2** · `arch` · M · P1 · `models/backends/base.py` vs `main._forward_impl` — backends return `SeparateOut`/`TranscribeOut` dicts (with pre-built `events`), `_forward_impl` unpacks a 5-tuple: the protocols and the consumer disagree, so a real backend cannot be wired in even after BACK-1.
+- [ ] **SHIM-1** · `bug` · S · P1 · `models/_mamba_compat.py` — the pure-torch fallback swallows unknown kwargs (`**_ignored`), the exact mechanism that hid C-2.1 on CPU. Raise `TypeError` for what real mamba-ssm rejects.
+- [ ] **CFG-2** · `config` · S · P2 · `tests/conftest.py:mock_config` — the shared test config pairs `n_fft=512` with `hop_length=512`, which `torch.istft` rejects outright ("window overlap add min: 1"), so no real separator can run on it; `pipeline_config` (2048/512) is now the required fixture for those tests.
+- [ ] **CFG-3** · `docs` · S · P1 · all three configs advertise `training.gradient_checkpointing: true # Enable for 60s+ sequences`, but no product module reads `training` — the documented mitigation for the memory ceiling does not exist. Wire it to `torch.utils.checkpoint` or delete the key.
+- [ ] **CPU-1/CPU-2/CPU-3** · `perf` · L · **P0** · `main.py:process_audio_file` runs one monolithic forward (352 800 samples for an 8 s song) and ignores `audio.chunk_duration_sec`, so peak RSS grows with song length: measured +124 MB (2 s → 16 s) monolithic vs +32 MB streaming at a tiny shape; analytically the shipped 768×12 shape needs 271 MB of scan activations per audio-second (0.54 GB for 2 s, 8.1 GB for a 30 s clip). Route long input through `process_audio_streaming` (or chunk internally) — see `tests/test_memory_ceiling.py`.
+- [ ] **FAKE-1** · `test` · S · P2 · `models/backends/fake_backend.py` — constant `si_sdr=12.0` / `phase_coherence=0.5` for any input, and 12.0 < `min_si_sdr` so the fake path can never reach the STUDIO/DRAFT branches. Compute cheap metrics from the signal.
+- [ ] **PERF-1** · `test` · M · P1 · `tests/test_perf_smoke.py` — asserts RSS < 2500 MB after a single 1-second `mock_config` forward, reading *current* RSS via psutil but *peak* via the `resource` fallback; it cannot observe the shipped shape or the length-dependent cost. Rebuild it on `configs/model_config.yaml`'s shape at ≥ 8 s with a peak sampler (`tests/test_memory_ceiling.py::test_perf_smoke_uses_the_shipped_shape_and_measures_a_peak` locks it).
+
+## 18.2 What the audit added (all `[x]`)
+
+- [x] **T-18.2.1** · `test` · M · P0 · `tests/honesty.py` — `require()` dependency gates (a missing optional dep is a skip with an `optional-dep:` prefix, and a *failure* under `--strict-deps`), `known_bug()` strict-xfail markers whose reason string is the bug report, `ALLOWED_SKIP_REASONS`, `mamba_ssm_available()`.
+- [x] **T-18.2.2** · `test` · M · P0 · `tests/conftest.py` — `--strict-deps` / `--fail-on-skip` / `--require-mamba-ssm`; per-tier capability table printed every run; must-run enforcement (`real_mamba` may never skip — a skip flips the exit code, verified); `pipeline_config` (production 2048/512 grid) + `synth`/`make_wav`/`midi_reader` fixtures. `STEM_KNOWN_BUGS=fail` turns every xfail red for release gates.
+- [x] **T-18.2.3** · `test` · S · P0 · `tests/synth.py` — adversarial signal builders (silence, DC, impulse, clipped square, overflow, NaN/Inf, sub-window and 0-frame files, anti-phase stereo, exact-grid note lines, 12-voice chords) + a tick-accurate `parse_midi` reader that returns notes/ticks/`length_sec`/`dangling_notes`/`cc127_values`.
+- [x] **T-18.2.4** · `test` · M · P0 · `tests/doubles.py` — `inject()` for swapping `nn.Module` children (plain attribute assignment raises), `StubSeparator`/`StubTranscriber`/`StubReport` so model-level wiring is testable without the model, and `frame_count()` as the single source of truth for the T → frames law.
+- [x] **T-18.2.5** · `test` · L · P0 · `tests/test_midi_semantics.py` (28), `tests/test_midi_target_roundtrip.py` (19), `tests/test_pipeline_integrity.py` (17), `tests/test_audio_edge_cases.py` (41), `tests/test_backend_contracts.py` (17), `tests/test_api_zip.py` (16), `tests/test_memory_ceiling.py` (13), `tests/test_quality_gate_adversarial.py` (9) — MIDI usability, numerical edge cases, honesty of the skip layer, the paid ZIP boundary, the CPU/RAM ceiling, and adversarial quality-gate inputs.
+- [x] **T-18.2.6** · `test` · S · P0 · removed the two fake skip gates that were hiding real failures: `tests/test_dataset_loaders.py`'s `importorskip("torchaudio")` (nothing in `data/datasets.py` imports torchaudio) and `tests/test_checkpoint_load.py`'s `mamba_ssm` gate (`models/_mamba_compat.py` falls back; mamba-ssm is not a dependency).
+- [x] **T-18.2.7** · `infra` · S · P0 · `Makefile` — `test-cpu` now runs the honesty flags, plus `test-all` / `test-quick`; `pytest.ini` documents `real_mamba` / `requires_mamba_ssm` / `memory` / `property` and keeps `--strict-markers`.
+
+---
+
 *This TODO.md is the source of truth for the Stem+MIDI Pro production-readiness effort. It is intentionally large. The Apache License 2.0 applies to all code produced under it. Contributions are accepted under the same license via signed-off commits.*
 
-*Last updated: 2026-06-02*
+Section 18 added 2026-11-17 (test-suite audit).
+
+*Last updated: 2026-11-17*
