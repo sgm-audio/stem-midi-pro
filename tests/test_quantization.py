@@ -36,7 +36,7 @@ def test_quantized_process_same_output_shape(monkeypatch, temp_audio_file):
                     "R",
                     (),
                     {
-                        "si_sdr": 20.0,
+                        "centroid_separation_db": 20.0,
                         "phase_coherence": 0.9,
                         "avg_confidence": 0.9,
                         "artifact_flags": ["none"],

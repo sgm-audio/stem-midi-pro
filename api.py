@@ -621,7 +621,7 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
 
         report = outputs["report"]
         report_json = {
-            "si_sdr": float(report.si_sdr),
+            "centroid_separation_db": float(report.centroid_separation_db),
             "phase_coherence": float(report.phase_coherence),
             "avg_confidence": float(report.avg_confidence),
             "artifact_flags": report.artifact_flags,

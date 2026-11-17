@@ -705,3 +705,93 @@ def test_run_epoch_counts_optimizer_steps_and_bf16(mock_config):
         opts={**opts, "autocast_dtype": torch.bfloat16},
     )
     assert loss_bf16 == loss_bf16
+
+
+def test_onset_refractory_suppresses_bursts_and_jitter(mock_config):
+    """H-6: one physical onset whose activation plateaus above threshold (or
+    whose argmax pitch jitters mid-burst) must emit ONE note_on, not several.
+    A genuine re-hit beyond the refractory window still fires."""
+    from main import StemMidiModel
+
+    cfg = _mamba_config(mock_config)
+    cfg["transcriber"]["onset_threshold"] = 0.5
+    model = StemMidiModel(cfg)
+    model.eval()
+
+    T = 40
+    hi, lo = 4.0, -4.0  # sigmoid 0.982 / 0.018
+
+    # onset activation: plateau 10-19, re-trigger 21-22 (inside refractory),
+    # genuine re-hit 30-31 (outside refractory)
+    onset = torch.full((1, T, 1), lo)
+    onset[0, 10:20, 0] = hi
+    onset[0, 21:23, 0] = hi
+    onset[0, 30:32, 0] = hi
+
+    # pitch argmax 45 everywhere except a jitter to 52 at frame 15 (mid-burst)
+    pitch = torch.zeros(1, T, 128)
+    pitch[..., 45] = 10.0
+    pitch[0, 15, 52] = 12.0
+
+    velocity = torch.full((1, T, 1), 0.5)
+    confidence = torch.full((1, T), 0.9)
+
+    events = model._logits_to_midi(onset, pitch, velocity, confidence)
+
+    frames = [(e["note"], e["onset_frame"]) for e in events]
+    assert frames == [(45, 10), (45, 30)], (
+        f"burst plateau (10-19), in-refractory re-trigger (21-22) and mid-burst "
+        f"pitch jitter (15) must collapse to onsets at 10 and 30 only, got {frames}"
+    )
+    for e in events:
+        assert 0 < e["velocity"] <= 127 and 0.0 < e["confidence"] <= 1.0
+
+    # refractory 0 = escape hatch: pre-H-6 behavior (every above-threshold
+    # frame fires) is still reachable and only the honest threshold applies
+    cfg0 = _mamba_config(mock_config)
+    cfg0["transcriber"]["onset_refractory_frames"] = 0
+    model0 = StemMidiModel(cfg0)
+    model0.eval()
+    events0 = model0._logits_to_midi(onset, pitch, velocity, confidence)
+    assert len(events0) == 14  # 10 + 2 + 2 above-threshold frames
+
+
+def test_report_metric_renamed_from_si_sdr():
+    """C-2.6: ProcessingReport's separation field is honestly named
+    `centroid_separation_db` (it is a centroid heuristic, not SI-SDR), and
+    the legacy `min_si_sdr` config key still works as an alias."""
+    from utils.quality_gates import ProcessingReport
+
+    report = ProcessingReport(
+        centroid_separation_db=21.0,
+        phase_coherence=0.9,
+        avg_confidence=0.9,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+    )
+    assert report.min_centroid_separation_db == 20.0  # default
+    assert report.quality_tier.value == "studio"
+
+    # legacy alias: pre-rename configs keyed `min_si_sdr` still apply
+    legacy = ProcessingReport(
+        centroid_separation_db=22.0,
+        phase_coherence=0.9,
+        avg_confidence=0.9,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {"min_si_sdr": 25.0}},
+    )
+    assert legacy.min_centroid_separation_db == 25.0
+    assert legacy.quality_tier.value == "draft"  # 22 < 25 -> not studio
+
+    # the new key wins when both are present
+    both = ProcessingReport(
+        centroid_separation_db=22.0,
+        phase_coherence=0.9,
+        avg_confidence=0.9,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {"min_si_sdr": 30.0, "min_centroid_separation_db": 21.0}},
+    )
+    assert both.min_centroid_separation_db == 21.0
+    assert both.quality_tier.value == "studio"

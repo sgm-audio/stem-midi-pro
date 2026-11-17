@@ -71,7 +71,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ### 4. Separation Module (`models/mamba_separator.py`) [IMPLEMENTED]
 
-> Defects C-2.1 (invalid Mamba kwargs), C-2.5 (state cache removed/documented), C-2.8 (inverted phase-cancellation check) fixed 2026-10-07. C-2.6 remains: the `si_sdr` field is a spectral-centroid proxy, not true SI-SDR (needs ground truth).
+> Defects C-2.1 (invalid Mamba kwargs), C-2.5 (state cache removed/documented), C-2.8 (inverted phase-cancellation check) fixed 2026-10-07. C-2.6 resolved 2026-11-17: the field was renamed to `centroid_separation_db` so the heuristic is not presented as SI-SDR (true SI-SDR needs ground truth — ARCH-11.3.2).
 - **Architecture**: 12-layer Mamba-SSM
 - **Input**: Raw audio waveform (B, C, T)
 - **Processing**:

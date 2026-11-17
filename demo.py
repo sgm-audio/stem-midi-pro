@@ -70,7 +70,7 @@ def main():
     # Processing report
     report = outputs["processing_report"]
     print("\nProcessing Report:")
-    print(f"  SI-SDR: {report.si_sdr:.1f} dB")
+    print(f"  Centroid separation (proxy, not SI-SDR): {report.centroid_separation_db:.1f} dB")
     print(f"  Phase Coherence: {report.phase_coherence:.3f}")
     print(f"  Avg Confidence: {report.avg_confidence:.0%}")
     print(f"  Artifact Flags: {report.artifact_flags}")
