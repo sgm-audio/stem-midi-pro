@@ -26,6 +26,10 @@ class ProcessingReport:
     # "mamba (pure-torch)" vs "mamba (mamba-ssm)" vs a backend pair like
     # "separator=demucs,transcriber=basic_pitch".
     backend: str | None = None
+    # Whether TRAINED weights produced this report, or the HF repo's
+    # randomly-initialised defaults (H-2 / HONESTY-2). None = unknown (a
+    # report built by hand, e.g. in a unit test).
+    weights_loaded: bool | None = None
 
     def __post_init__(self):
         gates = (self.config or {}).get("quality_gates", {})

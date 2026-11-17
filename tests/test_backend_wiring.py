@@ -47,10 +47,14 @@ def test_stem_midi_model_uses_the_configured_backend(mock_config):
     from models.backends.fake_backend import FakeSeparatorBackend, FakeTranscriberBackend
 
     model = StemMidiModel(mock_config)
-    assert isinstance(model.separator, FakeSeparatorBackend), (
-        f"separator is {type(model.separator).__name__} despite " f"backends.separator='fake'"
-    )
-    assert isinstance(model.transcriber, FakeTranscriberBackend)
+    # Configured backends live on ``*_backend`` (H-9); the built-in Mamba
+    # modules live on ``separator`` / ``transcriber``.
+    separator = getattr(model, "separator_backend", getattr(model, "separator", None))
+    transcriber = getattr(model, "transcriber_backend", getattr(model, "transcriber", None))
+    assert isinstance(
+        separator, FakeSeparatorBackend
+    ), f"separator is {type(separator).__name__} despite backends.separator='fake'"
+    assert isinstance(transcriber, FakeTranscriberBackend)
 
 
 def test_cpu_config_still_declares_external_backends():

@@ -154,7 +154,8 @@ def test_silence_emits_no_note_events_even_with_a_confident_head(confident_model
     """
     with torch.inference_mode():
         out = confident_model(torch.zeros(1, 1, SR))
-    events = out["midi_metadata"]["midi_events"]
+    midi = out["midi_metadata"]
+    events = midi["guitar"]["midi_events"] + midi["bass"]["midi_events"]
     assert events == [], f"silence produced {len(events)} note events"
 
 
@@ -221,13 +222,19 @@ def test_report_serialises_to_strict_json(mock_model, tmp_path):
     report = result["report"]
     payload = json.dumps(
         {
-            "si_sdr": float(report.si_sdr),
+            # C-2.6: the field is centroid separation (a heuristic in dB), not
+            # ground-truth SI-SDR; the name follows the report.
+            "centroid_separation_db": float(report.centroid_separation_db),
             "phase_coherence": float(report.phase_coherence),
             "avg_confidence": float(report.avg_confidence),
+            "backend": report.backend,
+            "weights_loaded": report.weights_loaded,
         },
         allow_nan=False,
     )
-    assert json.loads(payload)["si_sdr"] == pytest.approx(report.si_sdr)
+    decoded = json.loads(payload)
+    assert decoded["centroid_separation_db"] == pytest.approx(report.centroid_separation_db)
+    assert decoded["weights_loaded"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +335,7 @@ def test_twenty_four_tone_cluster_is_finite_and_bounded(mock_model):
     for stem in ("guitar_stem", "bass_stem"):
         assert torch.isfinite(out[stem]).all(), f"NaN/Inf in {stem} for dense cluster"
     report = out["processing_report"]
-    assert np.isfinite(report.si_sdr) and np.isfinite(report.avg_confidence)
+    assert np.isfinite(report.centroid_separation_db) and np.isfinite(report.avg_confidence)
     assert elapsed < 30.0, f"1 s of dense audio took {elapsed:.1f}s at test dims"
 
 
@@ -357,7 +364,7 @@ def test_process_audio_file_honours_chunk_duration(mock_config, tmp_path):
     """
     from main import StemMidiModel
 
-    cfg = {**mock_config, "backends": {"separator": "mamba", "transcriber": "mamba"}}
+    cfg = mock_config  # no ``backends`` key -> the built-in Mamba modules run
     model = StemMidiModel(cfg).eval()
 
     seen: list[int] = []
@@ -371,8 +378,19 @@ def test_process_audio_file_honours_chunk_duration(mock_config, tmp_path):
             seen.append(int(audio.shape[-1]))
             return self.inner(audio)
 
-    model.separator = _Recording(model.separator)
-    path = _write(tmp_path / "six.wav", np.zeros(6 * SR, dtype=np.float32))
+        def separate(self, audio):  # SeparatorBackend protocol (H-9)
+            seen.append(int(audio.shape[-1]))
+            return self.inner.separate(audio)
+
+    # Whatever component does the separating: a configured backend (H-9) or the
+    # built-in Mamba module. Wrap it, don't replace it.
+    if getattr(model, "_use_backends", False):
+        model.separator_backend = _Recording(model.separator_backend)
+    else:
+        model.separator = _Recording(model.separator)
+    # A tone, not silence: silent input is short-circuited before the separator
+    # (and is covered by its own tests above).
+    path = _write(tmp_path / "six.wav", _tone(6.0, 220.0, amp=0.05))
     model.process_audio_file(path)
 
     chunk_len = int(cfg["audio"]["chunk_duration_sec"] * SR)

@@ -198,7 +198,7 @@ def test_real_and_fallback_paths_agree_on_shapes(mock_config):
 # ---------------------------------------------------------------------------
 
 
-def test_runtime_exposes_which_mamba_implementation_ran():
+def test_runtime_exposes_which_mamba_implementation_ran(mock_config):
     """``StemMidiModel`` must publish the Mamba implementation that is live.
 
     The string is surfaced by ``/model-info`` and the processing report so an
@@ -206,5 +206,6 @@ def test_runtime_exposes_which_mamba_implementation_ran():
     """
     from main import StemMidiModel
 
-    assert StemMidiModel.mamba_backend == _mamba_backend()
+    model = StemMidiModel(mock_config)
+    assert model.mamba_backend == _mamba_backend()
     assert {_mamba_backend()} <= MAMBA_BACKEND_CHOICES

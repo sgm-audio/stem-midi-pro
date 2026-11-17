@@ -55,7 +55,7 @@ def test_gate_inputs_come_from_real_inference(mock_model):
     assert isinstance(report.quality_tier, QualityTier)
     assert 0.0 <= report.avg_confidence <= 1.0
     assert 0.0 <= report.phase_coherence <= 1.0
-    assert np.isfinite(report.si_sdr)
+    assert np.isfinite(report.centroid_separation_db)
     assert routing["action"] in {"direct_download", "editor_launch", "fallback_options"}
     expected = {
         QualityTier.STUDIO: "direct_download",
@@ -80,7 +80,7 @@ def test_random_weights_never_reach_studio(mock_model):
 def test_nan_metrics_cannot_be_routed_as_studio():
     """Comparisons with NaN are False, so a poisoned report must degrade safely."""
     report = ProcessingReport(
-        si_sdr=float("nan"),
+        centroid_separation_db=float("nan"),
         phase_coherence=float("nan"),
         avg_confidence=float("nan"),
         artifact_flags=["none"],
@@ -93,7 +93,7 @@ def test_nan_metrics_cannot_be_routed_as_studio():
 def test_gate_thresholds_are_config_driven():
     """The same numbers must tier differently under different configs."""
     kwargs = dict(
-        si_sdr=25.0,
+        centroid_separation_db=25.0,
         phase_coherence=0.95,
         avg_confidence=0.80,
         artifact_flags=["none"],
@@ -112,7 +112,7 @@ def test_gate_thresholds_are_config_driven():
 
 def test_any_artifact_flag_blocks_studio():
     report = ProcessingReport(
-        si_sdr=30.0,
+        centroid_separation_db=30.0,
         phase_coherence=0.99,
         avg_confidence=0.99,
         artifact_flags=["clipping"],

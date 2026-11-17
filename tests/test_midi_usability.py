@@ -78,14 +78,48 @@ class _RegisterTranscriber(torch.nn.Module):
         )
 
 
+class _RegisterSeparatorBackend(_RegisterSeparator):
+    """``_RegisterSeparator`` behind the ``SeparatorBackend`` protocol (H-9)."""
+
+    def separate(self, audio):
+        guitar, bass, residual, _cache, metrics = self.forward(audio)
+        return {"guitar": guitar, "bass": bass, "residual": residual, "metrics": metrics}
+
+
+class _RegisterTranscriberBackend(_RegisterTranscriber):
+    """``_RegisterTranscriber`` behind the ``TranscriberBackend`` protocol."""
+
+    def transcribe(self, stem):
+        onset, pitch, velocity, expression, confidence = self.forward(stem)
+        return {
+            "onset_logits": onset,
+            "pitch_logits": pitch,
+            "velocity": velocity,
+            "expression": expression,
+            "confidence": confidence,
+        }
+
+
 def _make_model(mock_config, eager: bool = True):
     """StemMidiModel with stub components whose output is fully determined."""
     from main import StemMidiModel
 
     model = StemMidiModel(mock_config).eval()
-    model.separator = _RegisterSeparator()
-    model.transcriber = _RegisterTranscriber(eager=eager)
+    # Configured backends (cfg["backends"], H-9) live on ``*_backend`` behind a
+    # ``separate()`` / ``transcribe()`` protocol; the built-in Mamba modules live
+    # on ``separator`` / ``transcriber``. Stub whichever pair this model calls.
+    if getattr(model, "_use_backends", False):
+        model.separator_backend = _RegisterSeparatorBackend()
+        model.transcriber_backend = _RegisterTranscriberBackend(eager=eager)
+    else:
+        model.separator = _RegisterSeparator()
+        model.transcriber = _RegisterTranscriber(eager=eager)
     return model
+
+
+def _stem(midi: dict, name: str) -> dict:
+    """Per-stem MIDI payload (H-8: ``{"guitar": {...}, "bass": {...}}``)."""
+    return midi[name]
 
 
 @pytest.fixture
@@ -156,29 +190,39 @@ def test_note_density_is_musical(model_with_guitar_notes, tmp_path):
     window; nothing in ``_logits_to_midi`` provides one.
     """
     result = model_with_guitar_notes.process_audio_file(_audio(tmp_path, 1.0))
-    events = result["midi"]["midi_events"]
-    assert len(events) / 1.0 <= 24, f"{len(events)} note events in 1 s of monophonic audio"
+    midi = result["midi"]
+    events = midi["guitar"]["midi_events"] + midi["bass"]["midi_events"]
+    # The stub head asserts an onset on EVERY one of the ~86 frames; the
+    # pipeline's peak-picking (onset_refractory_frames) must collapse that
+    # plateau to one attack per stem.
+    assert len(events) <= 24, f"{len(events)} note events in 1 s of monophonic audio"
 
 
 def test_no_duplicate_notes_on_the_same_frame(model_with_guitar_notes, tmp_path):
     """A frame may contribute at most one note per pitch (already holds)."""
     result = model_with_guitar_notes.process_audio_file(_audio(tmp_path, 1.0))
-    keys = [(e["onset_frame"], e["note"]) for e in result["midi"]["midi_events"]]
+    keys = [
+        (stem, e["onset_frame"], e["note"])
+        for stem in ("guitar", "bass")
+        for e in result["midi"][stem]["midi_events"]
+    ]
     assert len(keys) == len(set(keys))
 
 
 def test_every_event_is_a_playable_note(model_with_guitar_notes, tmp_path):
     """Velocity 1..127, pitch 0..127, confidence 0..1, ordered onsets."""
     result = model_with_guitar_notes.process_audio_file(_audio(tmp_path, 1.0))
-    events = result["midi"]["midi_events"]
+    midi = result["midi"]
+    events = midi["guitar"]["midi_events"] + midi["bass"]["midi_events"]
     assert events, "no events produced for a steady 220 Hz tone"
     for ev in events:
         assert 0 <= ev["note"] <= 127
         assert 1 <= ev["velocity"] <= 127, f"velocity {ev['velocity']} would sound as a note-off"
         assert 0.0 <= ev["confidence"] <= 1.0
         assert "needs_review" in ev
-    frames = [e["onset_frame"] for e in events]
-    assert frames == sorted(frames)
+    for stem in ("guitar", "bass"):
+        frames = [e["onset_frame"] for e in midi[stem]["midi_events"]]
+        assert frames == sorted(frames)
 
 
 def test_summary_counts_agree_with_events(model_with_guitar_notes, tmp_path):
@@ -189,7 +233,9 @@ def test_summary_counts_agree_with_events(model_with_guitar_notes, tmp_path):
     say "0 notes need review" next to a MIDI where every note is flagged.
     """
     result = model_with_guitar_notes.process_audio_file(_audio(tmp_path, 1.0))
-    events, summary = result["midi"]["midi_events"], result["midi"]["summary"]
+    midi = result["midi"]
+    events = midi["guitar"]["midi_events"] + midi["bass"]["midi_events"]
+    summary = midi["summary"]
     flagged = sum(1 for e in events if e.get("needs_review"))
     assert summary["low_confidence_count"] == flagged, (
         f"summary says {summary['low_confidence_count']} low-confidence notes, "
@@ -200,7 +246,9 @@ def test_summary_counts_agree_with_events(model_with_guitar_notes, tmp_path):
 def test_summary_exposes_total_note_count(model_with_guitar_notes, tmp_path):
     """The report a client renders needs the note count; it is absent."""
     result = model_with_guitar_notes.process_audio_file(_audio(tmp_path, 1.0))
-    assert result["midi"]["summary"]["total_notes"] == len(result["midi"]["midi_events"])
+    midi = result["midi"]
+    events = midi["guitar"]["midi_events"] + midi["bass"]["midi_events"]
+    assert midi["summary"]["total_notes"] == len(events)
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +266,8 @@ def test_streaming_notes_are_not_all_pitch_zero(mock_config, tmp_path):
     """
     model = _make_model(mock_config)
     result = model.process_audio_streaming(_audio(tmp_path, 2.0), chunk_seconds=1.0)
-    notes = {e["note"] for e in result["midi"]["midi_events"]}
+    midi = result["midi"]
+    notes = {e["note"] for stem in ("guitar", "bass") for e in midi[stem]["midi_events"]}
     assert notes, "streaming produced no notes"
     assert notes != {0}, "every streamed note has pitch 0 (C-1)"
 
@@ -239,6 +288,7 @@ def test_streaming_report_uses_real_chunk_metrics(mock_config, tmp_path):
     """
     model = _make_model(mock_config)
     result = model.process_audio_streaming(_audio(tmp_path, 1.0), chunk_seconds=1.0)
-    # _RegisterSeparator reports si_sdr=21.0 / phase=0.9 for every chunk.
-    assert result["report"].si_sdr == pytest.approx(21.0)
+    # _RegisterSeparator reports 21.0 dB centroid separation / 0.9 phase for
+    # every chunk; the streamed report must be their mean, not zeros.
+    assert result["report"].centroid_separation_db == pytest.approx(21.0)
     assert result["report"].phase_coherence == pytest.approx(0.9)

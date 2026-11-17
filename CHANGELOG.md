@@ -6,6 +6,53 @@ All notable changes to Stem+MIDI Pro. Currently maintained manually; release aut
 
 Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 
+### Correctness pass: test-suite audit follow-through (2026-11-17)
+Audit of `tests/` against what the product actually ships; full write-up and
+before/after measurements in [`docs/test-suite-audit.md`](docs/test-suite-audit.md).
+The MIDI-writer, resampler, streaming and backend-wiring findings were fixed
+independently on `main` (PRs #11/#14); everything below landed in this branch.
+
+**Input validation** (`main.py`, `audio_io.py`)
+- `_validate_audio` rejects non-finite samples and clips shorter than one STFT
+  window with `AudioValidationError`, from `forward()` as well as the file path.
+  A NaN upload used to reach `processing_report.json` as a bare `NaN` token (or a
+  500 from inside the separator); the API now answers 400.
+- Silent input short-circuits to zero stems / zero notes with a `silence` flag.
+  On the production config it previously produced `NaN` logits in the untrained
+  Mamba stack, i.e. a `RuntimeError` and HTTP 500 for a muted channel.
+
+**Artifact flags** (`main.py`)
+- `_detect_artifacts` now takes the original input as well as the stems.
+  Input-peak `clipping` (a clipped DI is scaled down by the separator masks, so
+  the stem-level test never fired) and `dc_offset` are reported.
+
+**CPU memory** (`main.py`)
+- Chunked separation is factored into `_separate_chunked` (complementary
+  crossfades, `chunk_duration_sec`, `overlap_ratio`) and used by
+  `process_audio_file` as well as `process_audio_streaming`; `_finalize` builds
+  MIDI + report + routing once for both. A 60 s upload's peak RSS growth drops
+  from ~2 346 MB to ~190 MB, at the cost of 20–40% wall time for the
+  re-processed overlap.
+
+**Review gates** (`models/confidence_injector.py`)
+- `needs_review` is `confidence < min_confidence`. It was
+  `confidence * sigmoid(energy*10)`, so every quiet passage was flagged
+  regardless of model confidence, and gain alone flipped the same events.
+  Energy stays in `alignment_score` as a diagnostic.
+- `low_confidence_count` counts notes, not STFT frames (2 notes over a 64-frame
+  grid used to report 64); `summary.total_notes` added.
+
+**Provenance** (`main.py`, `api.py`, `utils/quality_gates.py`)
+- `ProcessingReport.weights_loaded`, set by `load_from_checkpoint`, and
+  `StemMidiModel.mamba_backend`; both exposed by `/model-info` alongside the
+  existing `backend`. Without them an untrained 62 M-param model is
+  indistinguishable from a trained one.
+
+**Tests** — six new modules (65 tests) in `tests/test_midi_{timing,usability}.py`,
+`test_audio_adversarial.py`, `test_quality_gate_truthfulness.py`,
+`test_mamba_backend_honesty.py`, `test_backend_wiring.py`; suite 96 → 193
+passing, 2 skipped (`mamba_ssm`), coverage 76.9%.
+
 ### Strategic decisions (TODO Section 0)
 - Consolidated on the v1 production path: `main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py`. Mamba-3 research code moved to `research/`.
 - Locked the platform: **CPU-only, bare-metal i5, Python 3.13**.

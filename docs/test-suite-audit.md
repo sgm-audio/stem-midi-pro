@@ -11,11 +11,17 @@ late**, chords serialised into arpeggios), a `bass.mid` that was a copy of
 `guitar.mid`, silence transcribed as ~87 notes/second, and a pipeline needing
 **~14 GB** for the ten-minute upload its own API advertises.
 
-**Status: 20 defects found, 19 fixed.** Each was pinned by a test that failed on
-the old code; those tests now pass as ordinary regressions (no `xfail` markers
-remain). The one open item is expression output (BUG-MIDI-9, §7), which needs a
-decision about the MIDI mapping rather than a bug fix. Everything below is the
-original audit, with resolution status recorded in §3.1 and §6.
+**Status: 20 defects found, 19 resolved, 1 open.** Resolution is split by *where*
+it landed, because `main` moved under this branch: an independent review pass
+(merged as PRs #11/#14) fixed the MIDI writer, tempo tracking, sample-rate
+conversion, the streaming path and the backend wiring — rows marked
+**upstream** in §3.1. The rest — input validation, silence/clipping/DC handling,
+chunked file processing, review-gate semantics and weights provenance — landed
+in this branch (**here**). Every defect is guarded by a test that failed on the
+old code; no `xfail` markers remain. The open item is expression output
+(BUG-MIDI-9, §7), which needs a product decision about the MIDI mapping rather
+than a bug fix. Everything below is the original audit, with resolution status
+recorded in §3.1 and §6.
 
 ---
 
@@ -29,14 +35,15 @@ and version-independent), 2 vCPU, 3.9 GB RAM, `mamba_ssm` absent
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 PYTHONPATH=. .venv/bin/python -m pytest -q -m "not cuda"
-# before this branch: 90 passed, 8 skipped  (without torchaudio)
-#                     96 passed, 2 skipped  (with it; matches the claim)
-# audit added tests:  119 passed, 8 skipped, 33 xfailed  (defects pinned, unfixed)
-# defects fixed:      153 passed, 8 skipped, 0 xfailed    (current)
+# at audit time (6ab1a1e): 96 passed, 2 skipped  (with torchaudio)
+# defects pinned:          119 passed, 8 skipped, 33 xfailed
+# current (main + this branch): 193 passed, 2 skipped, 0 xfailed; coverage 76.9%
 ```
 
-The 33 `xfail` markers did their job: they turned red one by one as each defect
-was fixed, forcing the marker to be deleted rather than left behind.
+The 33 `xfail` pins did their job: each turned green exactly when its defect was
+fixed, forcing the marker to be deleted rather than left behind. Eight of them
+went green because `main` fixed the defect independently (same root cause, same
+fix), which is why those rows are attributed upstream rather than here.
 
 **First finding is about the headline number itself.** `96 passed, 2 skipped` is
 only reproducible with `torchaudio` installed. Without it the suite reports
@@ -210,32 +217,36 @@ open and **goes red the moment it is fixed** (forcing the marker's removal).
 
 ### 3.1 Resolution status
 
-Every fix below landed in this branch. "Verified by" names the test that failed
-before the change and passes after it.
+"Fixed in" distinguishes the independent review pass that landed on `main`
+(PRs #11/#14: `H-*`/`M-*`/`C-*` items) from the work in this branch. Where both
+sides fixed the same defect, the upstream implementation is the one kept — it is
+strictly better (e.g. the confidence controller is CC#16, not CC#127, because
+120–127 are Channel Mode messages; same-pitch overlaps are resolved rather than
+only sorted). "Verified by" names the test that failed before the change.
 
-| ID | Status | Fix | Verified by |
+| ID | Fixed in | Fix | Verified by |
 |---|---|---|---|
-| BUG-MIDI-1 | **Fixed** | `utils/midi.py`: `ticks_per_second = ticks_per_beat * (60e6/tempo_us) / 60` (960, not 57 600) | `test_onset_tick_matches_audio_time`, `test_midi_length_matches_audio_length` |
-| BUG-MIDI-2 | **Fixed** | Same file: schedule note_on/note_off independently in absolute ticks, sort by `(tick, kind, seq)`, then emit deltas once | `test_chord_notes_share_one_tick`, `test_chord_after_short_note_keeps_its_position` |
-| BUG-MIDI-3 | **Fixed** | Falls out of MIDI-1: writer and reader now agree | `test_own_writer_reads_back_at_the_same_frames` |
-| BUG-MIDI-4 | **Fixed** | `utils/midi_targets.py`: running `set_tempo` per track, advance before applying | `test_midi_to_targets_honours_file_tempo` |
-| BUG-MIDI-6 | **Fixed** | `main.py`: transcribe *both* stems; `midi_metadata["guitar"]`/`["bass"]` are distinct dicts | `test_bass_midi_contains_no_guitar_range_notes`, `test_guitar_and_bass_midi_are_different_files` |
-| BUG-MIDI-7 | **Fixed** | `main.py:_logits_to_midi` + `transcriber.min_onset_interval_ms` (default 50 ms) | `test_note_density_is_musical` (86 → 22 notes/s) |
-| BUG-MIDI-8 | **Fixed** | `process_audio_streaming` now delegates to the chunked path and keeps real pitch/velocity/metrics | `test_streaming_notes_are_not_all_pitch_zero`, `test_streaming_report_uses_real_chunk_metrics` |
-| BUG-MIDI-9 | **Open** | Expression heads still not written to MIDI (a mapping decision, not a bug) | — |
-| BUG-GATE-1/3 | **Fixed** | `needs_review = confidence < min_confidence`; alignment kept for diagnostics only | `test_review_flag_is_independent_of_output_gain`, `test_summary_counts_agree_with_events` |
-| BUG-GATE-4 | **Fixed** | `low_confidence_count` counts events, not frames | `test_low_confidence_count_counts_notes_not_frames` |
-| BUG-GATE-2 | **Fixed** | `summary["total_notes"]` added | `test_summary_exposes_total_note_count` |
-| BUG-AUDIO-1/2 | **Fixed** | `_detect_artifacts(..., source=audio)` flags `silence`; `_build_outputs` suppresses all events when silent | `test_silence_emits_no_note_events_even_with_a_confident_head`, `test_silence_is_flagged_not_silent_pass` |
-| BUG-AUDIO-3 | **Fixed** | Input-level clipping ratio (`>= 0.999` over >0.1% of samples) in addition to output overshoot | `test_hard_clipped_input_is_flagged` |
-| BUG-AUDIO-4 | **Fixed** | `_validate_audio` raises `ValueError` on non-finite input; `dc_offset` flagged above 0.02 | `test_nan_input_does_not_silently_produce_nan_report`, `test_dc_offset_is_flagged_or_removed` |
-| BUG-AUDIO-5 | **Fixed** | `_validate_audio` rejects `< n_fft` samples with `ValueError`; `api.py` maps `ValueError` → HTTP 400 | `test_sub_window_audio_raises_a_validation_error`, `test_single_stft_window_is_accepted` |
-| BUG-AUDIO-6 | **Fixed** | `utils/audio.resample_audio` (band-limited via librosa, linear only as a fallback); `process_audio_file` uses it | `test_upsampling_does_not_inject_spectral_images` (image **−4.4 dB → −148.7 dB**) |
-| BUG-PERF-1 | **Fixed** | `main._infer` → `_forward_chunked`, honouring `chunk_duration_sec` with overlap | `test_process_audio_file_honours_chunk_duration`, `test_one_minute_upload_fits_in_2gb` (60 s: **2346 → ~190 MB growth**) |
-| BUG-WIRING-1 | **Fixed** | `StemMidiModel.__init__` builds via `models.backends.factory` when `backends:` names a non-mamba backend | `test_stem_midi_model_uses_the_configured_backend` |
-| BUG-WIRING-2 | **Fixed** | `ProcessingReport.backend` = `"<sep>+<tr>"` | `test_report_identifies_the_backend_that_produced_it` |
-| BUG-HONESTY-1 | **Fixed** | `ProcessingReport.weights_loaded` (set by `load_from_checkpoint`), exposed in `/model-info` | `test_report_records_weights_provenance` |
-| BUG-HONESTY-2 | **Fixed** | `StemMidiModel.mamba_backend` + `/model-info.mamba_backend` | `test_runtime_exposes_which_mamba_implementation_ran` |
+| BUG-MIDI-1 | upstream | `utils/midi.py`: `ticks_per_second = ticks_per_beat * 1e6 / tempo_us` → 960, not 57 600 | `test_onset_tick_matches_audio_time`, `test_midi_length_matches_audio_length` |
+| BUG-MIDI-2 | upstream | Two-pass writer: absolute onsets sorted by `(tick, kind)`, `note_off` before `note_on`, same-pitch overlaps truncated (H-6) | `test_chord_notes_share_one_tick`, `test_chord_after_short_note_keeps_its_position` |
+| BUG-MIDI-3 | upstream | Falls out of MIDI-1 | `test_own_writer_reads_back_at_the_same_frames` |
+| BUG-MIDI-4 | upstream | `utils/midi_targets.py`: running `set_tempo` per track, advance before applying | `test_midi_to_targets_honours_file_tempo` |
+| BUG-MIDI-6 | upstream (H-8) | `main.py`: both stems transcribed; `midi_metadata["guitar"]`/`["bass"]` are distinct dicts | `test_bass_midi_contains_no_guitar_range_notes`, `test_guitar_and_bass_midi_are_different_files` |
+| BUG-MIDI-7 | upstream (H-6) | Rising-edge peak-picking with `transcriber.onset_refractory_frames` (default 4 ≈ 46 ms) | `test_note_density_is_musical` |
+| BUG-MIDI-8 | upstream (C-2) | Streaming recombines the stems, then transcribes once on the full timeline | `test_streaming_notes_are_not_all_pitch_zero` |
+| BUG-MIDI-9 | **open** | Expression heads still not written to MIDI (a mapping decision, not a bug) | — |
+| BUG-GATE-1/3 | **here** | `needs_review = confidence < min_confidence`; alignment kept for diagnostics only | `test_review_flag_is_independent_of_output_gain`, `test_summary_counts_agree_with_events` |
+| BUG-GATE-4 | **here** | `low_confidence_count` counts notes, not frames | `test_low_confidence_count_counts_notes_not_frames` |
+| BUG-GATE-2 | **here** | `summary["total_notes"]` added to both stem payloads and the overall summary | `test_summary_exposes_total_note_count` |
+| BUG-AUDIO-1/2 | **here** | `silence` flag from the *input*; silent input short-circuits to zero stems/zero notes before the separator | `test_silence_emits_no_note_events_even_with_a_confident_head`, `test_silence_is_flagged_not_silent_pass` |
+| BUG-AUDIO-3 | **here** | Input-peak `clipping` flag (stems are scaled down by the masks, which is why the stem test missed it) + `dc_offset` | `test_hard_clipped_input_is_flagged`, `test_dc_offset_is_flagged_or_removed` |
+| BUG-AUDIO-4 | **here** | `_validate_audio` raises `AudioValidationError` on non-finite input, at `forward()` as well as the file path | `test_nan_input_does_not_silently_produce_nan_report`, `test_report_serialises_to_strict_json` |
+| BUG-AUDIO-5 | **here** | `_validate_audio` rejects `< n_fft` samples; `AudioValidationError` is a `ValueError`, which `api.py` maps to 400 | `test_sub_window_audio_raises_a_validation_error`, `test_single_stft_window_is_accepted` |
+| BUG-AUDIO-6 | upstream (H-7) | `_resample_to_target` goes through `librosa.resample` (polyphase) | `test_upsampling_does_not_inject_spectral_images` (image **−4.4 dB → −148.7 dB**) |
+| BUG-PERF-1 | **here** | `_separate_chunked` (overlap-add, `chunk_duration_sec`) now backs *both* `process_audio_file` and `process_audio_streaming` | `test_process_audio_file_honours_chunk_duration`, `test_one_minute_upload_fits_in_2gb` |
+| BUG-WIRING-1 | upstream (H-9) | `StemMidiModel` builds via `models.backends.factory` (`separator_backend`/`transcriber_backend`) | `test_stem_midi_model_uses_the_configured_backend` |
+| BUG-WIRING-2 | upstream (M-7) | `ProcessingReport.backend` = `"separator=…,transcriber=…"` or `"mamba (pure-torch)"` | `test_report_identifies_the_backend_that_produced_it` |
+| BUG-HONESTY-1 | **here** | `ProcessingReport.weights_loaded` (set by `load_from_checkpoint`), exposed in `/model-info` | `test_report_records_weights_provenance` |
+| BUG-HONESTY-2 | **here** | `StemMidiModel.mamba_backend` property + `/model-info.mamba_backend` | `test_runtime_exposes_which_mamba_implementation_ran` |
 
 Measured after the fixes, production config, 2 vCPU:
 
@@ -243,8 +254,10 @@ Measured after the fixes, production config, 2 vCPU:
 |---|---|---|
 | note at `onset_frame=100` | tick 66 873 | tick **1 115** |
 | 4-note chord | ticks `33436/33556/33676/33796` | all at **557** |
-| notes per second (monophonic) | 86 | **22** |
+| notes per second (monophonic) | 86 | **≤ 21.5** (one rising edge per 4 frames) |
+| a continuous attack | 86 notes | **1 note** |
 | silence | 86 events, no flag | **0 events, `['silence']`** |
+| silence on production weights | `NaN` logits → `RuntimeError` (HTTP 500) | **200: 0 notes, `['silence']`** |
 | 8 k→44.1 k image at 4.5 kHz | −4.4 dB | **−148.7 dB** |
 | peak RSS, 60 s upload | 2 346 MB | **~966 MB (plateau)** |
 | wall clock | 0.30× realtime | 0.35–0.46× realtime |
@@ -271,16 +284,16 @@ correctness:
 
 ## 4. New tests added in this audit
 
-Six modules, 64 tests: **29 assert behaviour that was already correct, 33 were
-strict-xfail pins on the defects in §3 — all 33 now pass as ordinary regressions,
-since the defects are fixed**, and 2 skip until `mamba_ssm` is present (they are
-the CUDA-path guards). Runtime added: ~6 s (`-m "not slow"`), ~32 s with the
-memory test.
+Six modules, 65 tests: **32 assert behaviour that was already correct, 33 were
+strict-xfail pins on the defects in §3 — all 33 now pass as ordinary
+regressions**, and 2 in this set skip until `mamba_ssm` is present (they are the
+CUDA-path guards). Runtime added: ~7 s (`-m "not slow"`), ~34 s with the memory
+test.
 
 ```
 tests/test_midi_timing.py              15  pure mido, ~0.3 s   (no torch)
 tests/test_midi_usability.py           10  model → SMF artefacts
-tests/test_audio_adversarial.py        15  silence/clip/NaN/short/resample/long
+tests/test_audio_adversarial.py        16  silence/clip/NaN/short/resample/long
 tests/test_quality_gate_truthfulness.py 12  gate inputs + review flags + provenance
 tests/test_mamba_backend_honesty.py     8  fallback contract + real-path guard
 tests/test_backend_wiring.py            4  config → model wiring
@@ -412,7 +425,7 @@ real assertions rather than by silence.
 
 ---
 
-## 6. Fix order used (all but item 9 landed in this branch)
+## 6. Fix order used (items 1–8 done; item 9 partial)
 
 Status: items 1–8 **done**; item 9 is partially done (BUG-MIDI-7/8 fixed,
 BUG-AUDIO-5/6 fixed, BUG-MIDI-9 open).
@@ -430,8 +443,10 @@ BUG-AUDIO-5/6 fixed, BUG-MIDI-9 open).
 | 9 | **BUG-AUDIO-5/6, BUG-MIDI-7/8/9** | 400-vs-500, resampler, onset refractory, streaming pitch, expression output | medium |
 
 That is exactly what happened: as each fix landed its strict-xfail test flipped
-to XPASS (a CI failure), and the marker was deleted. The suite now guards the
-deliverable with ordinary assertions rather than pins.
+to XPASS (a CI failure), and the marker was deleted. Items 1–3 and 7 were
+subsequently fixed upstream too (PRs #11/#14), in a better form than the pins
+assumed; the branch keeps upstream's implementation and its tests. The suite now
+guards the deliverable with ordinary assertions rather than pins.
 
 ---
 
