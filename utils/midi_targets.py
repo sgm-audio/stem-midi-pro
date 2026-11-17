@@ -22,7 +22,7 @@ import torch
 DEFAULT_TEMPO_US = 500000  # 120 BPM
 
 
-def _build_tempo_map(mid) -> list[tuple[int, int]]:
+def build_tempo_map(mid) -> list[tuple[int, int]]:
     """Collect (abs_tick, tempo_us) tempo changes from all tracks, sorted."""
     changes: list[tuple[int, int]] = []
     for track in mid.tracks:
@@ -37,7 +37,7 @@ def _build_tempo_map(mid) -> list[tuple[int, int]]:
     return changes
 
 
-def _tick_to_seconds(tick: int, changes: Sequence[tuple[int, int]], ticks_per_beat: int) -> float:
+def tick_to_seconds(tick: int, changes: Sequence[tuple[int, int]], ticks_per_beat: int) -> float:
     """Integrate the tempo map up to ``tick`` (tempo applies from its tick on)."""
     seconds = 0.0
     prev_tick, prev_tempo = changes[0]
@@ -69,7 +69,10 @@ def midi_to_targets(
 
     Returns:
         onset: (1, n_frames, 1) — 1.0 where a note_on starts.
-        pitch: (1, n_frames, pitch_vocab) — one-hot per onset frame.
+        pitch: (1, n_frames, pitch_vocab) — **multi-hot**: every note starting on
+            a frame is marked (simultaneous notes no longer overwrite each
+            other; H-5). The model's pitch head is still single-label, so a
+            polyphonic head must be added before this target can be exploited.
         velocity: (1, n_frames, 1) — normalized [0, 1] velocity at onset frames.
     """
     import mido
@@ -86,19 +89,28 @@ def midi_to_targets(
     for path in midi_paths:
         mid = mido.MidiFile(path)
         ticks_per_beat = mid.ticks_per_beat or 480
-        changes = _build_tempo_map(mid)
+        changes = build_tempo_map(mid)
 
         for track in mid.tracks:
             abs_tick = 0
             for msg in track:
                 abs_tick += msg.time
                 if msg.type == "note_on" and msg.velocity > 0:
-                    abs_time_s = _tick_to_seconds(abs_tick, changes, ticks_per_beat)
+                    abs_time_s = tick_to_seconds(abs_tick, changes, ticks_per_beat)
                     frame = round(abs_time_s * sample_rate / hop_length)
                     if 0 <= frame < n_frames:
                         onset[0, frame, 0] = 1.0
                         if 0 <= msg.note < pitch_vocab:
                             pitch[0, frame, msg.note] = 1.0
-                        velocity[0, frame, 0] = msg.velocity / 127.0
+                        # Keep the loudest note on a shared frame.
+                        velocity[0, frame, 0] = max(
+                            float(velocity[0, frame, 0]), msg.velocity / 127.0
+                        )
 
     return onset, pitch, velocity
+
+
+# Back-compat aliases: earlier code (and some call sites) used the private
+# names with the same signatures.
+_build_tempo_map = build_tempo_map
+_tick_to_seconds = tick_to_seconds
