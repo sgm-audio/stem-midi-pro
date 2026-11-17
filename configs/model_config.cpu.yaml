@@ -27,6 +27,9 @@ separator:
   d_state: 12
   d_conv: 4
   expand: 2
+  # softmax (default) => the three masks sum to 1, so guitar+bass+residual
+  # reconstruct the mix (C-1). "independent" restores per-stem sigmoids.
+  mask_normalization: softmax
 
 transcriber:
   d_model: 256
@@ -37,6 +40,8 @@ transcriber:
   velocity_bins: 128
   expression_heads: ["bend", "vibrato", "slide"]
   onset_threshold: 0.5
+  min_note_seconds: 0.05
+  max_note_seconds: 4.0
 
 training:
   precision: "fp32"
@@ -56,3 +61,9 @@ quality_gates:
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
   min_centroid_separation_db: 20.0  # renamed from min_si_sdr (C-2.6)
+
+
+# Inference
+inference:
+  segment_seconds: 60.0   # bound peak memory: segments are processed independently
+  allow_untrained_model: false  # refuse to serve random-weight models (H-6)

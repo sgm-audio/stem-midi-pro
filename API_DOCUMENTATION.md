@@ -77,7 +77,7 @@ Upload an audio file; receive a ZIP with stems, MIDI, and a processing report.
 |---|---|
 | `guitar_stem.wav` | Separated guitar stem |
 | `bass_stem.wav` | Separated bass stem |
-| `guitar.mid` | Guitar MIDI transcription (CC#127 = per-note confidence) |
+| `guitar.mid` | Guitar MIDI transcription (CC#16 = per-note confidence; a `confidence note=… value=…` marker track carries the exact per-note values) |
 | `bass.mid` | Bass MIDI transcription |
 | `processing_report.json` | Metrics (see schema below) |
 
@@ -147,7 +147,7 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 ## Quality Tiers
 
 1. **Studio** — `avg_confidence ≥ 0.85` **and** `centroid_separation_db ≥ 20 dB`: direct download.
-2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW (CC#127 tags them).
+2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW (CC#16 tags them; the marker track lists the exact per-note values).
 3. **Complex** — `avg_confidence < 0.70` or artifact flags present: raw output plus review options.
 
 ## CORS

@@ -76,7 +76,7 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 - Output standard MIDI files compatible with all major DAWs.
 
 ### F3: Confidence-Aware Quality Routing
-- Per-note confidence scores embedded as MIDI CC#127 metadata.
+- Per-note confidence scores embedded as MIDI CC#16 metadata (+ a marker track of exact values).
 - Three-tier routing: Studio (direct download), Draft (editor prompt), Complex (human review).
 - Per-note "needs review" flagging for low-confidence events.
 
@@ -217,7 +217,7 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 ### C4: Confidence Injection (`ConfidenceInjector`)
 - Cross-modal validation: align MIDI onsets with stem energy peaks.
 - Per-note: confidence score, stem energy, alignment score, `needs_review` flag.
-- DAW metadata: CC#127 confidence, quantization suggestion (`grid` / `human`).
+- DAW metadata: CC#16 confidence, quantization suggestion (`grid` / `human`, confidence-based only).
 
 ### C5: Loss Functions (`PerceptualAudioLoss`)
 | Loss | Weight | Purpose |

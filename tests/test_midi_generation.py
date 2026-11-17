@@ -81,6 +81,7 @@ def test_confidence_cc127_legacy_param():
 
     ccs = [m for m in mid.tracks[0] if m.type == "control_change" and m.control == 127]
     assert len(ccs) == 3
+    # An explicit per-event value wins over the confidence-derived one.
     assert [m.value for m in ccs] == [e["cc_127_value"] for e in events]
 
 

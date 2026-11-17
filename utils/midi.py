@@ -23,12 +23,17 @@ Off on spec-compliant gear), so the default confidence controller is CC#16
 (General Purpose 1). Set ``MIDI_CONFIDENCE_CC=127`` to restore the legacy
 behavior explicitly.
 
-The writer is two-pass: events are sorted by onset tick, same-pitch overlaps
+The writer is multi-pass: events are sorted by onset tick, same-pitch overlaps
 are resolved deterministically (a later same-pitch note truncates the earlier
 one at ``onset - 1``; identical-onset duplicates are collapsed), and all
 messages are emitted as sorted absolute ticks converted to deltas. This
 guarantees a valid SMF: non-negative deltas, exactly one note_off per note_on,
 and no overlapping same-pitch notes (H-6).
+
+Because a channel controller is shared by every note on that channel, the exact
+per-note confidence is also written to a companion meta track as
+``Marker`` records (``confidence note=<n> onset_tick=<t> value=<0..1>``). Set
+``include_confidence_track=False`` to suppress it.
 """
 
 import io
@@ -86,6 +91,9 @@ def build_midi_from_events(
     hop_length: int = HOP_LENGTH,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     confidence_cc: int | None = None,
+    tempo_us: int = DEFAULT_TEMPO_US,
+    include_expression: bool = False,
+    include_confidence_track: bool = True,
 ) -> bytes:
     """
     Convert MIDI event metadata to SMF bytes.
@@ -96,13 +104,15 @@ def build_midi_from_events(
     """
     if default_duration_beats is None:
         default_duration_beats = DEFAULT_NOTE_DURATION_BEATS
+    if tempo_us <= 0:
+        raise ValueError(f"tempo_us must be positive, got {tempo_us}")
     cc_controller = resolve_confidence_cc(confidence_cc)
 
     mid = MidiFile(ticks_per_beat=ticks_per_beat)
     track = MidiTrack()
     mid.tracks.append(track)
 
-    track.append(MetaMessage("set_tempo", tempo=DEFAULT_TEMPO_US))
+    track.append(MetaMessage("set_tempo", tempo=int(tempo_us)))
     track.append(MetaMessage("time_signature", numerator=4, denominator=4))
     track.append(MetaMessage("track_name", name=f"{stem_type} transcription"))
     instrument = "Electric Guitar" if stem_type == "guitar" else "Electric Bass"
@@ -114,7 +124,7 @@ def build_midi_from_events(
     # formula (x 60 / seconds_per_beat) computed 57600 ticks/sec - every file
     # the repo ever wrote played 60x too fast, and no test checked absolute
     # time until the 2026-11 review regression suite.
-    ticks_per_second = ticks_per_beat * 1_000_000.0 / DEFAULT_TEMPO_US
+    ticks_per_second = ticks_per_beat * 1_000_000.0 / float(tempo_us)
 
     events = midi_data.get("midi_events", []) or []
 
@@ -174,6 +184,25 @@ def build_midi_from_events(
         messages.append((onset, 1, Message("note_on", note=note, velocity=velocity)))
         messages.append((off, 0, Message("note_off", note=note, velocity=0)))
         messages.append((onset, 2, Message("control_change", control=cc_controller, value=cc_val)))
+
+    # Optional expression (pitch-bend / modulation). Off by default: the
+    # expression head is untrained (ARCH-11.4.4) and its channels are unnamed,
+    # so callers must opt in and supply {"bend": -1..1, "vibrato": 0..1}.
+    if include_expression:
+        for ev in events:
+            expr = (ev or {}).get("expression") or {}
+            if not expr:
+                continue
+            onset_frame = int((ev or {}).get("onset_frame", 0))
+            tick = max(0, round(onset_frame * hop_length / sample_rate * ticks_per_second))
+            if expr.get("bend"):
+                bend = max(-1.0, min(1.0, float(expr["bend"])))
+                messages.append((tick, 2, Message("pitchwheel", pitch=round(bend * 8191))))
+            if expr.get("vibrato"):
+                vib = max(0.0, min(1.0, float(expr["vibrato"])))
+                messages.append(
+                    (tick, 2, Message("control_change", control=1, value=round(vib * 127)))
+                )
     messages.sort(key=lambda m: (m[0], m[1]))
 
     current_tick = 0
@@ -184,6 +213,24 @@ def build_midi_from_events(
         current_tick = abs_tick
 
     track.append(MetaMessage("end_of_track"))
+
+    # Companion track with the exact per-note confidence values (a channel
+    # controller cannot distinguish simultaneous notes).
+    if include_confidence_track and notes:
+        markers = MidiTrack()
+        mid.tracks.append(markers)
+        markers.append(MetaMessage("track_name", name=f"{stem_type} confidence"))
+        last = 0
+        for onset, _off, note, _velocity, cc_val in sorted(notes, key=lambda n: (n[0], n[2])):
+            markers.append(
+                MetaMessage(
+                    "marker",
+                    text=f"confidence note={note} onset_tick={onset} value={cc_val / 127:.3f}",
+                    time=max(0, onset - last),
+                )
+            )
+            last = onset
+        markers.append(MetaMessage("end_of_track"))
 
     buf = io.BytesIO()
     mid.save(file=buf)

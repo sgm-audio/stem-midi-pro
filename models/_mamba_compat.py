@@ -30,7 +30,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint
+from torch.utils.checkpoint import checkpoint
 
 # `import torch` alone does NOT bind torch.utils.checkpoint: the submodule only
 # appears on the parent package once something imports it. MambaBackbone.forward
@@ -132,9 +132,7 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """(B, L, D) -> (B, L, D)"""
             if self.gradient_checkpointing and self.training and x.requires_grad:
-                return torch.utils.checkpoint.checkpoint(
-                    self._block_forward, x, use_reentrant=False
-                )
+                return checkpoint(self._block_forward, x, use_reentrant=False)
             return self._block_forward(x)
 
         def _block_forward(self, x: torch.Tensor) -> torch.Tensor:

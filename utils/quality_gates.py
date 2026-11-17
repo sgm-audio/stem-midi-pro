@@ -94,6 +94,15 @@ class ProcessingReport:
             )
 
     @property
+    def separation_proxy_db(self) -> float:
+        """The same number as ``centroid_separation_db``, under a functional name.
+
+        Kept for callers written against the pre-C-2.6 name; it reads the
+        renamed field, so it cannot drift from the dataclass again.
+        """
+        return self.centroid_separation_db
+
+    @property
     def quality_tier(self) -> QualityTier:
         # Invalid metrics or any artifact flag force COMPLEX regardless of
         # confidence (ARCH-11.7): stellar numbers cannot make a clipped,

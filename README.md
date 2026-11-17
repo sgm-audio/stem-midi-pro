@@ -2,7 +2,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4-8 GB RAM is the reference target. Python **3.13** (target). The test suite runs on Python 3.13: `pytest -q -m "not cuda"` → 126 passed, 2 skipped (mamba_ssm-only checkpoint tests), 0 failed; `ruff check` and `black --check` clean (2026-11-17, post static-review fix pass; verified on Python 3.11 CPU).
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4-8 GB RAM is the reference target. Python **3.13** (target). The test suite: `pytest -q` → **148 passed, 2 skipped, 0 failed** (2026-11-17; the skips are optional `mamba_ssm` checkpoint tests).
 
 > **Status:** Active development toward production readiness. See [TODO.md](TODO.md) for the tracked work items and current state. Some features documented in [ARCHITECTURE.md](ARCHITECTURE.md) are still `[PLANNED]`; [SUMMARY.md](SUMMARY.md) marks exactly what works today.
 
@@ -24,7 +24,7 @@ Third-party attributions are in [NOTICE](NOTICE).
 
 - **Stem separation** — splits a mixed recording into guitar and bass WAV stems using a Mamba-SSM separator (`models/mamba_separator.py`).
 - **MIDI transcription** — converts each stem to MIDI with onset, pitch, velocity, and per-note confidence (`models/mamba_transcriber.py`). Single-pitch-per-onset (no chords yet); the expression head (bend/vibrato/slide) exists but is untrained and is NOT encoded into MIDI.
-- **Confidence metadata** — each MIDI note carries its confidence as a MIDI CC so your DAW can flag uncertain notes (`models/confidence_injector.py`). Default **CC#16**; CC#120-127 are Channel Mode messages per the MIDI spec, so legacy CC#127 is opt-in via `MIDI_CONFIDENCE_CC=127`.
+- **Confidence metadata** — each MIDI note carries its confidence as a MIDI CC so your DAW can flag uncertain notes (`models/confidence_injector.py`). Default **CC#16**; CC#120-127 are Channel Mode messages per the MIDI spec, so legacy CC#127 is opt-in via `MIDI_CONFIDENCE_CC=127`. Because a channel controller is shared by every note on the channel, the exact per-note values are also written to a companion `marker` track (`utils/midi.py`).
 - **Quality gates** — routes each result into a `studio` / `draft` / `complex` tier with a transparent processing report (`utils/quality_gates.py`).
 
 Everything runs locally. No GPU, no cloud, no CUDA required.
@@ -61,19 +61,32 @@ See [SETUP.md](SETUP.md) for detailed installation, and [USER_GUIDE.md](USER_GUI
 
 ## CPU Performance Expectations
 
-This project targets **bare-metal CPU**, not GPUs. Measured on the built-in pure-PyTorch Mamba fallback (2 vCPU cloud box, fp32, production `configs/model_config.yaml`):
+This project targets **bare-metal CPU**, not GPUs. Measured on 2 threads with the pure-PyTorch Mamba
+fallback and the production `configs/model_config.yaml` (`process_audio_file`: separation +
+transcription, MIDI written; 2026-11-17, on top of `main`):
 
-| Input length | Wall time | Peak RSS |
-|---|---|---|
-| 1 min | ~13 s | ~1.8 GB |
-| 5 min | ~61-79 s | ~2.8-3.3 GB |
-| 10 min | not measured on this box | ~3.5-4 GB (extrapolated) |
+| Input length | Path | Wall time | Peak RSS |
+|---|---|---|---|
+| 5 min | chunked (`chunk_duration_sec: 2`, default) | 104.0 s | 1.60 GB |
+| 5 min | one pass (`chunk_duration_sec: 300`) | 69.0 s | 2.16 GB |
+| 10 min | chunked (`chunk_duration_sec: 2`) | 173.6 s | 2.22 GB |
+| 10 min | one pass | not measured (peak grows with length) | — |
+| 1 min | not re-measured on this box | — | — |
 
-- The reference i5 is untested hardware; expect the same order of magnitude (tens of seconds per minute of audio). The old "30-60 s per 1 min" claim was an estimate, not a benchmark.
-- **Memory is the binding constraint, not time**: 10-minute files peak near 4 GB — use an 8 GB machine for them. `audio.max_input_seconds` (default 600) refuses longer inputs loudly instead of OOM-ing.
+- That is **~0.25-0.3x realtime** for separation + transcription combined. Imports plus the idle model
+  account for ~0.65 GB of each peak, so most of it is the runtime, not the audio.
+- **Long inputs are separated in overlapping chunks (`audio.chunk_duration_sec`, default 2 s) and
+  transcribed in frame segments (`inference.segment_seconds`, default 60 s), so peak memory tracks the
+  chunk size rather than the file length.** A single pass is faster (no per-chunk re-priming) but its
+  peak grows with the input: 2.16 GB at 5 minutes.
 - One concurrent request on the reference hardware. Scale up CPU/RAM for more.
+- **No tempo detection**: MIDI is written on a fixed grid at the tempo you pass (`tempo_us`, default
+  120 BPM), so quantisation is only as good as that choice.
+- **Monophonic transcription**: the pitch head is a 128-way argmax, so chords are not representable
+  (see `AUDIT_REPORT.md` H-5). The MIDI writer *does* preserve simultaneity, so a polyphonic head can be
+  dropped in later without touching it.
 
-`mamba-ssm` (the upstream CUDA package) is NOT used on this path — CPU inference runs the locally implemented pure-PyTorch Mamba fallback in `models/_mamba_compat.py` (same block math, chunked scan, no fused kernels — functional but slower than upstream's CUDA kernels). `MAMBA_BACKEND` records which implementation is live and is surfaced in logs, `/model-info`, and the processing report.
+`mamba-ssm` (the upstream CUDA package) is NOT used on this path — CPU inference runs the locally implemented pure-PyTorch Mamba fallback in `models/_mamba_compat.py` (same block math, chunked scan, no fused kernels — functional but slower than upstream's CUDA kernels). `MAMBA_BACKEND` records which implementation is live and is surfaced in logs, `/model-info`, and the processing report; `Mamba.SCAN_CHUNK` (default 256 frames) bounds the scan's working set, and `STEM_MIDI_REQUIRE_MAMBA_SSM=1` makes a missing package a hard error instead of a fallback.
 
 ## Project Structure
 
@@ -125,3 +138,16 @@ Built with PyTorch, [Mamba-SSM](https://github.com/state-spaces/mamba), librosa,
 ---
 
 *Stem+MIDI Pro: stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*
+
+## Before you deploy
+
+A trained checkpoint is required. Without `MODEL_CHECKPOINT_PATH` the API refuses to start serving
+(`/ready` → 503) rather than returning random-weight stems and MIDI:
+
+```bash
+export MODEL_CHECKPOINT_PATH=checkpoints/stem_midi_v1.pt
+export MODEL_CONFIG_PATH=configs/model_config.yaml
+```
+
+`ALLOW_UNTRAINED_MODEL=1` (or `inference.allow_untrained_model: true`) overrides this for smoke tests
+only; `/ready` and `/model-info` will then report `"trained_weights": false`.
