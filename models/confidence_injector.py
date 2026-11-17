@@ -37,6 +37,24 @@ class ConfidenceInjector:
         confidence = confidence.detach().reshape(-1).float().cpu()
         stem_energy = stem_energy.detach().reshape(-1).float().cpu()
 
+        # Both arrays must be on the SAME frame grid: indexing a per-sample
+        # energy array with a frame index looked at audio ~86x earlier than the
+        # note (H-3), so a mismatch is a bug in the caller, not something to
+        # paper over with zero padding.
+        if confidence.numel() != stem_energy.numel():
+            raise ValueError(
+                "confidence and stem_energy must share the frame grid: "
+                f"got {confidence.numel()} vs {stem_energy.numel()} frames "
+                "(pool sample-rate energy by hop_length before calling)"
+            )
+        # Non-finite model output would otherwise reach the MIDI/JSON verbatim.
+        for _values, _name in ((confidence, "confidence"), (stem_energy, "stem_energy")):
+            if _values.numel() and not torch.isfinite(_values).all():
+                raise ValueError(
+                    f"{_name} contains non-finite values; the model produced NaN/Inf "
+                    "output. Refusing to write corrupt metadata."
+                )
+
         onset_indices = (
             torch.tensor([int(e["onset_frame"]) for e in midi_events], dtype=torch.long)
             if midi_events

@@ -265,8 +265,8 @@ class StemMidiModel(nn.Module):
         guitar_stem, bass_stem, sep_metrics = self._separate(audio)
 
         # Transcription per stem (H-8: bass gets its own transcription)
-        guitar_tr = self._transcribe(guitar_stem, "guitar")
-        bass_tr = self._transcribe(bass_stem, "bass")
+        guitar_tr = self._transcribe_segmented(guitar_stem, "guitar")
+        bass_tr = self._transcribe_segmented(bass_stem, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
 
@@ -367,12 +367,9 @@ class StemMidiModel(nn.Module):
         bass part previously slipped past a guitar-only guard.
         """
         confidence = tr["confidence"]
+        conf_flat, energy = self._match_frame_grid(confidence, stem)
         if self._stem_is_silent(stem):
-            empty = self.confidence_injector.inject_midi_metadata(
-                [],
-                confidence.reshape(-1),
-                self._frame_energy(stem).reshape(-1),
-            )
+            empty = self.confidence_injector.inject_midi_metadata([], conf_flat, energy)
             return empty, confidence
         events = None
         if tr.get("events"):
@@ -385,12 +382,29 @@ class StemMidiModel(nn.Module):
                 confidence,
                 tr.get("expression"),
             )
-        enhanced = self.confidence_injector.inject_midi_metadata(
-            events or [],
-            confidence.reshape(-1),
-            self._frame_energy(stem).reshape(-1),
-        )
+        enhanced = self.confidence_injector.inject_midi_metadata(events or [], conf_flat, energy)
         return enhanced, confidence
+
+    def _match_frame_grid(
+        self, confidence: torch.Tensor, stem: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (confidence, stem energy) flattened onto one frame grid.
+
+        The STFT produces ``1 + T//hop`` frames (centre padding) while the
+        ``ceil_mode`` energy pooling produces ``ceil(T/hop)``; when ``T`` is a
+        multiple of ``hop`` they differ by one frame and the injector would
+        (rightly) refuse the mismatch. Pooled energy is padded/truncated to the
+        confidence grid here so both the silent-stem short circuit and the
+        normal path agree.
+        """
+        conf_flat = confidence.reshape(-1)
+        energy = self._frame_energy(stem).reshape(-1)
+        n_frames = conf_flat.numel()
+        if energy.numel() > n_frames:
+            energy = energy[:n_frames]
+        elif energy.numel() < n_frames:
+            energy = F.pad(energy, (0, n_frames - energy.numel()))
+        return conf_flat, energy
 
     # ------------------------------------------------------------------
     # Target preparation (C-3)
@@ -516,64 +530,93 @@ class StemMidiModel(nn.Module):
         Onset peak-picking (H-6): sigmoid probability is thresholded and an
         event fires at each RISING EDGE (first frame of an above-threshold
         run). A new onset can only fire after
-        ``transcriber.onset_refractory_frames`` (default 4 ≈ 46 ms at 86 fps)
+        ``transcriber.onset_refractory_frames`` (default 4 - 46 ms at 86 fps)
         consecutive below-threshold frames, so one physical onset whose
-        activation plateaus for many frames — or wiggles across the
-        threshold — emits ONE note_on, not several. Same-pitch duplicates
+        activation plateaus for many frames - or wiggles across the
+        threshold - emits ONE note_on, not several. Same-pitch duplicates
         are also dropped downstream, but without peak-picking a jittered
         argmax pitch mid-burst (e.g. 45,45,52,45) leaks a spurious extra
-        note. Velocity/confidence are sampled at the crossing frame.
+        note. Velocity/confidence are sampled at the crossing frame;
+        ``onset_refractory_frames: 0`` disables the suppression entirely
+        (every above-threshold frame fires - the pre-H-6 behavior).
 
-        Single argmax pitch per onset frame — chords/polyphony are not
-        modeled by this head layout (see MambaTranscriber docstring).
-        Assumes B=1 for inference; batch >1 still returns all batches' events
-        with onset frames as-is. ``onset_refractory_frames: 0`` disables the
-        suppression entirely (every above-threshold frame fires — the
-        pre-H-6 behavior).
+        Each event also carries ``duration_frames`` estimated from the spacing
+        to the next onset (clamped to ``transcriber.min/max_note_seconds``), so
+        the MIDI writer emits note lengths that follow the performance instead
+        of a fixed 1/16 note; the final note uses the median length. When
+        ``expression`` is given (B, T, E), its mean over the note is attached
+        per event (the channels are unnamed and the head is untrained -
+        ARCH-11.4.4).
+
+        Single argmax pitch per onset frame - chords/polyphony are not modeled
+        by this head layout (see MambaTranscriber docstring). Assumes B=1 for
+        inference; batch >1 still returns all batches' events with onset frames
+        as-is.
         """
+        tcfg = self.cfg.get("transcriber", {})
+        # Defaults keep hand-built configs (unit tests, backends) working: the
+        # decoder only needs the frame rate to convert seconds to frames.
+        acfg = self.cfg.get("audio", {})
+        sr = int(acfg.get("sample_rate", 44100))
+        hop = int(acfg.get("hop_length", 512))
+        frames_per_second = sr / hop
+        min_frames = max(1, round(tcfg.get("min_note_seconds", 0.05) * frames_per_second))
+        max_frames = max(min_frames, round(tcfg.get("max_note_seconds", 4.0) * frames_per_second))
+
         onset_prob = torch.sigmoid(onset_logits).squeeze(-1)  # (B, T)
-        refractory = int(self.cfg["transcriber"].get("onset_refractory_frames", 4))
+        refractory = int(tcfg.get("onset_refractory_frames", 4))
         candidates = torch.nonzero(
-            onset_prob > self.cfg["transcriber"].get("onset_threshold", 0.5)
+            onset_prob > tcfg.get("onset_threshold", 0.5)
         )  # (N, 2): [batch_idx, frame], sorted by batch then frame
         pitches = torch.argmax(pitch_logits, dim=-1)
-        vel_values = (velocity * 127).long().squeeze(-1)
+        vel_values = (velocity.squeeze(-1).clamp(0, 1) * 127).round().clamp(1, 127).long()
 
-        events = []
+        # Rising-edge selection: keep a candidate only when at least
+        # `refractory` below-threshold frames separate it from the previous one.
+        frames_by_batch: dict[int, list[int]] = {}
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():
-            if b not in last_above:
-                accepted = True  # first above-threshold frame of the batch
-            else:
-                # below-threshold frames between this candidate and the
-                # previous one; a rising edge needs >= refractory of them
-                below_gap = t - last_above[b] - 1
-                accepted = below_gap >= refractory
+            previous = last_above.get(b)
             last_above[b] = t
-            if not accepted:
+            if previous is not None and (t - previous - 1) < refractory:
                 continue
-            event = {
-                "note": pitches[b, t].item(),
-                "onset_frame": t,
-                "velocity": vel_values[b, t].item(),
-                "confidence": confidence[b, t].item(),
-            }
-            if expression is not None:
-                values = expression[b, t].detach().cpu().flatten().tolist()
-                names = self.cfg["transcriber"].get(
-                    "expression_heads", ["bend", "vibrato", "slide"]
-                )
-                # The head is sigmoid, so every channel is already 0..1 with 0.5
-                # neutral (the writer's convention). The value is tagged with
-                # where it came from: an untrained head's output must never pass
-                # for learned phrasing.
-                event["expression"] = {
-                    name: max(0.0, min(1.0, float(values[i])))
-                    for i, name in enumerate(names)
-                    if i < len(values)
+            frames_by_batch.setdefault(b, []).append(t)
+
+        events = []
+        for b, frames in frames_by_batch.items():
+            # Duration follows the performance: the gap to the next onset,
+            # clamped to min/max_note_seconds; the last note takes the median.
+            gaps = [
+                min(max_frames, max(min_frames, frames[i + 1] - frames[i]))
+                for i in range(len(frames) - 1)
+            ]
+            default_dur = int(sorted(gaps)[len(gaps) // 2]) if gaps else min_frames
+            for i, t in enumerate(frames):
+                dur = gaps[i] if i < len(gaps) else default_dur
+                event = {
+                    "note": pitches[b, t].item(),
+                    "onset_frame": t,
+                    "duration_frames": int(dur),
+                    "velocity": vel_values[b, t].item(),
+                    "confidence": confidence[b, t].item(),
                 }
-                event["expression"]["source"] = _EXPRESSION_SOURCE
-            events.append(event)
+                if expression is not None:
+                    values = expression[b, t].detach().cpu().flatten().tolist()
+                    names = self.cfg["transcriber"].get(
+                        "expression_heads", ["bend", "vibrato", "slide"]
+                    )
+                    # The head is sigmoid, so every channel is already 0..1 with
+                    # 0.5 neutral (the writer's convention). The value is tagged
+                    # with where it came from: an untrained head's output must
+                    # never pass for learned phrasing.
+                    event["expression"] = {
+                        name: max(0.0, min(1.0, float(values[i])))
+                        for i, name in enumerate(names)
+                        if i < len(values)
+                    }
+                    event["expression"]["source"] = _EXPRESSION_SOURCE
+                events.append(event)
+        events.sort(key=lambda e: (e["onset_frame"], e["note"]))
         return events
 
     @staticmethod
@@ -647,6 +690,41 @@ class StemMidiModel(nn.Module):
 
         flags.extend(f for f in input_flags if f not in flags)
         return flags if flags else ["none"]
+
+    def _segment_seconds(self, default: float = 60.0) -> float:
+        return float((self.cfg.get("inference") or {}).get("segment_seconds", default))
+
+    def _transcribe_segmented(self, stem: torch.Tensor, instrument: str | None = None) -> dict:
+        """Run the transcriber in frame segments for long stems.
+
+        Peak memory for the decode stage becomes a function of
+        ``inference.segment_seconds`` rather than of the stem length. Segments
+        are independent (no SSM state carry, C-2.5); the concatenation is
+        trimmed to the frame count the STFT grid produces.
+        """
+        acfg = self.cfg.get("audio", {})
+        sr = int(acfg.get("sample_rate", 44100))
+        hop = int(acfg.get("hop_length", 512))
+        seg_len = max(1, int(self._segment_seconds() * sr))
+        total = stem.shape[-1]
+        # Backends, unconfigured segment sizes and short stems take one pass.
+        if self._use_backends or not self.cfg.get("inference") or total <= seg_len:
+            return self._transcribe(stem, instrument)
+
+        parts = [
+            self._transcribe(stem[:, :, pos : pos + seg_len], instrument)
+            for pos in range(0, total, seg_len)
+        ]
+        merged: dict = {}
+        for key in ("onset_logits", "pitch_logits", "velocity", "confidence", "expression"):
+            tensors = [p.get(key) for p in parts]
+            if any(t is None for t in tensors):
+                merged[key] = None
+            else:
+                merged[key] = torch.cat(tensors, dim=1)[:, : 1 + total // hop]
+        # Expression is not part of the dict returned by _transcribe; keep None.
+        merged["events"] = None
+        return merged
 
     @staticmethod
     def _input_flags(source: torch.Tensor) -> list[str]:
