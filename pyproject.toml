@@ -42,6 +42,14 @@ dependencies = [
 cpu = [
     "torch>=2.5.0,<3.0.0",
 ]
+# Pretrained third-party backends (H-9): demucs separator + basic-pitch
+# transcriber. These pull heavy deps (torch-based demucs; basic-pitch needs
+# TF or onnxruntime) — check the 4–8 GB target budget before installing.
+# Install with: pip install "stem-midi-pro[pretrained]"
+pretrained = [
+    "demucs>=4.0.0",
+    "basic-pitch>=0.3.0",
+]
 # Research extras (auraloss, torchaudio, opentelemetry-*) — not required for
 # production CPU inference. Install with: pip install "stem-midi-pro[research]"
 research = [
@@ -56,8 +64,11 @@ research = [
 stem-midi-api = "api:main"
 stem-midi-cli = "main:cli"
 
+[tool.setuptools]
+py-modules = ["api", "main", "train", "demo", "audio_io"]
+
 [tool.setuptools.packages.find]
-include = ["models*", "utils*", "data*", "audio*"]
+include = ["models*", "utils*", "data*"]
 
 [tool.ruff]
 line-length = 100

@@ -7,7 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Build tools needed to compile any sdists (e.g. mamba-ssm source build)
+# Build tools needed to compile any sdists shipped without wheels.
+# (mamba-ssm is intentionally NOT installed here: it needs nvcc/CUDA to build;
+# models/_mamba_compat.py provides the pure-PyTorch CPU path.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
@@ -22,7 +24,7 @@ COPY utils/ utils/
 COPY data/ data/
 COPY requirements.txt ./
 RUN pip install --prefix=/install -r requirements.txt \
-    && pip install --prefix=/install --no-deps -e .
+    && pip install --prefix=/install --no-deps .
 
 # ---------- Stage 2: runtime ----------
 FROM python:3.13-slim AS runtime

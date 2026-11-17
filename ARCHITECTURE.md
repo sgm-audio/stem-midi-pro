@@ -114,7 +114,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
   - Align MIDI onsets with stem energy
   - Compute per-note confidence scores
   - Flag low-confidence notes for review
-  - Generate DAW-friendly metadata (CC#127 values)
+  - Generate DAW-friendly metadata (confidence CC values; default CC#16 — CC#120-127 are Channel Mode messages in the MIDI spec)
   - Suggest quantization strategy (grid vs human feel)
 
 ### 7. Loss Functions (`models/losses.py`) [IMPLEMENTED]
