@@ -28,6 +28,7 @@ import math
 import os
 
 import torch
+import torch.utils.checkpoint  # noqa: F401 - registers torch.utils.checkpoint
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -182,7 +183,9 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
                 # the models plus the bounded log-mel input; see review §3.
                 dt = F.softplus(self.dt_proj(dt_raw))
 
-                y, h = self._selective_scan(xc, dt, A, Bmat, Cmat, h)
+                y, h = self._selective_scan(
+                    xc, dt, Bmat, Cmat, A=A, h=h, return_state=True
+                )
                 y = y + self.D.unsqueeze(0).unsqueeze(0) * xc  # skip connection
                 y = y * F.silu(z)  # gate
                 out[:, start:stop] = self.out_proj(y)
@@ -193,11 +196,12 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             self,
             xc: torch.Tensor,
             dt: torch.Tensor,
-            A: torch.Tensor,
             Bmat: torch.Tensor,
             Cmat: torch.Tensor,
+            A: torch.Tensor | None = None,
             h: torch.Tensor | None = None,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return_state: bool = False,
+        ):
             """Selective scan over one window; returns (y, carried state).
 
             h(t) = exp(dt_t * A) * h(t-1) + dt_t * xc_t * B_t
@@ -206,7 +210,14 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             The state is threaded in and out so callers can window the
             sequence without breaking the recurrence. Peak transient memory is
             O(window), never O(L).
+
+            Signature compatibility: `A` defaults to ``-exp(A_log)`` and the
+            carried state is optional, so the 4-argument positional form used
+            elsewhere (and by the test-suite) keeps working; pass
+            ``return_state=True`` to also get ``h`` back.
             """
+            if A is None:
+                A = -torch.exp(self.A_log)  # (d_inner, N), negative => contraction
             B, L, _ = xc.shape
             if h is None:
                 h = torch.zeros(
@@ -236,4 +247,5 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
                 outs.append(y_c)
 
             y = torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
-            return y.to(xc.dtype), h
+            y = y.to(xc.dtype)
+            return (y, h) if return_state else y
