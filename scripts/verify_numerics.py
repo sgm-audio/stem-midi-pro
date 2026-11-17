@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Reproduce the numeric claims in FIXES.md (C-1, C-4, dt init).
 
 Run: ``python3 scripts/verify_numerics.py [configs/model_config.yaml]``
