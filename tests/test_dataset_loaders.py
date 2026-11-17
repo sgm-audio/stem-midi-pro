@@ -14,7 +14,6 @@ def _import_datasets():
     pytest.importorskip("torch")
     pytest.importorskip("soundfile")
     pytest.importorskip("librosa")
-    pytest.importorskip("torchaudio")
     try:
         from data import datasets
     except (ImportError, RuntimeError) as exc:

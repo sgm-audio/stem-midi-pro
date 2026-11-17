@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+import logging
+import math
+
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class ConfidenceInjector:
     """
     Injects per-note confidence metadata into MIDI output.
     Aligns MIDI events with stem energy for cross-modal validation.
+
+    ``stem_energy`` must be indexed on the SAME grid as ``onset_frame`` — i.e.
+    per STFT frame, not per audio sample (M-4). Callers pool sample-level RMS
+    onto the frame grid before calling.
     """
 
     def __init__(self, onset_threshold: float = 0.5, min_confidence: float = 0.6):
@@ -50,6 +59,18 @@ class ConfidenceInjector:
             energy = energies[i].item()
             alignment_score = alignment_scores[i].item()
 
+            if not math.isfinite(conf_score):
+                raise ValueError(
+                    f"MIDI event {i}: non-finite confidence {conf_score}; the model "
+                    "produced NaN/Inf output. Refusing to write corrupt metadata."
+                )
+
+            # Confidence goes to a general-purpose CC by default — CC#120-127
+            # are Channel Mode messages per the MIDI spec (H-5). The writer
+            # (utils/midi.py) chooses the actual controller number;
+            # "cc_127_value" is kept as a legacy alias.
+            cc_value = int(conf_score * 127)
+
             enhanced_events.append(
                 {
                     **event,
@@ -58,7 +79,8 @@ class ConfidenceInjector:
                     "alignment_score": alignment_score,
                     "needs_review": alignment_score < self.min_confidence,
                     # DAW-friendly metadata
-                    "cc_127_value": int(conf_score * 127),  # Confidence as MIDI CC#127
+                    "confidence_cc_value": cc_value,
+                    "cc_127_value": cc_value,  # legacy alias (pre-H-5 name)
                     "quantization_suggestion": "grid" if alignment_score > 0.85 else "human",
                 }
             )
