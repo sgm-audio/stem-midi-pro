@@ -9,6 +9,11 @@ from models._mamba_compat import MAMBA_BACKEND, Mamba
 logger = logging.getLogger(__name__)
 
 
+# Inverse-STFT window size in frames. Bounds `torch.istft` scratch memory
+# independently of input length (review §1: it allocates 4-5x its output).
+_ISTFT_CHUNK_FRAMES = 512
+
+
 class MambaSeparator(nn.Module):
     """
     Phase-coherent guitar/bass separation using Mamba SSM.
@@ -118,13 +123,18 @@ class MambaSeparator(nn.Module):
             window=self.window,
             return_complex=True,
         )
-        mag = torch.abs(spec)  # (B, F, T_f) - cached, reused by the metric below
+        # Store the complex spectrogram in the (B, T_f, F) layout the mask heads
+        # produce. Its inverse is non-contiguous, and multiplying a
+        # non-contiguous complex tensor by a mask makes PyTorch materialise a
+        # strided copy: +810 MB per stem at 600 s (review §1).
+        spec = spec.transpose(1, 2).contiguous()  # (B, T_f, F)
+        mag = torch.abs(spec)  # (B, T_f, F) - cached, reused by the metric below
         expected_bins = self.n_fft // 2 + 1
-        if mag.shape[1] != expected_bins:
+        if mag.shape[2] != expected_bins:
             raise ValueError(f"STFT freq bins {mag.shape[1]} != n_fft//2+1 ({expected_bins})")
 
         # Project to Mamba dim: (B, T_f, F) → (B, T_f, D)
-        x = mag.transpose(1, 2)  # (B, T_f, F)
+        x = mag  # already (B, T_f, F)
         hidden = self.input_proj(x)  # (B, T_f, D)
         del mag  # input_proj output kept; raw magnitude no longer needed
         if hidden.shape[-1] != self.mamba_blocks[0].d_model:
@@ -144,25 +154,14 @@ class MambaSeparator(nn.Module):
         # on the 4-8 GB CPU target.
         stems = {}
         centroids = {}
-        for name, head in self.mask_heads.items():
-            mask = head(hidden)  # (B, T_f, F)
-            mask_mag = torch.sigmoid(mask).transpose(1, 2)  # (B, F, T_f)
-            del mask
-            masked_spec = mask_mag * spec  # (B, F, T_f) complex
-            del mask_mag
+        for name in self.mask_heads:
+            mask_tf = self.mask_heads[name](hidden).sigmoid_()  # (B, T_f, F)
+            # Only guitar and bass feed the centroid metric; the residual's
+            # magnitude used to be computed and never read.
             if name in ("guitar", "bass"):
-                # reduced immediately to a (B, T_f) centroid vector - full
-                # magnitude spectrograms are NOT retained (C-1 follow-up)
-                centroids[name] = self._spectral_centroid(torch.abs(masked_spec))
-            stem = torch.istft(
-                masked_spec,
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                window=self.window,
-                length=T,
-            )
-            stems[name] = stem.unsqueeze(1)  # (B, 1, T)
-            del masked_spec
+                centroids[name] = self._masked_centroid(mask_tf, spec)
+            stems[name] = self._masked_stem(mask_tf, spec, length=T).unsqueeze(1)
+            del mask_tf
         del spec
 
         phase_score = self.phase_head(hidden.mean(dim=1))  # (B, 1)
@@ -179,6 +178,101 @@ class MambaSeparator(nn.Module):
             None,  # new_state_cache placeholder (C-2.5: real SSM state TBD)
             metrics,
         )
+
+    def _frame_windows(self, n_frames: int):
+        """Yield (start, stop) frame windows used by every chunked stage."""
+        step = max(1, _ISTFT_CHUNK_FRAMES)
+        for start in range(0, n_frames, step):
+            yield start, min(start + step, n_frames)
+
+    def _mask_window(self, mask_tf: torch.Tensor, start: int, stop: int) -> torch.Tensor:
+        """Contiguous (B, c, F) slice of a precomputed (B, T_f, F) mask.
+
+        Slicing the *mask output* rather than `hidden[:, start:stop]` matters:
+        slicing hidden produces a copy of the mamba output (~300 MB at 600 s),
+        while slicing the mask yields a 4 MB view per window (review §1).
+        """
+        return mask_tf[:, start:stop]
+
+    def _masked_centroid(self, mask_tf: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
+        """Spectral centroid of the masked stem, (B, T_f), computed windowed.
+
+        The old path materialised a full ``(B, T_f, F)`` masked-magnitude
+        spectrogram per stem purely to feed this metric — 404 MB each at
+        600 s, and the residual stem's copy was computed and never read
+        (review §1). Magnitudes are now accumulated window by window; the
+        centroid is identical because it is a per-frame reduction.
+        """
+        freqs = torch.linspace(
+            0, self.n_fft // 2, self.n_fft // 2 + 1, device=spec.device, dtype=spec.real.dtype
+        ).view(1, -1)
+        out = torch.empty(spec.shape[0], spec.shape[1], device=spec.device, dtype=spec.real.dtype)
+        for start, stop in self._frame_windows(spec.shape[1]):
+            mag = torch.abs(mask_tf[:, start:stop] * spec[:, start:stop])  # (B, c, F)
+            out[:, start:stop] = (mag * freqs).sum(dim=-1) / (mag.sum(dim=-1) + 1e-8)
+        return out
+
+    def _masked_stem(self, mask_tf: torch.Tensor, spec: torch.Tensor, length: int) -> torch.Tensor:
+        """istft of one masked stem; returns (B, T).
+
+        The masked spectrogram is assembled window by window (so no full-size
+        mask copy is ever live) and then handed to ``_istft_chunked``, which
+        performs the overlap-add reconstruction that is verified sample-exact
+        against a whole-file ``torch.istft``. Reconstructing each mask window
+        independently would produce hard seams at the window boundaries — the
+        per-window and whole-file reconstructions differ by ~2e-2 otherwise.
+        """
+        masked = torch.empty_like(spec)  # (B, T_f, F) complex
+        for start, stop in self._frame_windows(spec.shape[1]):
+            masked[:, start:stop] = mask_tf[:, start:stop] * spec[:, start:stop]
+        out = self._istft_chunked(masked.transpose(1, 2), length=length)
+        del masked
+        return out
+
+    def _istft_chunked(self, spec: torch.Tensor, length: int) -> torch.Tensor:
+        """Inverse STFT in frame windows with overlap-add; returns (B, length).
+
+        ``torch.istft`` over a whole multi-minute spectrogram allocates ~4-5x
+        its own output size internally (measured: 1216 MB of scratch for a
+        264 MB 600 s output), which dominated peak RSS for long inputs. Each
+        window here is only ``_ISTFT_CHUNK_FRAMES`` frames, so the scratch is
+        a few MB regardless of input length.
+
+        Each window is reconstructed with ``pad`` extra frames on either side
+        and only its interior is copied out. That padding is what makes the
+        result exact: ``torch.istft`` normalises by the window sum, and samples
+        within ``n_fft`` of a window edge see contributions only from the
+        frames present in that window. Copying the interior (>= n_fft // 2
+        samples in) means every copied sample carries the same complete window
+        sum it has in the whole-file transform. Skipping the padding is a
+        silent quality bug: the seams were ~3e-3 peak error, audible on
+        transient material (review §1).
+        """
+        n_frames = spec.shape[-1]
+        pad = (self.n_fft // 2 + self.hop_length - 1) // self.hop_length
+        step = max(1, _ISTFT_CHUNK_FRAMES)
+        out = torch.zeros(spec.shape[0], length, device=spec.device, dtype=spec.real.dtype)
+        for start in range(0, n_frames, step):
+            stop = min(start + step, n_frames)
+            # Outer boundaries need no padding: frame 0 / frame N-1 see the
+            # same truncated window sum as they do in the whole-file transform.
+            lo_frame = max(0, start - pad)
+            hi_frame = min(n_frames, stop + pad)
+            audio = torch.istft(
+                spec[..., lo_frame:hi_frame],
+                n_fft=self.n_fft,
+                hop_length=self.hop_length,
+                window=self.window,
+                length=(hi_frame - lo_frame) * self.hop_length,
+            )
+            # Chunk sample u corresponds to global sample lo_frame*hop + u.
+            out_lo = lo_frame * self.hop_length
+            take_lo = start * self.hop_length - out_lo
+            take_hi = min(stop * self.hop_length, length) - out_lo
+            take_hi = min(take_hi, audio.shape[-1])
+            if take_hi > take_lo:
+                out[:, out_lo + take_lo : out_lo + take_hi] = audio[:, take_lo:take_hi]
+        return out
 
     def _centroid_separation(
         self, guitar_centroid: torch.Tensor, bass_centroid: torch.Tensor

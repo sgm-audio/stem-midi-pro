@@ -30,6 +30,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -131,79 +132,116 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             return self._block_forward(x)
 
         def _block_forward(self, x: torch.Tensor) -> torch.Tensor:
-            _, L, _ = x.shape
-            x_and_z = self.in_proj(x)  # (B, L, 2*d_inner)
-            x_in, z = x_and_z.chunk(2, dim=-1)  # (B, L, d_inner) each
+            """(B, L, D) -> (B, L, D).
 
-            # Causal depthwise conv + SiLU
-            xc = self.conv1d(x_in.transpose(1, 2))[..., :L]  # (B, d_inner, L)
-            xc = F.silu(xc).transpose(1, 2)  # (B, L, d_inner)
+            Fused chunking: projections, the causal conv, the scan and the
+            gated output all run in windows of ``SCAN_CHUNK`` frames, so no
+            full-length ``(B, L, 2*d_inner)`` tensor (or the ``(B, d_inner, L)``
+            conv im2col) is ever alive. Those full-length allocations were the
+            dominant memory cost on long files — 121 MB for ``in_proj`` alone
+            at L=10,336, roughly doubling transiently inside ``conv1d``
+            (review §1).
 
-            x_dbl = self.x_proj(xc)  # (B, L, dt_rank + 2*N)
-            dt_raw, Bmat, Cmat = torch.split(
-                x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1
-            )
-            dt = F.softplus(self.dt_proj(dt_raw))  # (B, L, d_inner)
+            Equivalence to the whole-sequence form: the causal depthwise conv
+            is windowed with ``d_conv - 1`` frames of history prepended (a
+            depthwise kernel reaches back exactly that far), and the SSM state
+            ``h`` is threaded through every window rather than reset.
+            """
+            B, L, _ = x.shape
+            hist = self.d_conv - 1
+            out = torch.empty(B, L, self.d_model, device=x.device, dtype=x.dtype)
+            A = -torch.exp(self.A_log)  # (d_inner, N), negative => contraction
+            h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=torch.float32)
 
-            y = self._selective_scan(xc, dt, Bmat, Cmat)  # (B, L, d_inner)
+            for start in range(0, L, self.SCAN_CHUNK):
+                stop = min(start + self.SCAN_CHUNK, L)
+                ctx_start = max(0, start - hist)  # conv context from previous window
+                n_hist = start - ctx_start
+                win = stop - start
 
-            y = y + self.D.unsqueeze(0).unsqueeze(0) * xc  # skip connection
-            y = y * F.silu(z)  # gate
-            return self.out_proj(y)
+                # --- projections over [ctx_start, stop) -------------------
+                xz = self.in_proj(x[:, ctx_start:stop])  # (B, n_hist+win, 2*d_inner)
+                x_in, z = xz.chunk(2, dim=-1)
+
+                # --- causal depthwise conv (needs d_conv-1 frames of lookback)
+                xc = self.conv1d(x_in.transpose(1, 2))  # (B, d_inner, n_hist+win+hist)
+                # conv1d pads `hist` on the left, so index n_hist.. aligns
+                # with the first output frame of this window.
+                xc = xc[..., n_hist : n_hist + win]
+                xc = F.silu(xc).transpose(1, 2)  # (B, win, d_inner) — this window only
+                z = z[:, n_hist:, :]  # gate for this window only (B, win, d_inner)
+
+                x_dbl = self.x_proj(xc)  # (B, win, dt_rank + 2*N)
+                dt_raw, Bmat, Cmat = torch.split(
+                    x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1
+                )
+                # dt > 0 and A < 0 => dA = exp(dt*A) < 1, so the recurrence
+                # always forgets. The remaining risk (a large DC gain on a
+                # *constant* input) is removed by the per-block LayerNorm in
+                # the models plus the bounded log-mel input; see review §3.
+                dt = F.softplus(self.dt_proj(dt_raw))
+
+                y, h = self._selective_scan(xc, dt, Bmat, Cmat, A=A, h=h, return_state=True)
+                y = y + self.D.unsqueeze(0).unsqueeze(0) * xc  # skip connection
+                y = y * F.silu(z)  # gate
+                out[:, start:stop] = self.out_proj(y)
+
+            return out
 
         def _selective_scan(
-            self, xc: torch.Tensor, dt: torch.Tensor, Bmat: torch.Tensor, Cmat: torch.Tensor
-        ) -> torch.Tensor:
-            """Chunked sequential selective scan.
+            self,
+            xc: torch.Tensor,
+            dt: torch.Tensor,
+            Bmat: torch.Tensor,
+            Cmat: torch.Tensor,
+            A: torch.Tensor | None = None,
+            h: torch.Tensor | None = None,
+            return_state: bool = False,
+        ):
+            """Selective scan over one window; returns (y, carried state).
 
-            The recurrence h_t = exp(dt_t * A) * h_{t-1} + dt_t * x_t * B_t is
-            inherently sequential; chunking bounds the size of the
-            materialized discretization tensors to (B, chunk, d_inner, N)
-            instead of (B, L, d_inner, N). C-1.
+            h(t) = exp(dt_t * A) * h(t-1) + dt_t * xc_t * B_t
+            y(t) = h(t) . C_t
 
-            Each step is a single fused ``torch.addcmul(..., out=state_history[t])``
-            into a preallocated buffer - zero per-step allocation. The naive
-            version allocated ~3 tensors per frame, and CPU allocator churn
-            inflated peak RSS severalx above what the math requires.
+            The state is threaded in and out so callers can window the
+            sequence without breaking the recurrence. Peak transient memory is
+            O(window), never O(L).
+
+            Signature compatibility: `A` defaults to ``-exp(A_log)`` and the
+            carried state is optional, so the 4-argument positional form used
+            elsewhere (and by the test-suite) keeps working; pass
+            ``return_state=True`` to also get ``h`` back.
             """
+            if A is None:
+                A = -torch.exp(self.A_log)  # (d_inner, N), negative => contraction
             B, L, _ = xc.shape
-            A = -torch.exp(self.A_log)  # (d_inner, N), all entries < 0
+            if h is None:
+                h = torch.zeros(
+                    B, self.d_inner, self.d_state, device=xc.device, dtype=torch.float32
+                )
+            if xc.dtype != torch.float32:  # `.float()` is a no-op copy otherwise
+                xc, dt, Bmat, Cmat = (t.float() for t in (xc, dt, Bmat, Cmat))
 
-            # State carries ACROSS chunks - it is initialized exactly once
-            # here, never inside the chunk loop (a per-chunk reset silently
-            # truncates the SSM memory to SCAN_CHUNK frames).
-            h = xc.new_zeros(B, self.d_inner, self.d_state)
-            ys: list[torch.Tensor] = []
-            chunk = self.SCAN_CHUNK
-            for start in range(0, L, chunk):
-                end = min(start + chunk, L)
-                seg = end - start
-                dt_c = dt[:, start:end]  # (B, l, d_inner)
-                dA_c = torch.exp(dt_c.unsqueeze(-1) * A)  # (B, l, d_inner, N)
-                dBx_c = (
-                    dt_c.unsqueeze(-1)
-                    * xc[:, start:end].unsqueeze(-1)
-                    * Bmat[:, start:end].unsqueeze(2)
-                )  # (B, l, d_inner, N)
+            outs = []
+            for start in range(0, L, self.SCAN_CHUNK):
+                stop = min(start + self.SCAN_CHUNK, L)
+                dt_c = dt[:, start:stop]
+                xc_c = xc[:, start:stop]
+                B_c = Bmat[:, start:stop]
+                C_c = Cmat[:, start:stop]
 
-                if torch.is_grad_enabled():
-                    # Autograd path: out= ops don't support autograd, so chain
-                    # out-of-place (2 allocs/frame); training memory is bounded
-                    # by gradient checkpointing, not this loop.
-                    hs_list: list[torch.Tensor] = []
-                    for t in range(seg):
-                        h = torch.addcmul(dBx_c[:, t], dA_c[:, t], h)
-                        hs_list.append(h)
-                    hs = torch.stack(hs_list, dim=1)
-                else:
-                    # Inference path: preallocated state history, zero per-step
-                    # allocation.
-                    hs = xc.new_zeros(B, seg, self.d_inner, self.d_state)
-                    for t in range(seg):
-                        # h_t = dBx_t + dA_t * h_{t-1}, written to its own row
-                        h = torch.addcmul(dBx_c[:, t], dA_c[:, t], h, out=hs[:, t])
+                # (B, c, d_inner, N) — bounded by _SCAN_CHUNK, not by L.
+                dA = torch.exp(dt_c.unsqueeze(-1) * A)
+                dBx = dt_c.unsqueeze(-1) * xc_c.unsqueeze(-1) * B_c.unsqueeze(2)
 
-                # y_t = <h_t, C_t> for the whole chunk in one einsum
-                ys.append(torch.einsum("bijn,bin->bij", hs, Cmat[:, start:end]))
+                y_c = torch.empty(
+                    B, stop - start, self.d_inner, device=xc.device, dtype=torch.float32
+                )
+                for t in range(stop - start):
+                    h = dA[:, t] * h + dBx[:, t]
+                    y_c[:, t] = torch.einsum("bdn,bn->bd", h, C_c[:, t])
+                outs.append(y_c)
 
-            return torch.cat(ys, dim=1)  # (B, L, d_inner)
+            y = torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
+            y = y.to(xc.dtype)
+            return (y, h) if return_state else y

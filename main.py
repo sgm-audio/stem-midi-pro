@@ -254,8 +254,23 @@ class StemMidiModel(nn.Module):
         return outputs
 
     def _enhance(self, tr: dict, stem: torch.Tensor) -> tuple[dict, torch.Tensor]:
-        """Convert a transcription dict into injector-enhanced MIDI metadata."""
+        """Convert a transcription dict into injector-enhanced MIDI metadata.
+
+        A silent stem is short-circuited to zero events. The onset head fires
+        on whatever numerical noise survives separating digital silence, so
+        transcribing silence produced 8-128 plausible-looking note-ons that a
+        DAW imports as music (review §4). This lives here, not at the call
+        sites, because it is the single choke point for *both* stems -- the
+        bass part previously slipped past a guitar-only guard.
+        """
         confidence = tr["confidence"]
+        if self._stem_is_silent(stem):
+            empty = self.confidence_injector.inject_midi_metadata(
+                [],
+                confidence.reshape(-1),
+                self._frame_energy(stem).reshape(-1),
+            )
+            return empty, confidence
         events = None
         if tr.get("events"):
             events = tr["events"][0]  # B=1 in production paths
@@ -440,9 +455,43 @@ class StemMidiModel(nn.Module):
             )
         return events
 
+    @staticmethod
+    def _stem_is_silent(stem: torch.Tensor) -> bool:
+        """True when one stem is digital silence or non-finite (review §4)."""
+        if not torch.isfinite(stem).all():
+            return True
+        return bool(torch.max(stem.abs()) < 1e-6)
+
+    @staticmethod
+    def _stems_are_silent(guitar: torch.Tensor, bass: torch.Tensor) -> bool:
+        """True when both stems are unusable (silent or non-finite).
+
+        Shared by `_detect_artifacts` and by the MIDI suppression path so the
+        report flag and the emitted events can never disagree (review §4).
+        """
+        return StemMidiModel._stem_is_silent(guitar) and StemMidiModel._stem_is_silent(bass)
+
     def _detect_artifacts(self, guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:
-        """Simple artifact detection for quality gating"""
+        """Simple artifact detection for quality gating.
+
+        Finiteness and silence are checked FIRST (review §4): without them an
+        all-NaN render raised no flag, and because `NaN >= x` is False the
+        gate fell through to DRAFT. An all-silent render also raised no flag
+        and scored the maximum separation proxy.
+        """
         flags = []
+
+        if not (torch.isfinite(guitar).all() and torch.isfinite(bass).all()):
+            return (
+                ["non_finite", "silent_output"]
+                if not (guitar.abs().max() > 0 or bass.abs().max() > 0)
+                else ["non_finite"]
+            )
+
+        # Digital silence in both stems means nothing was separated (e.g. no
+        # guitar in the mix). It must not reach STUDIO via the clamped proxy.
+        if self._stems_are_silent(guitar, bass):
+            return ["silent_output"]
 
         # Check for clipping
         if guitar.abs().max() > 0.99 or bass.abs().max() > 0.99:
