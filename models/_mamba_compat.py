@@ -28,9 +28,9 @@ import math
 import os
 
 import torch
-import torch.utils.checkpoint  # noqa: F401 - registers torch.utils.checkpoint
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 logger = logging.getLogger(__name__)
 

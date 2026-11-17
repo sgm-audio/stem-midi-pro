@@ -278,6 +278,8 @@ def test_legacy_min_si_sdr_key_warns_and_does_not_gate():
             config={"quality_gates": {"min_si_sdr": 25.0}},
         )
     assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+    # 22 < the legacy 25 threshold, but the proxy no longer decides the tier.
+    assert report.quality_tier.value == "studio"
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 # Artifact flag meaning. Anything other than "none" forces COMPLEX.
 # "non_finite" and "silent_output" exist because without them an all-NaN
 # render was classified DRAFT (every comparison against NaN is False) and an
