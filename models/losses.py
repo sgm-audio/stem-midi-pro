@@ -94,10 +94,17 @@ class PerceptualAudioLoss(nn.Module):
         flatness_loss /= len(pred_stems)
         crest_loss /= len(pred_stems)
 
-        # Onset F1 loss (1 - F1 of binarized onset predictions vs targets)
-        onset_f1_loss = 0
+        # Onset detection: BCE is the optimised term (differentiable everywhere).
+        # The hard F1 below is a *metric* only - thresholding has zero gradient,
+        # so as a loss term it contributed nothing to the update (H-4).
+        onset_bce_loss = 0
+        onset_f1_metric = 0
         if pred_onsets is not None and target_onsets is not None:
-            onset_f1_loss = onset_f1_loss_fn(pred_onsets, target_onsets, is_logits=True)
+            onset_bce_loss = onset_bce_loss_fn(pred_onsets, target_onsets, is_logits=True)
+            with torch.no_grad():
+                onset_f1_metric = onset_f1_loss_fn(
+                    pred_onsets.detach(), target_onsets.detach(), is_logits=True
+                )
 
         # Pitch loss: multi-hot targets (any frame labeling >1 pitch — a
         # chord) train via multi-label BCE (pitch_bce_loss_fn); class-index /
@@ -132,7 +139,8 @@ class PerceptualAudioLoss(nn.Module):
             loss_cfg["mr_stft_weight"] * spectral_loss
             + loss_cfg["spectral_flatness_weight"] * flatness_loss
             + loss_cfg["crest_factor_weight"] * crest_loss
-            + loss_cfg.get("onset_f1_weight", 1.0) * onset_f1_loss
+            + loss_cfg.get("onset_bce_weight", loss_cfg.get("onset_f1_weight", 1.0))
+            * onset_bce_loss
             + loss_cfg.get("pitch_ce_weight", 0.8) * pitch_ce_loss
             + loss_cfg.get("velocity_mae_weight", 0.3) * velocity_mae_loss
             + loss_cfg.get("duration_iou_weight", 0.5) * duration_iou_loss
@@ -147,7 +155,8 @@ class PerceptualAudioLoss(nn.Module):
             "spectral": spectral_loss.item(),
             "flatness": flatness_loss.item(),
             "crest": crest_loss.item(),
-            "onset_f1": _scalar(onset_f1_loss),
+            "onset_bce": _scalar(onset_bce_loss),  # the optimised onset term
+            "onset_f1": _scalar(onset_f1_metric),  # metric only (no gradient)
             "pitch": _scalar(pitch_ce_loss),  # CE (single-label) or BCE (chords)
             "velocity_mae": _scalar(velocity_mae_loss),
             "duration_iou": _scalar(duration_iou_loss),
@@ -214,16 +223,55 @@ class PerceptualAudioLoss(nn.Module):
         tgt = target_onsets.reshape(target_onsets.shape[0], -1).clamp(0, 1).float()
 
         n = min(pred.shape[-1], tgt.shape[-1], energy_frames.shape[-1])
-        if n == 0:
+        if n < 2:
             return pred.new_zeros(())
         pred = pred[..., :n]
-        tgt = tgt[..., :n]
         energy_frames = energy_frames[..., :n]
 
-        # Pointwise onset-gated energy, normalized over the batch
-        pred_energy = (torch.sigmoid(pred) * energy_frames).mean()
-        target_energy = (tgt * energy_frames).mean()
-        return F.mse_loss(pred_energy, target_energy)
+        probs = torch.sigmoid(pred)
+        if probs.min() >= 0 and probs.max() <= 1 and float(energy_frames.abs().max()) <= 1e-6:
+            return pred.new_zeros(())
+
+        # Zero-mean cosine distance between the predicted onset curve and the
+        # (frame-grid) energy envelope. Reducing to two scalars and taking their
+        # MSE - the previous form - is minimised by shifting the mean
+        # prediction and says nothing about *where* onsets are; an all-constant
+        # prediction now scores 1.0 (worst case).
+        def _unit(x):
+            x = x - x.mean(dim=-1, keepdim=True)
+            return x / (x.norm(dim=-1, keepdim=True) + 1e-6)
+
+        cos = (_unit(probs) * _unit(energy_frames)).sum(dim=-1).mean()
+        return 1.0 - cos
+
+
+def onset_bce_loss_fn(
+    pred_onsets, target_onsets, pos_weight: float | None = None, is_logits: bool | None = None
+):
+    """Differentiable onset objective (BCE-with-logits).
+
+    ``pos_weight`` counteracts the strong class imbalance of onset targets
+    (typically ~1 % of frames are onsets); ~100 is a reasonable starting point.
+
+    Args:
+        pred_onsets: logits (or probabilities when ``is_logits=False``)
+        target_onsets: binary targets, same element count
+        pos_weight: optional weight for the positive class
+        is_logits: None → infer from the value range
+    """
+    if is_logits is None:
+        is_logits = bool(pred_onsets.min() < 0 or pred_onsets.max() > 1)
+    logits = pred_onsets.reshape(-1).float()
+    if not is_logits:
+        logits = torch.logit(logits.clamp(1e-8, 1 - 1e-8))
+    target = target_onsets.reshape(-1).float().clamp(0, 1)
+    n = min(logits.numel(), target.numel())
+    if n == 0:
+        return pred_onsets.new_zeros(())
+    weight = None
+    if pos_weight is not None:
+        weight = torch.as_tensor(pos_weight, dtype=logits.dtype, device=logits.device)
+    return F.binary_cross_entropy_with_logits(logits[:n], target[:n], pos_weight=weight)
 
 
 def onset_f1_loss_fn(

@@ -298,16 +298,6 @@ def test_query_flags_reach_the_model(api_env, tmp_path, params, expected):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "JSON-1",
-    "processing_report.json is written with json.dumps(...) and the default allow_nan=True, so a "
-    "NaN metric (which the pipeline produces for silent, DC and non-finite input — measured: "
-    "centroid_separation_db/phase_coherence/avg_confidence are all NaN for an all-NaN "
-    "upload, and for silence the separator's proxy returns 0.0 while phase_coherence stays "
-    "NaN) emits bare `NaN`, which is "
-    "not valid RFC 8259: browsers' JSON.parse() rejects the whole download. Serialise with "
-    "allow_nan=False after sanitising, or emit null with an explicit 'unreliable' flag.",
-)
 def test_zip_report_is_strict_json(api_env, tmp_path):
     api, stub = api_env
 

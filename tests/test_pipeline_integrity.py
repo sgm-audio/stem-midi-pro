@@ -551,15 +551,6 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     assert out["routing_decision"]["action"] == "fallback_options"
 
 
-@pytest.mark.real_mamba
-@known_bug(
-    "SEP-1",
-    "the separator learns three INDEPENDENT sigmoid masks (guitar/bass/residual), so "
-    "guitar+bass+residual != mix: measured relative error 0.46-0.51 across seeds 0-3 (i.e. "
-    "the three stems together account for ~half the mixture's energy). Users hear holes in "
-    "the mix and 'sum to mix' checks in a DAW fail. Either define residual = mix - guitar - "
-    "bass or add a sum-consistency term, and assert it here.",
-)
 def test_stems_sum_back_to_the_mix(pipeline_config, synth):
     from main import StemMidiModel
 
