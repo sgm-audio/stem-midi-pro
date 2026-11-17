@@ -70,7 +70,7 @@ def main():
     # Processing report
     report = outputs["processing_report"]
     print("\nProcessing Report:")
-    print(f"  SI-SDR: {report.si_sdr:.1f} dB")
+    print(f"  Centroid separation (proxy, not SI-SDR): {report.centroid_separation_db:.1f} dB")
     print(f"  Phase Coherence: {report.phase_coherence:.3f}")
     print(f"  Avg Confidence: {report.avg_confidence:.0%}")
     print(f"  Artifact Flags: {report.artifact_flags}")
@@ -86,22 +86,26 @@ def main():
     print(f"  Badge: {routing['badge']}")
     print(f"  Message: {routing['message']}")
 
-    # MIDI metadata sample
+    # MIDI metadata sample (per-stem: {"guitar": …, "bass": …, "summary": …})
     midi_meta = outputs["midi_metadata"]
     print("\nMIDI Metadata:")
-    print(f"  Total Events: {len(midi_meta['midi_events'])}")
+    print(f"  Guitar Events: {len(midi_meta['guitar']['midi_events'])}")
+    print(f"  Bass Events: {len(midi_meta['bass']['midi_events'])}")
     print(f"  Avg Confidence: {midi_meta['summary']['avg_confidence']:.0%}")
     print(f"  Low Confidence Count: {midi_meta['summary']['low_confidence_count']}")
     print(f"  Alignment Warnings: {midi_meta['summary']['alignment_warnings']}")
 
-    if midi_meta["midi_events"]:
-        print("\nSample MIDI Event:")
-        event = midi_meta["midi_events"][0]
-        print(f"  Note: {event['note']} (MIDI)")
-        print(f"  Onset Frame: {event['onset_frame']}")
-        print(f"  Velocity: {event['velocity']}")
-        print(f"  Confidence: {event['confidence']:.0%}")
-        print(f"  Needs Review: {event['needs_review']}")
+    for stem in ("guitar", "bass"):
+        events = midi_meta[stem]["midi_events"]
+        if events:
+            print(f"\nSample {stem} MIDI Event:")
+            event = events[0]
+            print(f"  Note: {event['note']} (MIDI)")
+            print(f"  Onset Frame: {event['onset_frame']}")
+            print(f"  Velocity: {event['velocity']}")
+            print(f"  Confidence: {event['confidence']:.0%}")
+            print(f"  Needs Review: {event['needs_review']}")
+            break
 
     print("\nDemo completed successfully!")
 

@@ -60,15 +60,40 @@ def test_multi_event_ordering():
     assert times == sorted(times)
 
 
-def test_cc127_confidence_values():
-    """Each note event must carry a CC#127 message with the confidence value."""
+def test_confidence_cc_default_is_16():
+    """H-5: default confidence CC must be CC#16 (CC#120-127 are Channel Mode
+    messages per the MIDI spec; CC#127 = Poly Mode On would kill notes)."""
     events = _events(3)
     data = {"midi_events": events, "summary": {}}
     mid = _parse(build_midi_from_events(data, "bass"))
 
+    ccs = [m for m in mid.tracks[0] if m.type == "control_change"]
+    assert len(ccs) == 3
+    assert all(m.control == 16 for m in ccs)
+    assert [m.value for m in ccs] == [e["cc_127_value"] for e in events]
+
+
+def test_confidence_cc127_legacy_param():
+    """Legacy CC#127 behavior is available via the explicit parameter."""
+    events = _events(3)
+    data = {"midi_events": events, "summary": {}}
+    mid = _parse(build_midi_from_events(data, "bass", confidence_cc=127))
+
     ccs = [m for m in mid.tracks[0] if m.type == "control_change" and m.control == 127]
     assert len(ccs) == 3
     assert [m.value for m in ccs] == [e["cc_127_value"] for e in events]
+
+
+def test_confidence_cc_emitted_at_note_on():
+    """H-5: the confidence CC lands at the note-on, not after the note-off."""
+    events = _events(2)
+    data = {"midi_events": events, "summary": {}}
+    mid = _parse(build_midi_from_events(data, "guitar"))
+
+    # Walk the track: CC must appear between its note_on and note_off.
+    seq = [m.type for m in mid.tracks[0] if m.type in ("note_on", "note_off", "control_change")]
+    assert seq[0] == "note_on"
+    assert seq[1] == "control_change"
 
 
 def test_midi_roundtrip_parse():

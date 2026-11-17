@@ -24,9 +24,6 @@ separator:
   expand: 2
 
 transcriber:
-  # Onset refractory: one note per 50 ms max (caps density at 20 notes/s and
-  # merges the multi-frame smear of a single attack). BUG-MIDI-7.
-  min_onset_interval_ms: 50
   d_model: 512
   n_layer: 8
   d_state: 12
@@ -53,4 +50,4 @@ quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
-  min_si_sdr: 20.0
+  min_centroid_separation_db: 20.0  # renamed from min_si_sdr (C-2.6)

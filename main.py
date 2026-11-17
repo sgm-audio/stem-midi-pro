@@ -3,13 +3,24 @@
 """
 StemMidiModel — plain PyTorch orchestrator for Stem+MIDI Pro
 (separation → transcription → confidence injection → quality routing).
+
+Backend selection (H-9): when ``cfg["backends"]`` names a separator and/or
+transcriber, the pluggable backends from ``models/backends/factory.py`` are
+built and used (e.g. ``demucs``/``basic_pitch``). Otherwise the built-in
+Mamba modules run (default). Backend events that already carry
+``duration_frames`` are preferred over the frame-logit path.
+
+Both stems are transcribed (H-8): guitar and bass MIDI are generated from
+their own stems, not one copied to both.
 """
 
+import logging
 import os
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # CPU inference tuning (PERF-7.4 / PERF-7.9). Override thread count via OMP_NUM_THREADS.
 torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", os.cpu_count() or 1)))
@@ -17,13 +28,18 @@ torch.set_float32_matmul_precision("high")  # allows TF32/AVX-512 matmul where a
 
 # Import our custom components (after torch thread config above — intentional E402)
 from models._mamba_compat import MAMBA_BACKEND  # noqa: E402
-from models.backends.factory import build_separator, build_transcriber  # noqa: E402
 from models.confidence_injector import ConfidenceInjector  # noqa: E402
 from models.losses import PerceptualAudioLoss  # noqa: E402
 from models.mamba_separator import MambaSeparator  # noqa: E402
 from models.mamba_transcriber import MambaTranscriber  # noqa: E402
-from utils.audio import resample_audio  # noqa: E402
 from utils.quality_gates import ProcessingReport, route_by_quality  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# Default loud input cap (C-1 / C-6): with the chunked scan the separator no
+# longer needs O(L·d_inner·N) memory, but STFT-domain buffers and stems still
+# scale with length. Override via cfg["audio"]["max_input_seconds"].
+DEFAULT_MAX_INPUT_SECONDS = 600
 
 
 class StemMidiModel(nn.Module):
@@ -32,40 +48,39 @@ class StemMidiModel(nn.Module):
 
     Input:  audio (B, C=1, T); optional training targets
             target_guitar / target_bass (B, C, T),
-            target_onsets (B, T, 1), target_pitch (B, T, V)
-    Output: Dict with guitar_stem, bass_stem, midi_metadata,
-            processing_report, routing_decision.
+            target_onsets (B, T, 1), target_pitch (B, T) or one-hot (B, T, V),
+            target_velocity (B, T, 1) normalized [0, 1]
+    Output: Dict with guitar_stem, bass_stem, midi_metadata
+            ({"guitar": …, "bass": …, "summary": …}), processing_report,
+            routing_decision.
     """
-
-    #: Which Mamba implementation is live ("mamba-ssm" kernel vs the pure-torch
-    #: reference scan). Surfaced by /model-info and the processing report so an
-    #: operator can tell the two apart (BUG-HONESTY-2).
-    mamba_backend: str = MAMBA_BACKEND
 
     def __init__(self, config: dict):
         super().__init__()
         self.cfg = config
 
-        # Backend selection: honour `backends:` from the config instead of
-        # hard-coding Mamba. Previously the factory was bypassed entirely, so
-        # configs/model_config.cpu.yaml (demucs + basic_pitch) silently built
-        # Mamba, and `backends:` was dead for main/api/demo/CLI (BUG-WIRING-1).
-        # The "mamba" name still constructs the modules directly so their
-        # historical tuple contract and object types are unchanged.
-        backends_cfg = config.get("backends") or {}
-        self.backend_separator = str(backends_cfg.get("separator", "mamba")).lower()
-        self.backend_transcriber = str(backends_cfg.get("transcriber", "mamba")).lower()
+        # Pluggable backends (H-9): only used when explicitly configured.
+        self.backends_cfg = config.get("backends") or {}
+        self._use_backends = bool(
+            self.backends_cfg.get("separator") or self.backends_cfg.get("transcriber")
+        )
 
-        self.separator = (
-            MambaSeparator(self.cfg)
-            if self.backend_separator == "mamba"
-            else build_separator(self.cfg)
-        )
-        self.transcriber = (
-            MambaTranscriber(self.cfg)
-            if self.backend_transcriber == "mamba"
-            else build_transcriber(self.cfg)
-        )
+        # Initialize core components
+        if self._use_backends:
+            from models.backends.factory import build_separator, build_transcriber
+
+            self.separator_backend = build_separator(config)
+            self.transcriber_backend = build_transcriber(config)
+            self.backend_name = (
+                f"separator={self.backends_cfg.get('separator', 'mamba')},"
+                f"transcriber={self.backends_cfg.get('transcriber', 'mamba')}"
+            )
+            logger.info("StemMidiModel using pluggable backends: %s", self.backend_name)
+        else:
+            self.separator = MambaSeparator(self.cfg)
+            self.transcriber = MambaTranscriber(self.cfg)
+            self.backend_name = f"mamba ({MAMBA_BACKEND})"
+            logger.info("StemMidiModel using built-in Mamba modules (%s)", MAMBA_BACKEND)
 
         self.confidence_injector = ConfidenceInjector(
             onset_threshold=self.cfg["transcriber"].get("onset_threshold", 0.5),
@@ -73,21 +88,61 @@ class StemMidiModel(nn.Module):
         )
         self.loss_fn = PerceptualAudioLoss(self.cfg)
 
-        #: True once real weights are loaded (see load_from_checkpoint). Served
-        #: in the report so a randomly-initialised model is never mistaken for a
-        #: trained one (BUG-HONESTY-1).
-        self.weights_loaded = False
+    # ------------------------------------------------------------------
+    # Component wrappers (unify the Mamba-module and pluggable-backend paths)
+    # ------------------------------------------------------------------
 
-        # Onset refractory window. Emitting one event per above-threshold frame
-        # with no merging produced ~87 notes/second on monophonic audio
-        # (BUG-MIDI-7). 50 ms allows 16th notes up to 300 BPM and caps onset
-        # smearing from a single attack.
-        sr = float(self.cfg["audio"]["sample_rate"])
-        hop = float(self.cfg["audio"]["hop_length"])
-        interval_ms = float(self.cfg["transcriber"].get("min_onset_interval_ms", 50.0))
-        self.min_onset_interval_frames = max(1, round(interval_ms / 1000.0 * sr / hop))
+    def _separate(self, audio: torch.Tensor):
+        """Returns (guitar_stem, bass_stem, metrics (B, 2))."""
+        if self._use_backends:
+            out = self.separator_backend.separate(audio)
+            return out["guitar"], out["bass"], out["metrics"]
+        guitar, bass, _residual, _state_cache, metrics = self.separator(audio)
+        return guitar, bass, metrics
 
-        # For training: store targets for loss computation
+    def _transcribe(self, stem: torch.Tensor) -> dict:
+        """Returns dict with onset_logits / pitch_logits / velocity /
+        confidence (all tensors) and optional per-batch ``events`` (backend)."""
+        if self._use_backends:
+            out = self.transcriber_backend.transcribe(stem)
+            return {
+                "onset_logits": out.get("onset_logits"),
+                "pitch_logits": out.get("pitch_logits"),
+                "velocity": out.get("velocity"),
+                "confidence": out.get("confidence"),
+                "events": out.get("events"),
+            }
+        onset, pitch, velocity, _expression, confidence = self.transcriber(stem)
+        return {
+            "onset_logits": onset,
+            "pitch_logits": pitch,
+            "velocity": velocity,
+            "confidence": confidence,
+            "events": None,
+        }
+
+    @staticmethod
+    def _ensure_finite(tr: dict, context: str) -> None:
+        """Fail loudly on NaN/Inf model output instead of corrupting MIDI/report."""
+        for key, tensor in tr.items():
+            if tensor is None or isinstance(tensor, list):
+                continue
+            if not torch.isfinite(tensor).all():
+                raise RuntimeError(
+                    f"{context}: model output '{key}' contains NaN/Inf; refusing to "
+                    "emit corrupt stems/MIDI. Check input audio and model weights."
+                )
+
+    def _frame_energy(self, stem: torch.Tensor) -> torch.Tensor:
+        """Sample-level RMS pooled onto the STFT frame grid (B, ceil(T/hop)).
+
+        The confidence injector indexes ``stem_energy`` by ``onset_frame``
+        (an STFT frame index), so the energy must live on the same grid (M-4).
+        """
+        hop = int(self.cfg["audio"]["hop_length"])
+        energy = torch.mean(stem**2, dim=1)  # (B, T)
+        frames = F.avg_pool1d(energy.unsqueeze(1), kernel_size=hop, stride=hop, ceil_mode=True)
+        return frames.squeeze(1)  # (B, T_f)
 
     def forward(
         self,
@@ -96,6 +151,7 @@ class StemMidiModel(nn.Module):
         target_bass: torch.Tensor | None = None,
         target_onsets: torch.Tensor | None = None,
         target_pitch: torch.Tensor | None = None,
+        target_velocity: torch.Tensor | None = None,
     ) -> dict:
         """
         Full forward pass: audio → stems → MIDI + confidence + quality routing.
@@ -104,148 +160,12 @@ class StemMidiModel(nn.Module):
         """
         if not self.training and target_guitar is None:
             with torch.inference_mode():
-                return self._forward_impl(audio)
-        return self._forward_impl(audio, target_guitar, target_bass, target_onsets, target_pitch)
-
-    # ------------------------------------------------------------------
-    # Backend plumbing: accept both the module contract (5-tuple) and the
-    # pluggable-backend contract (SeparateOut / TranscribeOut dicts).
-    # ------------------------------------------------------------------
-
-    def _separate(self, audio: torch.Tensor):
-        """Run the separator; normalise both backend contracts to a 5-tuple."""
-        sep = getattr(self.separator, "separate", None)
-        out = sep(audio) if callable(sep) else self.separator(audio)
-        if isinstance(out, dict):
-            guitar = out["guitar"]
-            residual = out.get("residual")
-            if residual is None:
-                residual = torch.zeros_like(guitar)
-            return guitar, out["bass"], residual, out.get("state_cache"), out["metrics"]
-        return out
-
-    def _transcribe(self, stem: torch.Tensor):
-        """Run the transcriber; normalise to (logits..., events | None)."""
-        tr = getattr(self.transcriber, "transcribe", None)
-        out = tr(stem) if callable(tr) else self.transcriber(stem)
-        if isinstance(out, dict):
-            return (
-                out.get("onset_logits"),
-                out.get("pitch_logits"),
-                out.get("velocity"),
-                out.get("expression"),
-                out.get("confidence"),
-                out.get("events"),
-            )
-        onset, pitch, velocity, expression, confidence = out
-        return onset, pitch, velocity, expression, confidence, None
-
-    @staticmethod
-    def _preset_events(events) -> list[dict] | None:
-        """Flatten a backend's list-per-batch ``events`` payload (B=1)."""
-        if events is None:
-            return None
-        if isinstance(events, list) and events and isinstance(events[0], list):
-            return list(events[0])
-        return list(events)
-
-    def _validate_audio(self, audio: torch.Tensor) -> None:
-        """Reject inputs that cannot be analysed, with a validation error.
-
-        Both checks previously surfaced as a ``RuntimeError`` from ``torch.stft``
-        deep in the transcriber, which the API mapped to HTTP 500 instead of 400
-        (BUG-AUDIO-5) — or, for NaN, propagated silently into the report
-        (BUG-AUDIO-4).
-        """
-        if not torch.isfinite(audio).all():
-            raise ValueError("input audio contains non-finite samples (NaN/Inf)")
-        n_fft = int(self.cfg["audio"]["n_fft"])
-        if audio.shape[-1] < n_fft:
-            raise ValueError(
-                f"input audio is too short: {audio.shape[-1]} samples, "
-                f"need at least one STFT window (n_fft={n_fft} samples)"
-            )
-
-    def _events_for(self, onset_logits, pitch_logits, velocity, confidence, preset):
-        """Turn a transcriber output into a flat MIDI event list."""
-        preset = self._preset_events(preset)
-        if preset is not None:
-            return preset
-        return self._logits_to_midi(onset_logits, pitch_logits, velocity, confidence)
-
-    def _build_outputs(
-        self,
-        audio: torch.Tensor,
-        guitar_stem: torch.Tensor,
-        bass_stem: torch.Tensor,
-        sep_metrics: torch.Tensor,
-        tr_guitar: tuple,
-        tr_bass: tuple,
-    ) -> dict:
-        """Assemble the public output dict (shared by batch and chunked paths)."""
-        onset_logits, pitch_logits, velocity, _expression, confidence, preset_g = tr_guitar
-        _b_onset, _b_pitch, _b_velocity, _b_expr, b_confidence, preset_b = tr_bass
-
-        # Artifact detection runs on the *input* as well as the stems: clipping
-        # and DC offset are properties of what the user uploaded, and a clipped
-        # input is quieter after masking (BUG-AUDIO-3), while silence has to be
-        # recognised before it is transcribed into invented notes (BUG-AUDIO-1/2).
-        flags = self._detect_artifacts(guitar_stem, bass_stem, audio)
-
-        if "silence" in flags:
-            # No energy in, no notes out — regardless of what the onset head says.
-            guitar_events: list[dict] = []
-            bass_events: list[dict] = []
-        else:
-            guitar_events = self._events_for(
-                onset_logits, pitch_logits, velocity, confidence, preset_g
-            )
-            bass_events = self._events_for(
-                None if preset_b is not None else _b_onset,
-                _b_pitch,
-                _b_velocity,
-                b_confidence,
-                preset_b,
-            )
-
-        conf_g = confidence if confidence is not None else torch.zeros(guitar_stem.shape[-1] // 512)
-        conf_b = b_confidence if b_confidence is not None else torch.zeros_like(conf_g)
-
-        midi_guitar = self.confidence_injector.inject_midi_metadata(
-            guitar_events,
-            conf_g.reshape(-1),
-            torch.mean(guitar_stem**2, dim=1).reshape(-1),
+                return self._forward_impl(
+                    audio, target_guitar, target_bass, target_onsets, target_pitch, target_velocity
+                )
+        return self._forward_impl(
+            audio, target_guitar, target_bass, target_onsets, target_pitch, target_velocity
         )
-        midi_bass = self.confidence_injector.inject_midi_metadata(
-            bass_events,
-            conf_b.reshape(-1),
-            torch.mean(bass_stem**2, dim=1).reshape(-1),
-        )
-
-        # `midi_metadata` keeps its historical shape (guitar events + summary)
-        # and now carries the two per-stem views as *distinct* dicts: previously
-        # both keys pointed at the same object, so bass.mid was a copy of
-        # guitar.mid (BUG-MIDI-6).
-        enhanced_midi = {**midi_guitar, "guitar": midi_guitar, "bass": midi_bass}
-
-        report = ProcessingReport(
-            si_sdr=float(sep_metrics[0, 0].item()),
-            phase_coherence=float(sep_metrics[0, 1].item()),
-            avg_confidence=float(conf_g.mean().item()) if conf_g.numel() else 0.0,
-            artifact_flags=flags,
-            low_confidence_notes=enhanced_midi["summary"]["low_confidence_count"],
-            config=self.cfg,
-            backend=f"{self.backend_separator}+{self.backend_transcriber}",
-            weights_loaded=bool(getattr(self, "weights_loaded", False)),
-        )
-
-        return {
-            "guitar_stem": guitar_stem,
-            "bass_stem": bass_stem,
-            "midi_metadata": enhanced_midi,
-            "processing_report": report,
-            "routing_decision": route_by_quality(report),
-        }
 
     def _forward_impl(
         self,
@@ -254,38 +174,105 @@ class StemMidiModel(nn.Module):
         target_bass: torch.Tensor | None = None,
         target_onsets: torch.Tensor | None = None,
         target_pitch: torch.Tensor | None = None,
+        target_velocity: torch.Tensor | None = None,
     ) -> dict:
         """Implementation of forward(); see forward() for the public contract."""
         _B, _C, _T = audio.shape
-        self._validate_audio(audio)
 
-        # 1. Separation (returns None in place of a state cache — real SSM
-        # state passing is not implemented; see C-2.5)
-        guitar_stem, bass_stem, _residual, _state_cache, sep_metrics = self._separate(audio)
+        # 1. Separation (no state cache — real SSM state passing is C-2.5 / ARCH-11.8.1)
+        guitar_stem, bass_stem, sep_metrics = self._separate(audio)
 
-        # 2. Transcription. Both stems are transcribed: the API ships a
-        # bass.mid, and relabelling the guitar transcription as "bass" produced
-        # a file full of guitar pitches (BUG-MIDI-6).
-        tr_guitar = self._transcribe(guitar_stem)
-        tr_bass = self._transcribe(bass_stem)
+        # Transcription per stem (H-8: bass gets its own transcription)
+        guitar_tr = self._transcribe(guitar_stem)
+        bass_tr = self._transcribe(bass_stem)
+        self._ensure_finite(guitar_tr, "guitar")
+        self._ensure_finite(bass_tr, "bass")
 
-        outputs = self._build_outputs(
-            audio, guitar_stem, bass_stem, sep_metrics, tr_guitar, tr_bass
+        guitar_meta, guitar_conf = self._enhance(guitar_tr, guitar_stem)
+        bass_meta, bass_conf = self._enhance(bass_tr, bass_stem)
+
+        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
+
+        midi_metadata = {
+            "guitar": guitar_meta,
+            "bass": bass_meta,
+            "summary": {
+                "avg_confidence": avg_confidence,
+                "low_confidence_count": (
+                    guitar_meta["summary"]["low_confidence_count"]
+                    + bass_meta["summary"]["low_confidence_count"]
+                ),
+                "alignment_warnings": (
+                    guitar_meta["summary"]["alignment_warnings"]
+                    + bass_meta["summary"]["alignment_warnings"]
+                ),
+            },
+        }
+
+        # 3. Processing report for quality gating (batch element 0 — B=1 is the
+        #    supported inference shape; M-12)
+        report = ProcessingReport(
+            centroid_separation_db=sep_metrics[0, 0].item(),
+            phase_coherence=sep_metrics[0, 1].item(),
+            avg_confidence=avg_confidence,
+            artifact_flags=self._detect_artifacts(guitar_stem, bass_stem),
+            low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            config=self.cfg,
+            backend=self.backend_name,
         )
-        onset_logits = tr_guitar[0]
 
-        # 3. Compute loss if targets provided (training mode)
+        routing = route_by_quality(report)
+
+        outputs = {
+            "guitar_stem": guitar_stem,
+            "bass_stem": bass_stem,
+            "midi_metadata": midi_metadata,  # {"guitar": …, "bass": …, "summary": …}
+            "processing_report": report,
+            "routing_decision": routing,
+        }
+
+        # 4. Compute loss if targets provided (training mode). Pitch and
+        #    velocity targets are wired through (C-3); the expression and
+        #    confidence heads remain untrained — no dataset emits those
+        #    targets yet (see TODO ARCH-11.4.4 / ARCH-11.6).
         if target_guitar is not None and target_bass is not None:
             loss, loss_dict = self.loss_fn(
                 pred_stems=[guitar_stem, bass_stem],
                 target_stems=[target_guitar, target_bass],
-                pred_onsets=onset_logits,
-                target_onsets=self._prepare_onset_target(target_onsets, onset_logits),
+                pred_onsets=guitar_tr["onset_logits"],
+                target_onsets=self._prepare_onset_target(target_onsets, guitar_tr["onset_logits"]),
+                pred_pitch_logits=guitar_tr["pitch_logits"],
+                target_pitches=self._prepare_pitch_target(target_pitch, guitar_tr["pitch_logits"]),
+                pred_velocities=guitar_tr["velocity"],
+                target_velocities=self._prepare_velocity_target(
+                    target_velocity, guitar_tr["velocity"]
+                ),
             )
             outputs["loss"] = loss
             outputs["loss_dict"] = loss_dict
 
         return outputs
+
+    def _enhance(self, tr: dict, stem: torch.Tensor) -> tuple[dict, torch.Tensor]:
+        """Convert a transcription dict into injector-enhanced MIDI metadata."""
+        confidence = tr["confidence"]
+        events = None
+        if tr.get("events"):
+            events = tr["events"][0]  # B=1 in production paths
+        elif tr["onset_logits"] is not None:
+            events = self._logits_to_midi(
+                tr["onset_logits"], tr["pitch_logits"], tr["velocity"], confidence
+            )
+        enhanced = self.confidence_injector.inject_midi_metadata(
+            events or [],
+            confidence.reshape(-1),
+            self._frame_energy(stem).reshape(-1),
+        )
+        return enhanced, confidence
+
+    # ------------------------------------------------------------------
+    # Target preparation (C-3)
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _prepare_onset_target(
@@ -315,117 +302,166 @@ class StemMidiModel(nn.Module):
             t = torch.nn.functional.pad(t, (0, n_pred - t.shape[1]))
         return t
 
+    @staticmethod
+    def _prepare_pitch_target(
+        target_pitch: torch.Tensor | None, pitch_logits: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Coerce pitch targets to (B, T) class indices for ``pitch_ce_loss_fn``.
+
+        Accepts one-hot (B, T, V) / collated (B, 1, T, V) tensors (frames with
+        an all-zero row become ``ignore_index`` = -100, so frames without a
+        labeled pitch are excluded from the loss) and already-class-index
+        (B, T) tensors. Out-of-range values are ignored, not clamped (M-1).
+        """
+        if target_pitch is None:
+            return None
+        vocab = pitch_logits.shape[-1]
+        n_pred = pitch_logits.shape[1]
+        t = target_pitch
+        if t.dim() == 4 and t.shape[1] == 1:
+            t = t.squeeze(1)
+        if t.dim() == 3 and t.shape[-1] == vocab:
+            valid = t.sum(dim=-1) > 0
+            t = t.argmax(dim=-1).masked_fill(~valid, -100)
+        elif t.dim() > 2:
+            t = t.reshape(t.shape[0], -1)
+        t = t.long()
+        if t.shape[1] > n_pred:
+            t = t[:, :n_pred]
+        elif t.shape[1] < n_pred:
+            t = F.pad(t, (0, n_pred - t.shape[1]), value=-100)
+        return t
+
+    @staticmethod
+    def _prepare_velocity_target(
+        target_velocity: torch.Tensor | None, velocity_pred: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Coerce velocity targets onto the prediction grid (B, T, 1).
+
+        Velocity targets are only defined at onset frames; padding with 0
+        marks padded frames as "no target", which the masked velocity MAE
+        excludes (C-3).
+        """
+        if target_velocity is None:
+            return None
+        v = target_velocity.float()
+        if v.dim() == 4 and v.shape[1] == 1:
+            v = v.squeeze(1)
+        if v.dim() == 2:
+            v = v.unsqueeze(-1)
+        n_pred = velocity_pred.shape[1]
+        if v.shape[1] > n_pred:
+            v = v[:, :n_pred]
+        elif v.shape[1] < n_pred:
+            # pad the FRAME dim (-2), not the value dim (-1)
+            v = F.pad(v, (0, 0, 0, n_pred - v.shape[1]), value=0.0)
+        return v.reshape(velocity_pred.shape[0], -1, velocity_pred.shape[-1])
+
+    # ------------------------------------------------------------------
+    # Training/validation step contracts
+    # ------------------------------------------------------------------
+
     def training_step(self, batch, batch_idx):
         """One training step for the plain-PyTorch loop in train.py (RF-3.1.9).
 
         Returns a dict with ``loss`` plus per-component values under
         ``loss_dict`` (no Lightning ``self.log`` — the caller logs).
         """
-        audio = batch["audio"]
-        targets = {
-            "target_guitar": batch["target_guitar"],
-            "target_bass": batch["target_bass"],
-            "target_onsets": batch["target_onsets"],
-            "target_pitch": batch["target_pitch"],
-        }
-
-        outputs = self.forward(audio, **targets)
-        return {"loss": outputs["loss"], "loss_dict": outputs["loss_dict"]}
+        return self._step_from_batch(batch)
 
     def validation_step(self, batch, batch_idx):
         """Validation step; same return contract as training_step."""
-        audio = batch["audio"]
-        targets = {
-            "target_guitar": batch["target_guitar"],
-            "target_bass": batch["target_bass"],
-            "target_onsets": batch["target_onsets"],
-            "target_pitch": batch["target_pitch"],
-        }
+        return self._step_from_batch(batch)
 
-        outputs = self.forward(audio, **targets)
+    def _step_from_batch(self, batch) -> dict:
+        outputs = self.forward(
+            batch["audio"],
+            target_guitar=batch["target_guitar"],
+            target_bass=batch["target_bass"],
+            target_onsets=batch["target_onsets"],
+            target_pitch=batch["target_pitch"],
+            target_velocity=batch.get("target_velocity"),
+        )
         return {"loss": outputs["loss"], "loss_dict": outputs["loss_dict"]}
+
+    # ------------------------------------------------------------------
+    # Decoding
+    # ------------------------------------------------------------------
 
     def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence):
         """Convert network outputs to a FLAT MIDI event list.
 
-        Vectorized with torch.nonzero (RF-3.1.6). Assumes B=1 for inference.
+        Onset peak-picking (H-6): sigmoid probability is thresholded and an
+        event fires at each RISING EDGE (first frame of an above-threshold
+        run). A new onset can only fire after
+        ``transcriber.onset_refractory_frames`` (default 4 ≈ 46 ms at 86 fps)
+        consecutive below-threshold frames, so one physical onset whose
+        activation plateaus for many frames — or wiggles across the
+        threshold — emits ONE note_on, not several. Same-pitch duplicates
+        are also dropped downstream, but without peak-picking a jittered
+        argmax pitch mid-burst (e.g. 45,45,52,45) leaks a spurious extra
+        note. Velocity/confidence are sampled at the crossing frame.
 
-        A greedy refractory window (``transcriber.min_onset_interval_ms``,
-        default 50 ms) is applied so that a single attack — which lights up
-        several consecutive frames because the onset head is smooth — becomes
-        one note. Without it a monophonic phrase produced ~87 notes/second
-        (BUG-MIDI-7), which is neither playable nor editable.
+        Single argmax pitch per onset frame — chords/polyphony are not
+        modeled by this head layout (see MambaTranscriber docstring).
+        Assumes B=1 for inference; batch >1 still returns all batches' events
+        with onset frames as-is. ``onset_refractory_frames: 0`` disables the
+        suppression entirely (every above-threshold frame fires — the
+        pre-H-6 behavior).
         """
-        if onset_logits is None:
-            return []
-        threshold = self.cfg["transcriber"].get("onset_threshold", 0.5)
-        onsets = (torch.sigmoid(onset_logits) > threshold).squeeze(-1)
+        onset_prob = torch.sigmoid(onset_logits).squeeze(-1)  # (B, T)
+        refractory = int(self.cfg["transcriber"].get("onset_refractory_frames", 4))
+        candidates = torch.nonzero(
+            onset_prob > self.cfg["transcriber"].get("onset_threshold", 0.5)
+        )  # (N, 2): [batch_idx, frame], sorted by batch then frame
         pitches = torch.argmax(pitch_logits, dim=-1)
         vel_values = (velocity * 127).long().squeeze(-1)
 
-        hits = torch.nonzero(onsets)  # (N, 2): [batch_idx, frame]
         events = []
-        last_frame = -(10**9)
-        gap = int(getattr(self, "min_onset_interval_frames", 1))
-        for b, t in hits.tolist():
-            if t - last_frame < gap:
-                continue  # same attack, already emitted
-            last_frame = t
+        last_above: dict[int, int] = {}  # batch -> last candidate frame seen
+        for b, t in candidates.tolist():
+            if b not in last_above:
+                accepted = True  # first above-threshold frame of the batch
+            else:
+                # below-threshold frames between this candidate and the
+                # previous one; a rising edge needs >= refractory of them
+                below_gap = t - last_above[b] - 1
+                accepted = below_gap >= refractory
+            last_above[b] = t
+            if not accepted:
+                continue
             events.append(
                 {
-                    "note": int(pitches[b, t].item()),
-                    "onset_frame": int(t),
-                    "velocity": int(vel_values[b, t].item()),
-                    "confidence": float(confidence[b, t].item()),
+                    "note": pitches[b, t].item(),
+                    "onset_frame": t,
+                    "velocity": vel_values[b, t].item(),
+                    "confidence": confidence[b, t].item(),
                 }
             )
         return events
 
-    def _detect_artifacts(
-        self,
-        guitar: torch.Tensor,
-        bass: torch.Tensor,
-        source: torch.Tensor | None = None,
-    ) -> list[str]:
-        """Detect input- and output-level defects for the quality gate.
+    def _detect_artifacts(self, guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:
+        """Simple artifact detection for quality gating"""
+        flags = []
 
-        ``source`` is the mix that was uploaded. Checking it (rather than only
-        the separated stems) is what lets the gate see the two most common bad
-        uploads: digital silence, and a hard-clipped DI, which comes back
-        quieter after masking and previously passed unflagged.
-        """
-        flags: list[str] = []
-
-        # ---- input-level checks -------------------------------------------
-        if source is not None:
-            if float(source.abs().max()) < 1e-5:
-                flags.append("silence")
-            clipped = float((source.abs() >= 0.999).float().mean())
-            if clipped > 1e-3:
-                flags.append("clipping")
-            if float(source.mean().abs()) > 0.02:
-                flags.append("dc_offset")
-        elif max(float(guitar.abs().max()), float(bass.abs().max())) < 1e-5:
-            flags.append("silence")
-
-        # ---- output-level checks ------------------------------------------
-        # istft can overshoot 0 dBFS even for in-range input.
-        overshoot = float(guitar.abs().max()) > 0.99 or float(bass.abs().max()) > 0.99
-        if overshoot and "clipping" not in flags:
+        # Check for clipping
+        if guitar.abs().max() > 0.99 or bass.abs().max() > 0.99:
             flags.append("clipping")
 
-        guitar_power = torch.mean(guitar**2, dim=[1, 2])
-        bass_power = torch.mean(bass**2, dim=[1, 2])
-        if torch.any(guitar_power > 0.1) or torch.any(bass_power > 0.1):
+        # Check for excessive noise (simplified)
+        guitar_noise = torch.mean(guitar**2, dim=[1, 2])
+        bass_noise = torch.mean(bass**2, dim=[1, 2])
+        if torch.any(guitar_noise > 0.1) or torch.any(bass_noise > 0.1):
             flags.append("noise_floor")
 
-        # Near-perfect ANTI-correlation cancels when summed (C-2.8). Positive
-        # correlation is valid (shared fundamentals); sign matters.
+        # Check for phase cancellation: stems that are nearly perfectly
+        # ANTI-correlated cancel when summed (C-2.8). Positive correlation is
+        # valid (shared fundamentals); sign matters here.
         cross_corr = torch.sum(guitar * bass, dim=[1, 2])
         energy_guitar = torch.sum(guitar**2, dim=[1, 2])
         energy_bass = torch.sum(bass**2, dim=[1, 2])
         phase_corr = cross_corr / (torch.sqrt(energy_guitar * energy_bass) + 1e-8)
-        if torch.any(phase_corr < -0.9):
+        if torch.any(phase_corr < -0.9):  # near-perfect anti-correlation = cancellation
             flags.append("phase_cancellation")
 
         return flags if flags else ["none"]
@@ -451,95 +487,68 @@ class StemMidiModel(nn.Module):
             object.__setattr__(self, "_quantized_model", quantized)
         return quantized
 
-    def _infer(self, audio_t: torch.Tensor) -> dict:
-        """Run the pipeline, chunking long inputs to bound peak memory."""
-        chunk_seconds = float(self.cfg["audio"].get("chunk_duration_sec") or 0.0)
-        sr = int(self.cfg["audio"]["sample_rate"])
-        chunk_len = int(chunk_seconds * sr)
-        if chunk_len <= 0 or audio_t.shape[-1] <= chunk_len:
-            return self.forward(audio_t)
-        return self._forward_chunked(audio_t, chunk_len)
+    # ------------------------------------------------------------------
+    # File-level inference
+    # ------------------------------------------------------------------
 
-    def _forward_chunked(self, audio_t: torch.Tensor, chunk_len: int) -> dict:
-        """Process ``audio_t`` in ``chunk_len`` slices and recombine.
+    def _load_audio(self, path: str) -> tuple[np.ndarray, int]:
+        """Load audio via soundfile with a librosa fallback (M-8).
 
-        ``process_audio_file`` used to hand the whole file to the model, so peak
-        RSS grew ~23 MB per second of audio: 60 s -> 2346 MB, ~14 GB projected
-        for the 10-minute limit the API advertises (BUG-PERF-1). Chunking bounds
-        the working set to one ``chunk_duration_sec`` window.
-
-        Chunks overlap by ``audio.overlap_ratio`` and each contributes its first
-        ``hop`` samples, so the concatenation reconstructs the input length.
-        True SSM state passing between chunks is still not implemented (C-2.5),
-        so this bounds memory but does not make the model stateful.
+        Both failures are reported together so a corrupt file produces one
+        actionable error instead of a misleading secondary traceback.
+        Raises ValueError on non-finite samples.
         """
-        self._validate_audio(audio_t)
-        hop_length = int(self.cfg["audio"]["hop_length"])
-        overlap = int(chunk_len * float(self.cfg["audio"].get("overlap_ratio", 0.5)))
-        hop = max(1, chunk_len - overlap)
-        total = audio_t.shape[-1]
+        primary_error: Exception | None = None
+        if not os.path.exists(path):
+            # A missing file must surface as FileNotFoundError — not as a
+            # confusing librosa secondary failure (M-8).
+            raise FileNotFoundError(f"Audio file not found: {path!r}")
+        try:
+            import soundfile as sf
 
-        g_parts: list[torch.Tensor] = []
-        b_parts: list[torch.Tensor] = []
-        # Per-stem transcriber outputs, concatenated along the frame axis.
-        g_logits: dict[str, list[torch.Tensor]] = {"o": [], "p": [], "v": [], "e": [], "c": []}
-        b_logits: dict[str, list[torch.Tensor]] = {"o": [], "p": [], "v": [], "e": [], "c": []}
-        g_events: list[dict] = []
-        b_events: list[dict] = []
-        metrics_sum = None
-        throughput_events_only = False
-        pos = 0
+            audio, sr = sf.read(path)
+        except Exception as e:
+            primary_error = e
+            try:
+                import librosa
 
-        while pos < total:
-            end = min(pos + chunk_len, total)
-            chunk = audio_t[:, :, pos:end]
-            valid = chunk.shape[-1]
-            if valid < chunk_len:
-                chunk = torch.nn.functional.pad(chunk, (0, chunk_len - valid))
+                audio, sr = librosa.load(path, sr=None, mono=True)
+            except Exception as lib_err:
+                raise ValueError(
+                    f"Failed to load audio {path!r}: soundfile error: {primary_error}; "
+                    f"librosa fallback error: {lib_err}"
+                ) from lib_err
 
-            guitar, bass, _residual, _state, metrics = self._separate(chunk)
-            keep = min(valid if end >= total else hop, valid)
-            g_parts.append(guitar[:, :, :keep])
-            b_parts.append(bass[:, :, :keep])
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
+        audio = audio.astype(np.float32)
 
-            offset = pos // hop_length
-            for tr, logits, events in (
-                (self._transcribe(guitar[:, :, :keep]), g_logits, g_events),
-                (self._transcribe(bass[:, :, :keep]), b_logits, b_events),
-            ):
-                if tr[0] is None:  # events-only backend (e.g. Basic Pitch)
-                    throughput_events_only = True
-                    events.extend(
-                        {**e, "onset_frame": int(e["onset_frame"]) + offset}
-                        for e in (self._preset_events(tr[5]) or [])
-                    )
-                else:
-                    for key, part in zip(("o", "p", "v", "e", "c"), tr[:5], strict=False):
-                        logits[key].append(part)
+        max_seconds = float(
+            (self.cfg.get("audio") or {}).get("max_input_seconds", DEFAULT_MAX_INPUT_SECONDS)
+        )
+        duration = len(audio) / sr if sr > 0 else float("inf")
+        if duration > max_seconds:
+            raise ValueError(
+                f"Input duration {duration:.1f}s exceeds max_input_seconds="
+                f"{max_seconds:g}s (memory guard, see C-1/C-6). Split the file or "
+                "raise the limit explicitly in the config."
+            )
+        if not np.isfinite(audio).all():
+            raise ValueError(f"Audio {path!r} contains NaN/Inf samples; refusing to process.")
+        return audio, sr
 
-            metrics_sum = metrics if metrics_sum is None else metrics_sum + metrics
-            pos += hop
+    def _resample_to_target(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Anti-aliased resample via librosa/soxr (H-7).
 
-        n_chunks = len(g_parts)
-        guitar_stem = torch.cat(g_parts, dim=-1)
-        bass_stem = torch.cat(b_parts, dim=-1)
-        metrics = metrics_sum / n_chunks if metrics_sum is not None else guitar_stem.new_zeros(1, 2)
+        torch.nn.functional.interpolate(mode="linear") applies no anti-alias
+        filter and folds out-of-band content into the model's input band.
+        """
+        target_sr = int(self.cfg["audio"]["sample_rate"])
+        if sr == target_sr:
+            return audio
+        import librosa
 
-        def _joined(logits: dict[str, list[torch.Tensor]]):
-            if throughput_events_only or not logits["o"]:
-                return (None, None, None, None, None, None)
-            joined = tuple(torch.cat(logits[k], dim=1) for k in ("o", "p", "v", "e", "c"))
-            return (*joined, None)
-
-        tr_guitar = _joined(g_logits)
-        tr_bass = _joined(b_logits)
-        if throughput_events_only:
-            tr_guitar = (None, None, None, None, None, [g_events])
-            tr_bass = (None, None, None, None, None, [b_events])
-
-        outputs = self._build_outputs(audio_t, guitar_stem, bass_stem, metrics, tr_guitar, tr_bass)
-        outputs["chunks_processed"] = n_chunks
-        return outputs
+        return librosa.resample(y=audio, orig_sr=sr, target_sr=target_sr)
 
     def process_audio_file(self, audio_path: str, quantize: bool = False) -> dict:
         """
@@ -556,61 +565,14 @@ class StemMidiModel(nn.Module):
             return self._get_quantized_self().process_audio_file(audio_path, quantize=False)
 
         audio, sr = self._load_audio(audio_path)
-        if not np.isfinite(audio).all():
-            raise ValueError("input audio contains non-finite samples (NaN/Inf)")
-
+        audio = self._resample_to_target(audio, sr)
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)  # (1, 1, T)
 
-        # Sample-rate conversion must be band-limited: linear interpolation
-        # injected a -4 dB spectral image at 4.5 kHz for an 8 kHz upload
-        # (BUG-AUDIO-6), corrupting the mel input the transcriber sees.
-        target_sr = int(self.cfg["audio"]["sample_rate"])
-        if sr != target_sr:
-            audio_t = resample_audio(audio_t, sr, target_sr)
-            sr = target_sr
-
+        # Run inference
         with torch.inference_mode():
-            outputs = self._infer(audio_t)
+            outputs = self.forward(audio_t)
 
-        midi_guitar = outputs["midi_metadata"]["guitar"]
-        midi_bass = outputs["midi_metadata"]["bass"]
-
-        return {
-            "stems": {
-                "guitar": outputs["guitar_stem"].squeeze().cpu().numpy(),
-                "bass": outputs["bass_stem"].squeeze().cpu().numpy(),
-            },
-            "midi": outputs["midi_metadata"],
-            "midi_guitar": midi_guitar,
-            "midi_bass": midi_bass,
-            "report": outputs["processing_report"],
-            "routing": outputs["routing_decision"],
-            "sample_rate": sr,
-        }
-
-    def process_audio_streaming(self, audio_path: str, chunk_seconds: float = 2.0) -> dict:
-        """Streaming/chunked inference with a bounded memory footprint.
-
-        NOTE: chunks are processed independently and recombined at the waveform
-        level; true SSM state passing between chunks is not implemented yet
-        (C-2.5 / ARCH-11.8.1).
-
-        Pitch and velocity now come from the transcriber rather than from
-        ``torch.zeros``, which made every streamed note pitch 0 (C-1) at
-        velocity 1 (BUG-MIDI-8).
-        """
-        audio, sr = self._load_audio(audio_path)
-        target_sr = int(self.cfg["audio"]["sample_rate"])
-        audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
-        if sr != target_sr:
-            audio_t = resample_audio(audio_t, sr, target_sr)
-            sr = target_sr
-
-        chunk_len = max(1, int(chunk_seconds * target_sr))
-        self.eval()
-        with torch.inference_mode():
-            outputs = self._forward_chunked(audio_t, chunk_len)
-
+        # Format for user delivery (H-8: per-stem MIDI from per-stem stems)
         return {
             "stems": {
                 "guitar": outputs["guitar_stem"].squeeze().cpu().numpy(),
@@ -621,23 +583,144 @@ class StemMidiModel(nn.Module):
             "midi_bass": outputs["midi_metadata"]["bass"],
             "report": outputs["processing_report"],
             "routing": outputs["routing_decision"],
-            "sample_rate": sr,
-            "chunks_processed": outputs.get("chunks_processed", 1),
+            "sample_rate": self.cfg["audio"]["sample_rate"],
         }
 
-    def _load_audio(self, path: str) -> tuple[np.ndarray, int]:
-        """Load audio file using soundfile (or librosa as fallback)."""
-        try:
-            import soundfile as sf
+    def process_audio_streaming(self, audio_path: str, chunk_seconds: float = 2.0) -> dict:
+        """
+        Chunked inference: process audio in chunks and recombine.
 
-            audio, sr = sf.read(path)
-        except Exception:
-            import librosa
+        Recombination is a weighted overlap-add with complementary linear
+        crossfades over the overlap region (H-4). Chunks are separated
+        independently — SSM state does NOT carry between chunks (C-2.5 /
+        ARCH-11.8.1, planned); the crossfade hides the state-reset
+        discontinuity but boundary artifacts in the STEM AUDIO remain
+        possible. MIDI cannot duplicate boundary notes (ARCH-11.8.2
+        resolved by design): transcription runs ONCE on the recombined
+        full timeline (C-2), so per-chunk MIDI events do not exist to
+        deduplicate.
 
-            audio, sr = librosa.load(path, sr=None, mono=True)
-        if audio.ndim > 1 and audio.shape[1] > 1:
-            audio = audio.mean(axis=1)
-        return audio.astype(np.float32), sr
+        Transcription runs once on the recombined stems, so pitch/velocity/
+        confidence are real model outputs on the full timeline (C-2) and the
+        reported metrics are the mean of the per-chunk separator metrics (no
+        more hardcoded zeros forcing the COMPLEX tier).
+
+        Args:
+            audio_path: Path to input audio file
+            chunk_seconds: Duration of each chunk in seconds (default 2.0)
+
+        Returns:
+            Same format as process_audio_file (aggregated outputs)
+        """
+        audio, sr = self._load_audio(audio_path)
+        audio = self._resample_to_target(audio, sr)
+        audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
+        sr = int(self.cfg["audio"]["sample_rate"])
+
+        total_len = audio_t.shape[-1]
+        chunk_len = max(1, int(chunk_seconds * sr))
+        overlap_len = int(chunk_len * self.cfg["audio"].get("overlap_ratio", 0.5))
+        hop_len = chunk_len - overlap_len
+        if hop_len <= 0:
+            raise ValueError(
+                f"overlap_ratio {self.cfg['audio'].get('overlap_ratio')} leaves no hop "
+                f"(chunk {chunk_len}, overlap {overlap_len}); reduce overlap_ratio."
+            )
+
+        out_guitar = torch.zeros(1, 1, total_len)
+        out_bass = torch.zeros(1, 1, total_len)
+        weight_sum = torch.zeros(1, 1, total_len)
+        metrics_acc: list[torch.Tensor] = []
+        n_chunks = 0
+
+        self.eval()
+        with torch.inference_mode():
+            pos = 0
+            while pos < total_len:
+                end = min(pos + chunk_len, total_len)
+                chunk = audio_t[:, :, pos:end]
+                valid_len = end - pos
+
+                if valid_len < chunk_len:
+                    chunk = F.pad(chunk, (0, chunk_len - valid_len))
+
+                guitar, bass, sep_metrics = self._separate(chunk)
+
+                # Overlap-add weights (H-4): complementary linear crossfades
+                # over the shared overlap region; normalized by accumulated
+                # weights so any overlap/edge combination sums to 1.
+                w = torch.ones(1, 1, valid_len)
+                if pos > 0 and overlap_len > 0:
+                    fi = min(overlap_len, valid_len)
+                    w[:, :, :fi] *= torch.arange(1, fi + 1, dtype=torch.float32) / overlap_len
+                if end < total_len and overlap_len > 0:
+                    fo = min(overlap_len, valid_len)
+                    ramp = torch.arange(fo - 1, -1, -1, dtype=torch.float32) / overlap_len
+                    w[:, :, valid_len - fo :] *= ramp
+
+                out_guitar[:, :, pos:end] += guitar[:, :, :valid_len] * w
+                out_bass[:, :, pos:end] += bass[:, :, :valid_len] * w
+                weight_sum[:, :, pos:end] += w
+
+                metrics_acc.append(sep_metrics.detach().float().mean(dim=0))
+                pos += hop_len
+                n_chunks += 1
+
+        full_guitar = out_guitar / weight_sum.clamp(min=1e-8)
+        full_bass = out_bass / weight_sum.clamp(min=1e-8)
+
+        final_metrics = torch.stack(metrics_acc).mean(dim=0)  # (2,) real per-chunk mean
+
+        # Transcribe the recombined stems once — real logits on the full
+        # timeline (C-2), no per-chunk frame-grid drift.
+        guitar_tr = self._transcribe(full_guitar)
+        bass_tr = self._transcribe(full_bass)
+        self._ensure_finite(guitar_tr, "guitar")
+        self._ensure_finite(bass_tr, "bass")
+        guitar_meta, guitar_conf = self._enhance(guitar_tr, full_guitar)
+        bass_meta, bass_conf = self._enhance(bass_tr, full_bass)
+
+        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
+
+        midi_metadata = {
+            "guitar": guitar_meta,
+            "bass": bass_meta,
+            "summary": {
+                "avg_confidence": avg_confidence,
+                "low_confidence_count": (
+                    guitar_meta["summary"]["low_confidence_count"]
+                    + bass_meta["summary"]["low_confidence_count"]
+                ),
+                "alignment_warnings": (
+                    guitar_meta["summary"]["alignment_warnings"]
+                    + bass_meta["summary"]["alignment_warnings"]
+                ),
+            },
+        }
+
+        report = ProcessingReport(
+            centroid_separation_db=final_metrics[0].item(),
+            phase_coherence=final_metrics[1].item(),
+            avg_confidence=avg_confidence,
+            artifact_flags=self._detect_artifacts(full_guitar, full_bass),
+            low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            config=self.cfg,
+            backend=self.backend_name,
+        )
+
+        routing = route_by_quality(report)
+
+        return {
+            "stems": {
+                "guitar": full_guitar.squeeze().cpu().numpy(),
+                "bass": full_bass.squeeze().cpu().numpy(),
+            },
+            "midi": midi_metadata,
+            "report": report,
+            "routing": routing,
+            "sample_rate": sr,
+            "chunks_processed": n_chunks,
+        }
 
 
 def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -> StemMidiModel:
@@ -660,11 +743,7 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
     model = StemMidiModel(config=config)
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-    # train.py writes "state_dict"; accept the older "model_state_dict" too.
-    if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
-        state_dict = state_dict["model_state_dict"]
     model.load_state_dict(state_dict)
-    model.weights_loaded = True
     return model
 
 
@@ -702,7 +781,10 @@ def cli() -> None:
     # Print summary
     print("Processing complete!")
     print(f"Quality: {result['report'].quality_tier.value}")
-    print(f"Centroid separation (proxy, not SI-SDR): {result['report'].si_sdr:.1f}dB")
+    print(
+        f"Centroid separation (proxy, not SI-SDR): {result['report'].centroid_separation_db:.1f}dB"
+    )
+    print(f"Backend: {result['report'].backend}")
     print(f"Avg Confidence: {result['report'].avg_confidence:.0%}")
     print(f"Routing: {result['routing']['action']}")
 

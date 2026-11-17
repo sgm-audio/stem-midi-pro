@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Mamba-SSM backends (requires mamba_ssm)."""
+"""Mamba-SSM backends.
+
+These wrap the built-in Mamba modules. They do NOT require the
+``mamba_ssm`` CUDA package: on CPU targets the modules run the pure-PyTorch
+fallback in ``models/_mamba_compat.py`` (see ``MAMBA_BACKEND``)."""
 
 from __future__ import annotations
 

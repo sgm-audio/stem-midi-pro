@@ -12,31 +12,33 @@ class QualityTier(Enum):
 
 @dataclass
 class ProcessingReport:
-    # NOTE: `si_sdr` currently carries the spectral-centroid separation PROXY
-    # from MambaSeparator — not true SI-SDR (that needs ground truth and is
-    # only computed during training). Field name kept for compatibility with
-    # api.py / demo.py / processing-report templates; see C-2.6 in TODO.md.
-    si_sdr: float
+    # Renamed from `si_sdr` per C-2.6: this value is the spectral-centroid
+    # separation HEURISTIC from MambaSeparator (how spectrally distinct the
+    # stems are, in dB) — NOT true SI-SDR, which requires ground truth and is
+    # only computed during training (ARCH-11.3.2).
+    centroid_separation_db: float
     phase_coherence: float
     avg_confidence: float
     artifact_flags: list[str]
     low_confidence_notes: int
-    config: dict[str, Any] = None
-    # Provenance (BUG-WIRING-2 / BUG-HONESTY-1): which backends produced this
-    # report, and whether real weights were loaded. Without these a fake or
-    # randomly-initialised run is indistinguishable from a trained Demucs run.
-    backend: str = "unknown"
-    weights_loaded: bool = False
+    config: dict[str, Any] | None = None
+    # Which Mamba implementation / backend stack produced this result (M-7):
+    # "mamba (pure-torch)" vs "mamba (mamba-ssm)" vs a backend pair like
+    # "separator=demucs,transcriber=basic_pitch".
+    backend: str | None = None
 
     def __post_init__(self):
         gates = (self.config or {}).get("quality_gates", {})
         self.studio_confidence_threshold = gates.get("studio_confidence_threshold", 0.85)
         self.draft_confidence_threshold = gates.get("draft_confidence_threshold", 0.70)
-        self.min_si_sdr = gates.get("min_si_sdr", 20.0)
+        # `min_si_sdr` is the pre-rename key (C-2.6); accepted as legacy alias.
+        self.min_centroid_separation_db = gates.get(
+            "min_centroid_separation_db", gates.get("min_si_sdr", 20.0)
+        )
 
     @property
     def quality_tier(self) -> QualityTier:
-        # Artifact flags force COMPLEX regardless of confidence/SI-SDR
+        # Artifact flags force COMPLEX regardless of confidence/centroids
         # (ARCH-11.7): stellar numbers cannot make a clipped or
         # phase-cancelling render studio- or draft-quality.
         real_flags = [f for f in self.artifact_flags if f != "none"]
@@ -44,7 +46,7 @@ class ProcessingReport:
             return QualityTier.COMPLEX
         if (
             self.avg_confidence >= self.studio_confidence_threshold
-            and self.si_sdr >= self.min_si_sdr
+            and self.centroid_separation_db >= self.min_centroid_separation_db
         ):
             return QualityTier.STUDIO
         elif self.avg_confidence >= self.draft_confidence_threshold:

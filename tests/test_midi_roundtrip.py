@@ -34,7 +34,7 @@ def test_event_count_roundtrip(n_events):
     track = mid.tracks[0]
     note_ons = [m for m in track if m.type == "note_on"]
     note_offs = [m for m in track if m.type == "note_off"]
-    ccs = [m for m in track if m.type == "control_change" and m.control == 127]
+    ccs = [m for m in track if m.type == "control_change" and m.control == 16]
 
     assert len(note_ons) == n_events
     assert len(note_offs) == n_events
@@ -42,7 +42,7 @@ def test_event_count_roundtrip(n_events):
 
 
 def test_cc127_values_roundtrip():
-    """CC#127 values must match int(confidence*127) exactly after re-parse."""
+    """Legacy CC#127 values must match int(confidence*127) after re-parse."""
     confidences = [0.1, 0.5, 0.9, 1.0]
     events = [
         {
@@ -53,7 +53,7 @@ def test_cc127_values_roundtrip():
         }
         for i, c in enumerate(confidences)
     ]
-    midi_bytes = build_midi_from_events({"midi_events": events}, "bass")
+    midi_bytes = build_midi_from_events({"midi_events": events}, "bass", confidence_cc=127)
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
 
     ccs = [m.value for m in mid.tracks[0] if m.type == "control_change"]
@@ -71,7 +71,7 @@ def test_explicit_cc127_overrides_confidence():
             "cc_127_value": 42,
         }
     ]
-    midi_bytes = build_midi_from_events({"midi_events": events}, "guitar")
+    midi_bytes = build_midi_from_events({"midi_events": events}, "guitar", confidence_cc=127)
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
     ccs = [m.value for m in mid.tracks[0] if m.type == "control_change"]
     assert ccs == [42]

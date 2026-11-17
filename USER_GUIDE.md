@@ -57,7 +57,7 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 
 ```json
 {
-  "si_sdr": 21.3,
+  "centroid_separation_db": 21.3,
   "phase_coherence": 0.94,
   "avg_confidence": 0.89,
   "artifact_flags": [],
@@ -66,7 +66,7 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 }
 ```
 
-- **si_sdr** — separation-quality estimate in dB; higher is better, ≥ 20 dB is the "studio" bar. (Note: this is currently an internal estimate — see the project TODO, item C-2.6.)
+- **centroid_separation_db** — how spectrally distinct the two stems are, in dB; higher is better, ≥ 20 is the "studio" bar. (It is a heuristic, NOT true SI-SDR — real SI-SDR needs ground truth; renamed from `si_sdr` per C-2.6.)
 - **phase_coherence** — how phase-aligned the two stems are; closer to 1.0 is better.
 - **avg_confidence** — average transcription confidence (0–1).
 - **artifact_flags** — detected problems such as clipping.

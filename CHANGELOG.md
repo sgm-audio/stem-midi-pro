@@ -6,21 +6,6 @@ All notable changes to Stem+MIDI Pro. Currently maintained manually; release aut
 
 Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 
-### MIDI and inference correctness (test-suite audit + fixes)
-- **MIDI writer**: `ticks_per_second` was `480*(60/0.5)` = 57 600 instead of 960, so every note was written **60× too late** in the bar; chords were serialised into arpeggios because the delta cursor advanced past each `note_off`. Note events are now scheduled from absolute ticks and sorted (`utils/midi.py`).
-- `midi_to_targets` honours `set_tempo` per track instead of assuming 120 BPM.
-- `bass.mid` is transcribed from the bass stem (it was a copy of `guitar.mid`); `midi_guitar` / `midi_bass` are distinct dicts.
-- Onset refractory window (`transcriber.min_onset_interval_ms`, default 50 ms) caps note density at 20 notes/s; a single attack no longer becomes a burst.
-- `process_audio_streaming` keeps real pitch/velocity and per-chunk metrics (every streamed note used to be pitch 0 at velocity 1).
-- `needs_review` is confidence-driven, not loudness-driven; `low_confidence_count` counts notes (not frames); `summary.total_notes` added.
-- Input validation: non-finite samples and audio shorter than one STFT window raise `ValueError` → HTTP 400 (was 500 / silent NaN in `processing_report.json`).
-- Artifact flags now include input-level `silence`, `clipping` (a clipped DI used to pass unflagged) and `dc_offset`; silent input produces no note events.
-- Sample-rate conversion is band-limited (`utils/audio.resample_audio`); linear interpolation left a −4.4 dB image at 4.5 kHz for an 8 kHz upload.
-- `process_audio_file` chunks at `audio.chunk_duration_sec`, bounding peak memory (60 s upload: 2 346 MB → ~190 MB growth); adds 20–40% wall time for the overlap re-processing.
-- `StemMidiModel` builds backends via `models.backends.factory`, so `backends:` in a config is no longer ignored (`configs/model_config.cpu.yaml` selected demucs + basic_pitch but silently built Mamba). Configs naming an unavailable optional backend now fail loudly with an install hint.
-- Provenance: `ProcessingReport.backend` / `.weights_loaded`, `StemMidiModel.mamba_backend`, and `/model-info` expose which backends and Mamba implementation ran, and whether trained weights are loaded.
-- New test modules (`test_midi_timing`, `test_midi_usability`, `test_audio_adversarial`, `test_quality_gate_truthfulness`, `test_mamba_backend_honesty`, `test_backend_wiring`) and `docs/test-suite-audit.md`; suite 96 → 153 passing.
-
 ### Strategic decisions (TODO Section 0)
 - Consolidated on the v1 production path: `main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py`. Mamba-3 research code moved to `research/`.
 - Locked the platform: **CPU-only, bare-metal i5, Python 3.13**.

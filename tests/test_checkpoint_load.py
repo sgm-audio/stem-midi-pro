@@ -56,7 +56,7 @@ def test_load_from_checkpoint_accepts_model_state_dict_key(tmp_path):
             "studio_confidence_threshold": 0.85,
             "draft_confidence_threshold": 0.70,
             "min_confidence": 0.6,
-            "min_si_sdr": 20.0,
+            "min_centroid_separation_db": 20.0,
         },
     }
     cfg_path = tmp_path / "cfg.yaml"
@@ -120,7 +120,7 @@ def test_load_from_checkpoint_accepts_bare_state_dict(tmp_path):
             "studio_confidence_threshold": 0.85,
             "draft_confidence_threshold": 0.70,
             "min_confidence": 0.6,
-            "min_si_sdr": 20.0,
+            "min_centroid_separation_db": 20.0,
         },
     }
     cfg_path = tmp_path / "cfg.yaml"
@@ -135,11 +135,6 @@ def test_load_from_checkpoint_accepts_bare_state_dict(tmp_path):
 
 def test_lifespan_calls_module_load_from_checkpoint(tmp_path, monkeypatch):
     """api lifespan must call main.load_from_checkpoint(path, config_path), not instance method."""
-    # Same contract as the other API tests: skip, don't fail, when the web extra
-    # is absent. Without this the suite is red on a torch-only install, which
-    # makes "N passed, M skipped" non-reproducible between contributors.
-    pytest.importorskip("fastapi", reason="requires fastapi")
-    pytest.importorskip("httpx", reason="TestClient requires httpx")
     import api as api_mod
 
     cfg = {
@@ -170,7 +165,7 @@ def test_lifespan_calls_module_load_from_checkpoint(tmp_path, monkeypatch):
             "studio_confidence_threshold": 0.85,
             "draft_confidence_threshold": 0.70,
             "min_confidence": 0.6,
-            "min_si_sdr": 20.0,
+            "min_centroid_separation_db": 20.0,
         },
     }
     cfg_path = tmp_path / "model_config.yaml"
