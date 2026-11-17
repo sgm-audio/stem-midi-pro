@@ -44,7 +44,26 @@ jobs:
       # models/_mamba_compat.py and the Mamba path in main.py, i.e. the code that
       # ships to every CPU user. See tests/conftest.py + tests/honesty.py.
       - name: Run tests (CPU, honesty gates on)
-        run: pytest -m "not cuda" --strict-deps --fail-on-skip
+        run: |
+          set +e
+          pytest -m "not cuda" --strict-deps --fail-on-skip 2>&1 | tee /tmp/pytest.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            # Annotate the red test ids on the PR's Checks tab. The raw log is ~3k lines
+            # of xfails and warnings; a reviewer (or a sandbox that cannot fetch the
+            # artifact host) should not have to scroll it to learn WHICH test is red.
+            {
+              python -c "import sys, torch, numpy, pytest; print(f'py {sys.version.split()[0]} · torch {torch.__version__} · numpy {numpy.__version__} · pytest {pytest.__version__}')"
+              grep -E "^(FAILED|ERROR)" /tmp/pytest.log
+              grep -E "=+ .*(passed|failed|error).* =+" /tmp/pytest.log | tail -1
+            } | head -12 | while IFS= read -r line; do
+              # Only GitHub's control sequences need escaping in an annotation MESSAGE
+              # (% and the line breaks); colons are only special in the key=value part.
+              printf '::error::%s\n' "$(printf '%s' "$line" | cut -c1-200 | tr -d '\r' | sed 's/%/%25/g')"
+            done
+          fi
+          exit "$status"
       # Coverage gate is aspirational (T-8.4.1) and deliberately separate, so a
       # thin-coverage warning can never mask a failing assertion. Remove
       # `continue-on-error` once the number in .codecov.yml is reachable.
