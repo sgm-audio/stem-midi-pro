@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for MIDI generation from metadata (T-8.2.4 — no skip markers).
 
-Covers: empty events, multi-event ordering, CC#127 values, round-trip parse.
+Covers: empty events, multi-event ordering, note-specific confidence values, round-trip parse.
 Uses utils/midi.py:build_midi_from_events (post RF-3.1.3 rename; the old
 api.create_placeholder_midi is identical behavior pre-refactor).
 """
@@ -60,15 +60,16 @@ def test_multi_event_ordering():
     assert times == sorted(times)
 
 
-def test_cc127_confidence_values():
-    """Each note event must carry a CC#127 message with the confidence value."""
+def test_note_specific_confidence_values():
+    """Each note event carries confidence as note-specific poly pressure."""
     events = _events(3)
     data = {"midi_events": events, "summary": {}}
     mid = _parse(build_midi_from_events(data, "bass"))
 
-    ccs = [m for m in mid.tracks[0] if m.type == "control_change" and m.control == 127]
-    assert len(ccs) == 3
-    assert [m.value for m in ccs] == [e["cc_127_value"] for e in events]
+    pressures = [m for m in mid.tracks[0] if m.type == "polytouch"]
+    assert len(pressures) == 3
+    assert [m.value for m in pressures] == [e["cc_127_value"] for e in events]
+    assert not [m for m in mid.tracks[0] if m.type == "control_change" and m.control == 127]
 
 
 def test_midi_roundtrip_parse():

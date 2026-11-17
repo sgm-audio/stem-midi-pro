@@ -69,8 +69,8 @@ def main():
 
     # Processing report
     report = outputs["processing_report"]
-    print("\nProcessing Report:")
-    print(f"  SI-SDR: {report.si_sdr:.1f} dB")
+    print("\nProcessing Report (random-weight structural smoke test only):")
+    print(f"  Separation proxy (not SI-SDR): {report.separation_proxy:.1f}")
     print(f"  Phase Coherence: {report.phase_coherence:.3f}")
     print(f"  Avg Confidence: {report.avg_confidence:.0%}")
     print(f"  Artifact Flags: {report.artifact_flags}")

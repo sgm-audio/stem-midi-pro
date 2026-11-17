@@ -1,8 +1,8 @@
 # Stem+MIDI Pro Architecture
 
-> **Status legend (2026-06 audit):** each section is tagged `[IMPLEMENTED]`, `[PARTIAL]`, `[PLANNED]`, or `[REMOVED]`. `[PLANNED]` items are tracked in [TODO.md](TODO.md), Sections 2–12.
+> **Status legend (2026-11 remediation):** each section is tagged `[IMPLEMENTED]`, `[PARTIAL]`, `[PLANNED]`, or `[REMOVED]`. `[PLANNED]` items are tracked in [TODO.md](TODO.md), Sections 2–12. `[IMPLEMENTED]` describes code contracts, not trained-model quality.
 >
-> **Target platform (locked):** CPU-only, bare-metal Intel i5, 4–8 GB RAM, Python 3.13. All CUDA-specific content below (TensorRT-LLM, CUDA graphs, GPU scaling, FP8) describes the original design and is retained for historical context only — it is not the production path.
+> **Target platform (declared, not benchmark-certified):** CPU-only, bare-metal Intel i5, 4–8 GB RAM, Python 3.13. All CUDA-specific content below (TensorRT-LLM, CUDA graphs, GPU scaling, FP8) describes the original design and is retained for historical context only — it is not the production path. No trained project checkpoint is shipped.
 >
 > **License:** Apache License 2.0 — see [LICENSE](LICENSE).
 
@@ -47,7 +47,8 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 - **Features**:
   - File validation (format, duration, sample rate) via single `sf.SoundFile` open
   - Secure temporary file handling (deleted on all exception paths)
-  - ZIP response packaging
+  - ZIP response packaging with the configured audio sample rate and independent MIDI streams
+  - Requires a validated project checkpoint for native Mamba, or the explicit pretrained Demucs + Basic Pitch profile; missing/unavailable weights keep `/ready` at 503
   - CORS middleware (credentials disabled when `*`)
   - Concurrency cap (`asyncio.Semaphore(1)`, 503 + `Retry-After`)
   - API-key auth (`Authorization: Bearer`, `/process` only)
@@ -55,8 +56,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ### 2. Processing Orchestrator (Embedded in `main.py`) [IMPLEMENTED]
 - Handles the end-to-end processing pipeline
-- Manages model state and inference mode
-- Coordinates between separation and transcription modules
+- Builds the configured separator/transcriber factory backends; unknown backends and missing optional dependencies fail explicitly
+- Runs transcription independently on guitar and bass stems
+- Manages model state and inference mode; file inference rejects random initialization
 - Applies quality gating and routing logic
 
 ### 3. Model Inference (`main.py` - StemMidiModel) [IMPLEMENTED]
@@ -66,12 +68,13 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 - **Key Features**:
   - Training/validation step compatibility (`training_step`, `validation_step`)
   - Explicit shape assertions in `forward`
-  - Checkpoint loading and saving (`load_from_checkpoint`, `train.py` best/last checkpoints)
+  - Checkpoint loading and saving (`load_from_checkpoint`, `train.py` best/last checkpoints); native-Mamba file inference is blocked until a project checkpoint is loaded, while the explicit pretrained backend pair must attest to its own weights
+  - Explicit development/test-only opt-in for random-weight file inference (`allow_untrained_inference`)
   - fp32 precision on CPU target
 
 ### 4. Separation Module (`models/mamba_separator.py`) [IMPLEMENTED]
 
-> Defects C-2.1 (invalid Mamba kwargs), C-2.5 (state cache removed/documented), C-2.8 (inverted phase-cancellation check) fixed 2026-10-07. C-2.6 remains: the `si_sdr` field is a spectral-centroid proxy, not true SI-SDR (needs ground truth).
+> The first separator metric is `centroid_separation_proxy`; it is a heuristic score and not reference-based SI-SDR or dB certification. A deprecated `si_sdr` compatibility alias may appear in reports, but routing uses the named proxy. C-2.5 state caching remains planned.
 - **Architecture**: 12-layer Mamba-SSM
 - **Input**: Raw audio waveform (B, C, T)
 - **Processing**:
@@ -83,14 +86,14 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 - **Output**:
   - Separated guitar and bass stems (B, C, T)
   - Residual stem
-  - SSM state cache for streaming
-  - Metrics (SI-SDR estimate, phase coherence)
+  - No SSM state cache yet; each streaming chunk restarts state
+  - Metrics (`centroid_separation_proxy`, phase coherence)
 
-### 5. Transcription Module (`models/mamba_transcriber.py`) [IMPLEMENTED]
+### 5. Transcription Module (`models/mamba_transcriber.py`) [PARTIAL]
 
-> Defects C-2.2 (`self.cfg` now assigned in `__init__`) and C-2.9 (mel basis built once as a registered buffer) fixed 2026-10-07. C-2.10: MC-dropout confidence is eval-only, made explicit via `mc_dropout_eval`. Expression head exists but is untrained (ARCH-11.4.4).
+> Native Mamba and configured backend transcribers are called once per separated stem. MC-dropout confidence is eval-only, made explicit via `mc_dropout_eval`. The expression head exists and is serialized when present, but its musical quality is untrained/unverified here.
 - **Architecture**: 8-layer Mamba-SSM
-- **Input**: Separated guitar stem (could also process bass)
+- **Input**: Each separated guitar and bass stem independently
 - **Processing**:
   - Mel-spectrogram transformation
   - Linear projection to Mamba dimension
@@ -105,8 +108,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
   - Onset logits (B, T, 1)
   - Pitch logits (B, T, 128)
   - Velocity predictions (B, T, 1)
-  - Expression predictions (B, T, 3)
-  - Confidence scores (B, T)
+  - Expression predictions (B, T, 3), mapped to pitch-wheel/CC1/CC74 when emitted
+  - Confidence scores (B, T), attached only to emitted notes
+  - Backend note events may include explicit duration frames
 
 ### 6. Confidence Injection (`models/confidence_injector.py`) [IMPLEMENTED]
 - **Purpose**: Add metadata to MIDI events for user transparency
@@ -114,7 +118,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
   - Align MIDI onsets with stem energy
   - Compute per-note confidence scores
   - Flag low-confidence notes for review
-  - Generate DAW-friendly metadata (CC#127 values)
+  - Generate canonical JSON note metadata (`confidence`, `stem_energy`, alignment, review flag)
+  - Encode confidence as MIDI Polyphonic Key Pressure; this is standard note-specific MIDI but DAW interpretation varies
+  - Retain `cc_127_value` only as a deprecated JSON compatibility alias; CC#127 is not emitted
   - Suggest quantization strategy (grid vs human feel)
 
 ### 7. Loss Functions (`models/losses.py`) [IMPLEMENTED]
@@ -130,9 +136,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ### 8. Quality Gates (`utils/quality_gates.py`) [IMPLEMENTED]
 - **Three-Tier System**:
-  1. **Studio**: Confidence ≥0.85 AND SI-SDR ≥20dB → Direct download
-  2. **Draft**: 0.70 ≤ confidence < 0.85 → Prompt for editing
-  3. **Complex**: confidence <0.70 OR artifacts → Fallback options
+  1. **Studio**: Confidence ≥0.85 AND centroid-separation proxy ≥20 → heuristic gate only; never a SI-SDR certification
+  2. **Draft**: 0.70 ≤ confidence < 0.85 → manual DAW review
+  3. **Complex**: confidence <0.70, artifacts, or untrained weights → manual DAW review/raw-output options
 - **Artifact Detection**:
   - Clipping detection (sample values >0.99)
   - Noise floor estimation
@@ -140,7 +146,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ### 9. Streaming Inference Capabilities [PARTIAL]
 
-> C-2.5 fixed: the fake activation-concat state cache was removed; chunked inference (`process_audio_streaming`) restarts Mamba state per chunk and recombines by overlap-add at the waveform level. True SSM state passing between chunks is ARCH-11.8.1 (planned). CUDA graph capture is not applicable on the CPU-only target.
+> The fake activation-concat state cache was removed. Chunked inference (`process_audio_streaming`) restarts Mamba state per chunk, applies a normalized waveform overlap-add, and translates local note events to global frame positions. True SSM state passing between chunks is ARCH-11.8.1 (planned). CUDA graph capture is not applicable on the CPU-only target.
 - **Chunked Processing**: 2-second segments with configurable overlap
 - **State Caching**: None between chunks (state restarts per chunk — documented limitation)
 - **Overlap-Add**: Waveform-level recombination at chunk boundaries
@@ -149,7 +155,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ## Data Flow [IMPLEMENTED with caveats]
 
-> Steps match the current pipeline; the metrics in step 2 use the centroid-proxy SI-SDR (TODO C-2.6).
+> Steps match the current pipeline; step 2 uses the explicitly named centroid-separation proxy. It is not SI-SDR and cannot certify separation quality without reference stems.
 
 1. **Input Validation**:
    - API validates file format, duration, sample rate
@@ -162,15 +168,17 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
    - Selective SSM blocks → Hidden states
    - Multi-head → Stem masks
    - ISTFT → Separated audio stems
-   - Metrics computation (SI-SDR proxy, phase coherence)
+   - Metrics computation (centroid-separation proxy, phase coherence)
 
 3. **Transcription**:
-   - Mel-spectrogram of guitar stem
+   - Mel-spectrogram of each guitar and bass stem independently
    - Linear projection → Mamba input
    - SSM processing → Hidden states
    - Multi-task heads → Onset, pitch, velocity, expression, confidence
-   - Thresholding → MIDI events
-   - Confidence injection → Metadata enrichment
+   - Thresholding → independent MIDI event lists with absolute frame positions
+   - Duration-aware scheduling → overlapping notes and same-onset chords
+   - Expression mapping → pitch-wheel, CC1, and CC74 when expression fields exist
+   - Confidence injection → note-level JSON plus Polyphonic Key Pressure
 
 4. **Quality Assessment**:
    - Compile processing report
@@ -388,7 +396,7 @@ The architecture supports Canadian artist data through:
 ### Metrics Collected
 - Processing latency (end-to-end and per-stage)
 - Resource utilization (GPU, CPU, memory)
-- Quality metrics (SI-SDR, confidence, artifact rates)
+- Quality metadata (centroid-separation proxy, confidence, artifact rates); reference SI-SDR remains an evaluation task
 - User interaction data (edits, refinements, feedback)
 - Error rates and failure modes
 
@@ -406,7 +414,7 @@ The architecture supports Canadian artist data through:
 
 ## Future Enhancements [PLANNED]
 
-> TensorRT-LLM and web-based MIDI editor entries below are superseded: TensorRT-LLM is removed (CPU target) and refinement is DAW-based via CC#127 confidence, not a web editor.
+> TensorRT-LLM and web-based MIDI editor entries below are superseded: TensorRT-LLM is removed (CPU target) and refinement is DAW-based via JSON confidence plus note-specific Polyphonic Key Pressure, not a web editor.
 
 ### Short Term
 - TensorRT-LLM export with custom kernel registration

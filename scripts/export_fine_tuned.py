@@ -49,8 +49,13 @@ def main():
     model = StemMidiModel(config)
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+    state_dict = (
+        ckpt.get("state_dict", ckpt.get("model_state_dict", ckpt))
+        if isinstance(ckpt, dict)
+        else ckpt
+    )
     model.load_state_dict(state_dict)
+    model.mark_weights_loaded()
     model.eval()
     log.info(
         f"Checkpoint loaded (epoch {ckpt.get('epoch', '?')}, "
@@ -71,7 +76,7 @@ def main():
         print("FINE-TUNED MODEL INFERENCE RESULTS")
         print("=" * 60)
         print(f"Quality tier: {result['report'].quality_tier.value}")
-        print(f"SI-SDR: {result['report'].si_sdr:.1f} dB")
+        print(f"Separation proxy (not SI-SDR): {result['report'].separation_proxy:.1f}")
         print(f"Avg confidence: {result['report'].avg_confidence:.0%}")
         print(f"Routing: {result['routing']['action']}")
         print(f"Artifacts: {result['report'].artifact_flags}")

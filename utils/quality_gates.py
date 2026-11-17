@@ -5,81 +5,107 @@ from typing import Any
 
 
 class QualityTier(Enum):
-    STUDIO = "studio"  # Confidence ≥0.85, SI-SDR ≥20dB
-    DRAFT = "draft"  # 0.70 ≤ confidence < 0.85
-    COMPLEX = "complex"  # <0.70 or artifact flags
+    STUDIO = "studio"  # Heuristic confidence/proxy threshold; not a measured studio grade.
+    DRAFT = "draft"  # 0.70 <= confidence < 0.85 or proxy below the studio threshold.
+    COMPLEX = "complex"  # <0.70 or artifact flags.
 
 
 @dataclass
 class ProcessingReport:
-    # NOTE: `si_sdr` currently carries the spectral-centroid separation PROXY
-    # from MambaSeparator — not true SI-SDR (that needs ground truth and is
-    # only computed during training). Field name kept for compatibility with
-    # api.py / demo.py / processing-report templates; see C-2.6 in TODO.md.
-    si_sdr: float
-    phase_coherence: float
-    avg_confidence: float
-    artifact_flags: list[str]
-    low_confidence_notes: int
-    config: dict[str, Any] = None
+    """Processing metrics and the conservative routing decision.
+
+    ``separation_proxy`` is intentionally named as a proxy. ``si_sdr`` is a
+    deprecated compatibility alias for older callers and is never presented as
+    a true reference-based SI-SDR measurement by the current code.
+    """
+
+    separation_proxy: float | None = None
+    phase_coherence: float = 0.0
+    avg_confidence: float = 0.0
+    artifact_flags: list[str] | None = None
+    low_confidence_notes: int = 0
+    config: dict[str, Any] | None = None
+    model_weights_loaded: bool | None = None
+    si_sdr: float | None = None  # deprecated input/output compatibility alias
 
     def __post_init__(self):
+        if self.separation_proxy is None:
+            self.separation_proxy = float(self.si_sdr or 0.0)
+        # Keep old integrations readable while ensuring all routing uses the
+        # explicitly named proxy field.
+        self.si_sdr = float(self.separation_proxy)
+        if self.artifact_flags is None:
+            self.artifact_flags = ["none"]
+        else:
+            self.artifact_flags = list(self.artifact_flags)
+        if self.model_weights_loaded is False and "untrained_weights" not in self.artifact_flags:
+            self.artifact_flags.append("untrained_weights")
+
         gates = (self.config or {}).get("quality_gates", {})
         self.studio_confidence_threshold = gates.get("studio_confidence_threshold", 0.85)
         self.draft_confidence_threshold = gates.get("draft_confidence_threshold", 0.70)
-        self.min_si_sdr = gates.get("min_si_sdr", 20.0)
+        self.min_separation_proxy = gates.get(
+            "min_separation_proxy", gates.get("min_si_sdr", 20.0)
+        )
+        # Deprecated config alias for callers that inspect the object.
+        self.min_si_sdr = self.min_separation_proxy
 
     @property
     def quality_tier(self) -> QualityTier:
-        # Artifact flags force COMPLEX regardless of confidence/SI-SDR
-        # (ARCH-11.7): stellar numbers cannot make a clipped or
-        # phase-cancelling render studio- or draft-quality.
+        # Artifact flags force COMPLEX regardless of confidence/proxy.
         real_flags = [f for f in self.artifact_flags if f != "none"]
         if real_flags:
             return QualityTier.COMPLEX
         if (
             self.avg_confidence >= self.studio_confidence_threshold
-            and self.si_sdr >= self.min_si_sdr
+            and self.separation_proxy >= self.min_separation_proxy
         ):
             return QualityTier.STUDIO
-        elif self.avg_confidence >= self.draft_confidence_threshold:
+        if self.avg_confidence >= self.draft_confidence_threshold:
             return QualityTier.DRAFT
-        else:
-            return QualityTier.COMPLEX
+        return QualityTier.COMPLEX
 
 
 def route_by_quality(report: ProcessingReport) -> dict[str, Any]:
-    """
-    Returns user-facing routing decision + UI prompts.
+    """Return honest user-facing routing metadata.
+
+    There is no built-in editor, human-review service, payment flow, or refund
+    system in this repository. Routing therefore points the user to their DAW
+    instead of advertising nonexistent services.
     """
     if report.quality_tier == QualityTier.STUDIO:
         return {
             "action": "direct_download",
-            "badge": "✨ Studio Quality",
-            "message": "Your stems and MIDI are ready for professional use.",
+            "badge": "Heuristic quality gate passed",
+            "message": (
+                "Your stems and MIDI passed the configured heuristic gate. "
+                "Verify them against the source before final use."
+            ),
             "editor_launch": False,
         }
-    elif report.quality_tier == QualityTier.DRAFT:
+    if report.quality_tier == QualityTier.DRAFT:
         return {
-            "action": "editor_launch",
-            "badge": "✏️ Draft Quality",
+            "action": "manual_review",
+            "badge": "Draft quality",
             "message": (
-                f"MIDI confidence: {report.avg_confidence:.0%}. Refine in our editor before export."
+                f"MIDI confidence: {report.avg_confidence:.0%}. "
+                "Review and refine the output in your DAW."
             ),
-            "editor_launch": True,
+            "editor_launch": False,
+            "review_in_daw": True,
             "editor_presets": {
                 "highlight_low_confidence": True,
                 "default_quantization": "human" if report.avg_confidence < 0.80 else "grid",
             },
         }
-    else:  # COMPLEX
-        return {
-            "action": "fallback_options",
-            "badge": "⚠️ Complex Material",
-            "message": "Heavy processing detected. Choose your path:",
-            "options": [
-                {"id": "raw", "label": "Download raw output (free)", "confidence_overlay": True},
-                {"id": "human", "label": "Human-reviewed refinement (+$4.99, 24h)", "upsell": True},
-                {"id": "cancel", "label": "Cancel with full credit refund", "refund": True},
-            ],
-        }
+    return {
+        "action": "manual_review",
+        "badge": "Complex material",
+        "message": "Artifacts or low confidence were detected; review the raw output in your DAW.",
+        "review_in_daw": True,
+        "options": [
+            {"id": "raw", "label": "Download raw output", "confidence_overlay": True},
+            {"id": "human", "label": "Review and edit in your DAW"},
+            {"id": "cancel", "label": "Discard this output"},
+        ],
+    }

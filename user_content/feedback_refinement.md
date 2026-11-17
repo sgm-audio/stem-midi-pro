@@ -1,6 +1,6 @@
 🛠️ Refine This Draft in Your DAW
-• Import the stems and MIDI — every note carries a CC#127 controller value with its confidence
-• Low-confidence notes (CC#127 < 64) are the ones to check first
+• Import the stems and MIDI — JSON event metadata is the canonical confidence overlay
+• Polyphonic Key Pressure values below 64 indicate lower confidence where your DAW exposes note pressure; CC#127 is not emitted
 • Adjust pitch, timing, and velocity by ear against the stems
 • Note durations follow the model's `duration_frames` output (configurable default when absent) — stretch/trim releases as needed
 

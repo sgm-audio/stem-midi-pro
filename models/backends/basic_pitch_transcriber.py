@@ -44,6 +44,9 @@ class BasicPitchTranscriberBackend:
         self.min_freq = tr_cfg.get("basic_pitch_min_freq")  # Hz or None
         self.max_freq = tr_cfg.get("basic_pitch_max_freq")
         self._instrument = "guitar"  # overridden per call via set_instrument
+        # Basic Pitch supplies its own pretrained inference model; this is not
+        # a randomly initialized project transcriber.
+        self.weights_loaded = True
 
     def set_instrument(self, name: str) -> None:
         """Hint frequency range: 'guitar' or 'bass'."""

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Mamba-SSM backends (requires mamba_ssm)."""
+"""Mamba backends using the native module and its CPU fallback."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ class MambaSeparatorBackend(nn.Module):
         from models.mamba_separator import MambaSeparator
 
         self.module = MambaSeparator(cfg)
+        self.weights_loaded = False
 
     def separate(self, audio: torch.Tensor) -> SeparateOut:
         guitar, bass, residual, _cache, metrics = self.module(audio)
@@ -39,6 +40,7 @@ class MambaTranscriberBackend(nn.Module):
         from models.mamba_transcriber import MambaTranscriber
 
         self.module = MambaTranscriber(cfg)
+        self.weights_loaded = False
 
     def set_instrument(self, name: str) -> None:
         pass

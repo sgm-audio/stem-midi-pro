@@ -1,15 +1,22 @@
-# NeMo ModelPT Config: Stem+MIDI Pro v1.0
+# StemMidiModel Config: Stem+MIDI Pro v1.0
 name: "stem_midi_mamba_v1"
 restore_from_path: null  # For fine-tuning
+
+# Explicit backend selection. The native Mamba implementation uses the
+# pure-PyTorch fallback when mamba_ssm is unavailable.
+backends:
+  separator: mamba
+  transcriber: mamba
+  device: cpu
 
 # Audio I/O
 audio:
   sample_rate: 44100
   n_fft: 2048
-  hop_length: 512        # ~11.6ms @ 44.1kHz → target <5ms via CUDA graph
+  hop_length: 512        # ~11.6ms @ 44.1kHz audio-frame grid; not a latency certification
   n_mels: 80
   chunk_duration_sec: 2.0
-  overlap_ratio: 0.5     # 50% overlap-add for phase coherence
+  overlap_ratio: 0.5     # 50% waveform overlap-add; boundary quality needs validation
 
 # Mamba Separator Architecture
 # (CPU-only target: mamba-ssm reference impl — no custom CUDA kernels)
@@ -56,7 +63,7 @@ quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
-  min_si_sdr: 20.0
+  min_separation_proxy: 20.0  # heuristic score; not dB SI-SDR
 
 # Export
 # [REMOVED: TensorRT-LLM export block — TensorRT-LLM requires CUDA; target is CPU-only]

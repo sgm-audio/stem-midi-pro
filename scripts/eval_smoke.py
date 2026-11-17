@@ -20,6 +20,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--audio", required=True, type=Path)
     p.add_argument("--config", default="configs/model_config.cpu.yaml", type=Path)
+    p.add_argument("--checkpoint", required=True, type=Path)
     args = p.parse_args()
 
     if not args.audio.is_file():
@@ -30,9 +31,10 @@ def main() -> int:
     with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    from main import StemMidiModel
+    from main import load_from_checkpoint
 
-    model = StemMidiModel(cfg)
+    checkpoint_path = args.checkpoint if args.checkpoint.is_absolute() else _ROOT / args.checkpoint
+    model = load_from_checkpoint(str(checkpoint_path), str(cfg_path))
     model.eval()
     result = model.process_audio_file(str(args.audio))
 
@@ -40,7 +42,7 @@ def main() -> int:
     g_events = result.get("midi_guitar", {}).get("midi_events", [])
     b_events = result.get("midi_bass", {}).get("midi_events", [])
     print(f"quality_tier={report.quality_tier.value}")
-    print(f"si_sdr_proxy={report.si_sdr:.2f}")
+    print(f"separation_proxy={report.separation_proxy:.2f}")
     print(f"avg_confidence={report.avg_confidence:.3f}")
     print(f"artifacts={report.artifact_flags}")
     print(f"guitar_notes={len(g_events)} bass_notes={len(b_events)}")

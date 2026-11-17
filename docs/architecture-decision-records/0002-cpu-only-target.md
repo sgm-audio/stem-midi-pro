@@ -9,7 +9,7 @@ The original design assumed NVIDIA H100/A100 GPUs with TensorRT-LLM, FP8, CUDA g
 
 ## Decision
 
-Drop all CUDA-only paths and dependencies: no `causal-conv1d`, no TensorRT-LLM export, no FP8. `mamba-ssm` runs via its pure-PyTorch reference implementation on CPU. Downsize model configs to fit 4–8 GB RAM. Accept the honest performance envelope: **~30–60 s of processing per minute of audio, one request at a time**.
+Drop all CUDA-only paths and dependencies: no `causal-conv1d`, no TensorRT-LLM export, no FP8. `mamba-ssm` runs via its pure-PyTorch reference implementation on CPU. Downsize model configs toward the 4–8 GB target. Keep one request at a time as the service contract, but treat any seconds-per-minute estimate as an evidence requirement: no reference-i5 performance number is certified until a trained-checkpoint benchmark is committed.
 
 ## Consequences
 

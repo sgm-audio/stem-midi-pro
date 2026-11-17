@@ -230,18 +230,22 @@ def pitch_ce_loss_fn(pred_pitch_logits, target_pitches, ignore_index: int = -100
         Scalar cross-entropy loss.
     """
     logits = pred_pitch_logits
-    targets = target_pitches.long()
+    targets = target_pitches
     if logits.dim() == 3:
-        # Bring classes to dim=-1
+        # Bring classes to dim=-1.
         if logits.shape[-1] != 128 and logits.shape[1] == 128:
             logits = logits.transpose(1, 2)
+        # Dataset targets are commonly one-hot (B, T, V); convert them to
+        # class indices before flattening for cross entropy.
+        if targets.dim() == logits.dim() and targets.shape[-1] == logits.shape[-1]:
+            targets = targets.argmax(dim=-1)
         logits = logits.reshape(-1, logits.shape[-1])
         targets = targets.reshape(-1)
     else:
         logits = logits.reshape(-1, logits.shape[-1])
         targets = targets.reshape(-1)
     return F.cross_entropy(
-        logits, targets.clamp(0, logits.shape[-1] - 1), ignore_index=ignore_index
+        logits, targets.long().clamp(0, logits.shape[-1] - 1), ignore_index=ignore_index
     )
 
 

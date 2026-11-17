@@ -2,9 +2,9 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM. Runs **CPU-only on bare-metal** — a bare-metal Intel i5 with 4–8 GB RAM is the reference target. Python **3.13** (target). The test suite runs on Python 3.13: `pytest -q -m "not cuda"` → 96 passed, 2 skipped (mamba_ssm not installed), 0 failed (2026-11-04, Windows 11 / Linux CI target). Also verified on Python 3.12: 86 passed (2026-10-31).
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM and optional Demucs/Basic Pitch backends. The repository contains model code and tests, but **does not ship trained checkpoint weights**. Python **3.13** and CPU execution are targets; reference-i5 throughput and audio quality are not certified by this repository.
 
-> **Status:** Active development toward production readiness. See [TODO.md](TODO.md) for the tracked work items and current state. Some features documented in [ARCHITECTURE.md](ARCHITECTURE.md) are still `[PLANNED]`; [SUMMARY.md](SUMMARY.md) marks exactly what works today.
+> **Status:** Active development; **not production-ready without a separately trained and validated checkpoint**. The CLI and API refuse to serve file inference from random initialization. See [TODO.md](TODO.md), [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md), and [SUMMARY.md](SUMMARY.md) for current evidence and limitations.
 
 ## License
 
@@ -22,12 +22,13 @@ Third-party attributions are in [NOTICE](NOTICE).
 
 ## What It Does
 
-- **Stem separation** — splits a mixed recording into guitar and bass WAV stems using a Mamba-SSM separator (`models/mamba_separator.py`).
-- **MIDI transcription** — converts the stems to MIDI with onset, pitch, velocity, expression (bend/vibrato/slide), and per-note confidence (`models/mamba_transcriber.py`).
-- **Confidence metadata** — each MIDI note carries its confidence as CC#127 so your DAW can flag uncertain notes (`models/confidence_injector.py`).
-- **Quality gates** — routes each result into a `studio` / `draft` / `complex` tier with a transparent processing report (`utils/quality_gates.py`).
+- **Configured stem separation** — the model honors the selected separator backend (`mamba` or optional `demucs`) and returns independent guitar, bass, and residual stems. The pure-PyTorch Mamba path is structural code; useful output requires trained weights.
+- **Independent MIDI transcription** — guitar and bass are transcribed separately. MIDI preserves absolute audio-frame timing, duration, overlapping notes, and same-onset chords.
+- **Expression mapping** — emitted bend, vibrato, and slide fields are mapped to pitch-wheel, CC1, and CC74 messages. This is a serialization capability, not evidence that an available checkpoint learned expression.
+- **Confidence metadata** — note confidence is canonical in JSON and is also encoded as standard MIDI Polyphonic Key Pressure when supported by a DAW. CC#127 is retained only as a deprecated JSON alias and is never emitted.
+- **Quality gates** — reports expose a named centroid-separation proxy, not SI-SDR. Untrained weights and artifact flags force manual review rather than certification (`utils/quality_gates.py`).
 
-Everything runs locally. No GPU, no cloud, no CUDA required.
+Everything runs locally. No GPU or cloud service is required by the core path; optional Demucs/Basic Pitch dependencies must be installed when configured.
 
 ## Requirements
 
@@ -46,13 +47,16 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Smoke test with synthetic audio (no input file needed)
+# 3. Structural smoke test with synthetic audio (random weights; not production output)
 python demo.py
 
-# 4. Process a real audio file from the CLI
-python main.py --audio /path/to/song.wav --config configs/model_config.yaml
+# 4. Process a real audio file from the CLI. A trained checkpoint is required.
+python main.py --audio /path/to/song.wav \
+  --config configs/model_config.yaml \
+  --checkpoint /path/to/trained_checkpoint.pt
 
-# 5. Run the HTTP API
+# 5. Run the HTTP API. Set MODEL_CHECKPOINT_PATH before starting it.
+export MODEL_CHECKPOINT_PATH=/path/to/trained_checkpoint.pt
 uvicorn api:app --reload
 # Interactive API docs: http://localhost:8000/docs
 ```
@@ -61,13 +65,9 @@ See [SETUP.md](SETUP.md) for detailed installation, and [USER_GUIDE.md](USER_GUI
 
 ## CPU Performance Expectations
 
-This project targets **bare-metal CPU**, not GPUs. Honest numbers on the reference i5 target:
+This project targets **bare-metal CPU**, not GPUs. No reproducible benchmark on the stated Intel i5/4–8 GB target is committed yet; do not treat historical 30–60 seconds/minute estimates as certified performance. The current test environment is Python 3.11, while the project target is Python 3.13. A real benchmark must use a trained checkpoint, real audio, peak RSS, and the target hardware.
 
-- **~30–60 seconds of processing per 1 minute of audio** (separation + transcription, combined).
-- A 3-minute song takes roughly **1.5–3 minutes**; a 10-minute song (the maximum) takes **5–10 minutes**.
-- One concurrent request on the reference hardware. Scale up CPU/RAM for more.
-
-`mamba-ssm` runs its pure-PyTorch reference implementation on CPU — functional, but slower than the CUDA kernels the upstream project benchmarks with.
+The pure-PyTorch Mamba fallback runs on CPU. The optional `configs/model_config.cpu.yaml` selects Demucs + Basic Pitch and fails with actionable dependency errors when those packages are absent.
 
 ## Project Structure
 
@@ -94,7 +94,7 @@ The mission behind Stem+MIDI Pro is to serve the Canadian independent-music comm
 2. **Indie-friendly licensing** — the code is Apache-2.0: free for everyone, including small studios and commercial use.
 3. **Local success stories** in user-facing content — planned; the templates in `user_content/` do not contain any yet.
 
-The data loaders target Slakh2100-YourMT3-16k (**CC BY 4.0**, commercial use OK with attribution) and, optionally, MUSDB18-HQ (educational/non-commercial only — do **not** use for commercial training). Training on Slakh2100 yields weights you can ship; cite Manilow et al., WASPAA 2019. No trained weights are included in this repository. The code is Apache-2.0.
+The data loaders target Slakh2100-YourMT3-16k (**CC BY 4.0**, commercial use OK with attribution) and, optionally, MUSDB18-HQ (educational/non-commercial only — do **not** use for commercial training). Training on Slakh2100 may produce a checkpoint after independent evaluation; cite Manilow et al., WASPAA 2019. **No trained weights are included in this repository**, so no separation quality, confidence calibration, expression quality, or DAW usability certification is claimed. The code is Apache-2.0.
 
 ## Documentation
 
@@ -108,7 +108,7 @@ The data loaders target Slakh2100-YourMT3-16k (**CC BY 4.0**, commercial use OK 
 | [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) | Contributor guide |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [TODO.md](TODO.md) | Tracked work items |
-| [docs/architecture-decision-records/](docs/architecture-decision-records/) | ADRs 0001–0005 |
+| [docs/architecture-decision-records/](docs/architecture-decision-records/) | ADRs 0001–0007 (including superseded history) |
 | [docs/operations/](docs/operations/) | Runbook, monitoring, upgrading, rollback |
 | [research/README.md](research/README.md) | Mamba-3 research code (as-is) |
 

@@ -77,7 +77,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 - [x] **C-2.3** · `bug` · M · P0 · `data/datasets.py:_validate_dataset` vs `_build_file_list` — `self.file_list` is set twice (once in `_validate_dataset` for synthetic, then overwritten in `_build_file_list` for non-synthetic). Reorder: have `__init__` call `_build_file_list` only, and let `_build_file_list` short-circuit on the synthetic flag.
 - [x] **C-2.4** · `bug` · M · P0 · `data/datasets.py:Slakh2100YourMT3Dataset` — does not override `_build_file_list`. When path is missing, parent's `_build_file_list` calls `os.listdir(self.root_dir)` on a missing dir → `FileNotFoundError`. Add override that short-circuits on `self.synthetic`.
 - [x] **C-2.5** · `bug` · L · P0 · `models/mamba_separator.py:forward` — "state cache" is implemented as `torch.cat([state_cache, hidden], dim=1)` then `hidden[:, -L:, :]` after the blocks. This is **not** the Mamba SSM state — it's activations. Streaming inference is structurally broken. Either (a) use Mamba's `inference_params` API properly, or (b) remove the `_state_cache` argument and document the limitation. Add a streaming-inference test that verifies chunked outputs match a single-pass output.
-- [x] **C-2.6** · `bug` · M · P0 · `models/mamba_separator.py:_estimate_si_sdr` calls `_spectral_centroid` which does another full STFT, **after** the forward already computed STFT once. Plus the "SI-SDR" reported to users is a clamped centroid heuristic, not actual SI-SDR. Either pass the cached magnitude in, or rename the metric to `centroid_separation_proxy` and add a TODO for real SI-SDR against ground truth.
+- [x] **C-2.6** · `bug` · M · P0 · `models/mamba_separator.py` cached the magnitude for the centroid heuristic and renamed the public semantics to `centroid_separation_proxy`; true reference-based SI-SDR remains ARCH-11.3.2.
 - [x] **C-2.7** · `bug` · S · P0 · `data/datasets.py:MUSDB18HQDataset._get_real_item:474` — `mixture = sum(stem_wavs.values()) / len(stem_wavs)` returns a 0-d numpy array, not 1-d. Replace with explicit unpack: `total = sum(stem_wavs[k] for k in stem_wavs); mixture = total / len(stem_wavs)`. Verify shape.
 - [x] **C-2.8** · `bug` · S · P0 · `models/mamba_separator.py:_detect_artifacts` (called via `main.py:_detect_artifacts`) — `phase_corr > 0.9` flagged as "phase cancellation" is **inverted logic**. Two correlated stems can be valid (same fundamental); perfectly anti-correlated (≈ -1) is the cancellation case. Fix sign and threshold.
 - [x] **C-2.9** · `bug` · S · P0 · `models/mamba_transcriber.py:_create_mel_basis` runs `for j in range(...)` Python loop building an `(n_mels, n_fft//2+1)` tensor on **every** forward call. Move into `__init__`, register as a buffer named `mel_basis`. Eliminates a per-frame allocation hot path.
@@ -97,8 +97,8 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 - [x] **RF-3.1.4** · `refactor` · S · P1 · `api.py:create_placeholder_midi` (which actually emits real events) — rename to `build_midi_from_events` and move to `utils/midi.py`. Update `create_response_zip`.
 - [x] **RF-3.1.5** · `refactor` · S · P1 · `models/confidence_injector.py:inject_midi_metadata` loop creates a `torch.tensor` per event for the sigmoid. Vectorize. Add a benchmark.
 - [ ] **RF-3.1.6** · `refactor` · S · P1 · `main.py:_logits_to_midi` Python `for b,t` loops over batch×T. Replace with `torch.nonzero(onset_mask).tolist()`. ~100× faster on 60s audio.
-- [ ] **RF-3.1.7** · `refactor` · M · P1 · Remove NeMo ModelPT wrapping from `main.py` — drop the `nemo.core.classes.ModelPT` and `nemo.core.neural_types` imports. Replace with a `torch.nn.Module` subclass `StemMidiModel(nn.Module)` that exposes `forward`, `training_step`, `validation_step` for a plain PyTorch training loop. **Rationale:** NeMo brings in `nemo-toolkit[all]` which is hundreds of MB and CUDA-leaning; bare-metal i5 doesn't need it. *(Partially done: main.py is already nn.Module + no nemo imports; training_step/validation_step no longer use self.log.)*
-- [ ] **RF-3.1.8** · `refactor` · M · P1 · Update `models/mamba_separator.py` and `models/mamba_transcriber.py` — drop the NeMo `Module` base class and `typecheck` decorators (no longer relevant without NeMo typing). Replace with explicit shape asserts in forward.
+- [x] **RF-3.1.7** · `refactor` · M · P1 · Remove NeMo ModelPT wrapping from `main.py` — `StemMidiModel(nn.Module)` now exposes `forward`, `training_step`, and `validation_step` for the plain PyTorch loop. NeMo is not a production dependency. ✅
+- [x] **RF-3.1.8** · `refactor` · M · P1 · Update `models/mamba_separator.py` and `models/mamba_transcriber.py` — NeMo bases/typecheck decorators are removed and explicit shape checks are used. ✅
 - [x] **RF-3.1.9** · `refactor` · M · P1 · `train.py` — replace `pytorch_lightning` Trainer with a plain PyTorch training loop (or `accelerate`/`lightning-fabric` if you want some niceties). Drop `pytorch-lightning` from requirements. Bare-metal CPU training is much simpler in a custom loop. ✅ (2026-10-07: full custom loop — epochs, grad-accum, grad clipping, best/last checkpoints, early stopping, --resume, explicit best-load for test)
 
 ## 3.2 Consolidate file structure
@@ -193,7 +193,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 - [ ] **API-6.13** · `perf` · L · P0 · `process_audio_streaming` concatenates outputs then runs `_logits_to_midi` over the full sequence — defeats streaming. Either (a) emit per-chunk MIDI with overlap-dedup, or (b) document as a non-streaming convenience path and remove the misleading name. Verify CPU memory doesn't blow up on 10-min input.
 - [x] **API-6.14** · `sec` · S · P0 · `/render-template` — convert from GET to POST with JSON body `{"template_name": "...", "variables": {...}}`. Add `template_name` allowlist (whitelist the 7 templates in `user_content/`). Reject any other with 400.
 - [x] **API-6.15** · `bug` · S · P0 · `_load_audio` falls back to `librosa.load(path, sr=None, mono=True)`. Some librosa versions resample to 22050 on None; force `sr=None` and mean-downmix manually.
-- [x] **API-6.16** · `infra` · M · P0 · Add `/metrics` (Prometheus format). Counters: `requests_total{route,status}`, `errors_total{route,kind}`, `oom_total`. Histograms: `request_duration_seconds{route}`, `model_inference_seconds`, `bytes_processed`. Gauges: `gpu_memory_bytes` (if GPU), `in_flight_requests`.
+- [x] **API-6.16** · `infra` · M · P0 · Add `/metrics` (Prometheus format) with the implemented `requests_total{route,status}`, `request_duration_seconds{route}`, and `in_flight_requests` metrics. More detailed error/resource/model-stage metrics remain planned.
 - [x] **API-6.17** · `infra` · S · P0 · Split `/health` into `/live` (process up, always 200) and `/ready` (model loaded, not OOM, returns 503 with `Retry-After` while loading). Update Dockerfile `HEALTHCHECK` to call `/live`.
 - [x] **API-6.18** · `sec` · S · P0 · Add `X-Content-Type-Options: nosniff` and `Strict-Transport-Security` (when behind TLS) headers. Use `secure.headers.Secure` middleware or equivalent.
 - [ ] **API-6.19** · `infra` · M · P0 · Add OpenTelemetry tracing: instrument FastAPI via `opentelemetry-instrumentation-fastapi`. Spans: `validate`, `load`, `separate`, `transcribe`, `inject`, `package`. Export to OTLP (env-configured endpoint). Add console exporter for dev.
@@ -203,17 +203,17 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 
 # SECTION 7 — INFERENCE PERFORMANCE (P0)
 
-- [x] **PERF-7.1** · `perf` · S · P0 · `models/mamba_separator.py` — cache input STFT magnitude in `forward`; pass to `_estimate_si_sdr` to avoid duplicate STFT.
+- [x] **PERF-7.1** · `perf` · S · P0 · `models/mamba_separator.py` — cache input STFT magnitude in `forward`; pass cached masked magnitudes to `_centroid_separation` to avoid duplicate STFT. The resulting value is a proxy, not SI-SDR.
 - [x] **PERF-7.2** · `perf` · S · P0 · `models/mamba_transcriber.py` — move `_create_mel_basis` into `__init__`, register as buffer `self.mel_basis`. Eliminates per-forward Python loop.
 - [x] **PERF-7.3** · `perf` · M · P0 · `main.py` — wrap inference in `torch.inference_mode()` (already done in `process_audio_file`, missing in `forward` and `process_audio_streaming` paths).
 - [x] **PERF-7.4** · `perf` · S · P0 · `main.py` — set `torch.set_num_threads(os.cpu_count() or 1)` at import; allow override via `OMP_NUM_THREADS` env.
 - [ ] **PERF-7.5** · `perf` · M · P0 · `models/mamba_separator.py` — vectorize the per-mask ISTFT loop: stack all three masks into `(B, 3, T, F)`, do one matmul, then split. Avoids 3× STFT setup cost.
 - [ ] **PERF-7.6** · `perf` · M · P0 · Replace Mamba's `use_fast_path=True` with `use_mem_eff_path=True` if mamba-ssm 2.x supports it on CPU. Otherwise document the CPU path uses the reference impl (5–10× slower but works).
-- [x] **PERF-7.7** · `perf` · L · P0 · `models/mamba_separator.py` — add INT8 dynamic quantization on the Mamba block forward (`torch.ao.quantization.quantize_dynamic`) for CPU inference. Provides ~2× speedup with <1% accuracy loss on audio masks. Add a `--quantize` flag to `process_audio_file`. ✅ (2026-10-07: implemented as a lazily-built quantized clone of the full model — nn.Linear layers only — cached on the instance; `process_audio_file(quantize=True)`)
+- [x] **PERF-7.7** · `perf` · L · P0 · `models/mamba_separator.py` — add INT8 dynamic quantization on the Mamba block forward (`torch.ao.quantization.quantize_dynamic`) for CPU inference. The quantized clone is available, but speed/accuracy deltas are not certified without a trained checkpoint benchmark. ✅ (2026-10-07: implemented as a lazily-built quantized clone of the full model — `nn.Linear` layers only — cached on the instance; `process_audio_file(quantize=True)`)
 - [x] **PERF-7.8** · `perf` · M · P0 · `main.py:process_audio_file` — accept an optional `quantize: bool` query param. When true, swap in quantized variant. Document CPU memory savings. ✅ (2026-10-07: also exposed as `?quantize=true` on `POST /process`)
 - [x] **PERF-7.9** · `perf` · S · P0 · Add `torch.set_float32_matmul_precision("high")` for x86 CPUs with AVX-512. Significant speedup on matmul-heavy layers.
 - [x] **PERF-7.10** · `perf` · S · P0 · `models/mamba_separator.py` — convert `self.mamba_blocks` from `nn.ModuleList` to `nn.Sequential` for cleaner forward (no functional change, but JIT-friendly).
-- [ ] **PERF-7.11** · `perf` · M · P0 · Add a `/batch-process` endpoint that takes a ZIP of multiple files, processes them serially (CPU bottleneck), and returns a ZIP of ZIPs. Document CPU throughput (~30–60s per minute of audio on i5).
+- [ ] **PERF-7.11** · `perf` · M · P0 · Add a `/batch-process` endpoint that takes a ZIP of multiple files, processes them serially (CPU bottleneck), and returns a ZIP of ZIPs. Document throughput only after a validated-weight benchmark on the target hardware.
 - [ ] **PERF-7.12** · `perf` · L · P0 · Add output caching by content hash: SHA-256 of the input file → store processed ZIP in `outputs/cache/<hash>.zip`. Same content → 301 redirect. Saves CPU on repeat uploads. Add TTL via `CACHE_TTL_HOURS` env (default 24).
 
 ---
@@ -231,16 +231,16 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 - [x] **T-8.2.1** · `test` · M · P0 · Refactor `api.py` to lazy-import `StemMidiModel` inside `load_model()` (not at module top). This breaks the import-time CUDA dep.
 - [x] **T-8.2.2** · `test` · S · P0 · `tests/test_api_validation.py` — remove all `@pytest.mark.skip`. Cover: valid WAV, too-long, unsupported SR, stereo, FLAC, MP3 (if available).
 - [x] **T-8.2.3** · `test` · S · P0 · `tests/test_audio_loading.py` — remove skips. Cover: mono WAV, stereo→mono, missing file, 22kHz resample path.
-- [x] **T-8.2.4** · `test` · S · P0 · `tests/test_midi_generation.py` — remove skips. Cover: empty events, multi-event ordering, CC#127 values, file parses round-trip.
+- [x] **T-8.2.4** · `test` · S · P0 · `tests/test_midi_generation.py` — remove skips. Cover: empty events, multi-event ordering, note-specific Polyphonic Key Pressure confidence, file parses round-trip.
 
 ## 8.3 New tests
 
 - [x] **T-8.3.1** · `test` · M · P0 · `tests/test_mamba_separator.py` (new) — build from `model_config.yaml` (downsized for CPU); forward on `(B=1, C=1, T=8192)`; assert output shapes; assert no NaN; assert `guitar_stem != bass_stem` on synthetic input. **This test would have caught C-2.1, C-2.5, C-2.6, C-2.11.**
 - [x] **T-8.3.2** · `test` · M · P0 · `tests/test_mamba_transcriber.py` (new) — forward on `(B=1, C=1, T=8192)`; assert 5 outputs with correct shapes. **Catches C-2.2, C-2.9, C-2.10.**
-- [x] **T-8.3.3** · `test` · S · P0 · `tests/test_confidence_injector.py` (new) — verify alignment score, `needs_review` threshold, CC#127 mapping, summary counts.
+- [x] **T-8.3.3** · `test` · S · P0 · `tests/test_confidence_injector.py` (new) — verify alignment score, `needs_review` threshold, note-specific confidence mapping, and emitted-note summary counts.
 - [x] **T-8.3.4** · `test` · S · P0 · `tests/test_losses.py` (new) — verify MR-STFT returns scalar; crest/flatness/alignment components sum; finite values.
 - [x] **T-8.3.5** · `test` · S · P0 · `tests/test_template_engine.py` (new) — missing key leaves placeholder intact; list_templates returns 7 entries; re-raises FileNotFoundError on missing.
-- [x] **T-8.3.6** · `test` · S · P0 · `tests/test_midi_roundtrip.py` (new) — build MidiFile with N events, save bytes, re-parse, verify event count and CC#127 values. **Catches API-6.12.**
+- [x] **T-8.3.6** · `test` · S · P0 · `tests/test_midi_roundtrip.py` (new) — build MIDI with N events, save bytes, re-parse, verify event count and note-specific confidence values. **Catches API-6.12.**
 - [x] **T-8.3.7** · `test` · M · P0 · `tests/test_api_integration.py` (new) — `TestClient.post('/process', files={'file': wav})`; assert 200 and ZIP contains 5 entries (guitar_stem.wav, bass_stem.wav, guitar.mid, bass.mid, processing_report.json).
 - [x] **T-8.3.8** · `test` · M · P0 · `tests/test_streaming_inference.py` (new) — process 6-sec synthetic file with `process_audio_streaming(chunk_seconds=2.0)`; verify `chunks_processed == 3`.
 - [x] **T-8.3.9** · `test` · S · P0 · `tests/test_quality_gates.py` (extend) — add test that artifact flags force COMPLEX tier regardless of confidence.
@@ -304,7 +304,7 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 ## 10.1 Top-level docs
 
 - [ ] **DOC-10.1.1** · `docs` · L · P1 · `AGENTS.md` — regenerate. Reflect: tests exist, real datasets, real audio loading, real MIDI generation, CPU target, license.
-- [x] **DOC-10.1.2** · `docs` · L · P1 · `README.md` — rewrite. Remove "TensorRT-LLM", "Librosa/Ruby", "FP8 precision" claims. Add bare-metal i5 install instructions. Add license summary. Add CPU performance numbers.
+- [x] **DOC-10.1.2** · `docs` · L · P1 · `README.md` — rewrite. Remove "TensorRT-LLM", "Librosa/Ruby", and "FP8 precision" claims; add bare-metal i5 install instructions, license summary, and an explicit no-certified-benchmark caveat instead of an unsupported CPU timing number.
 - [x] **DOC-10.1.3** · `docs` · L · P1 · `SUMMARY.md` — regenerate. Mark every feature as `[IMPLEMENTED]` or `[PLANNED]` per architecture.md. Drop the stale references to `Slakh2100CADataset` / `MUSDBIndieDataset`.
 - [x] **DOC-10.1.4** · `docs` · L · P1 · `ARCHITECTURE.md` — annotate every section with `[IMPLEMENTED]` / `[PARTIAL]` / `[PLANNED]` / `[REMOVED]`. Document the CPU-only target. Reference the Polyform license.
 - [x] **DOC-10.1.5** · `docs` · M · P1 · `API_DOCUMENTATION.md` — add auth section, error codes, rate-limit responses, metrics endpoint, CORS docs. Drop the `/api/v1` base URL claim.
@@ -317,11 +317,11 @@ These are bugs that crash or produce wrong output today. They are the highest-pr
 ## 10.2 User-facing content
 
 - [x] **DOC-10.2.1** · `docs` · S · P1 · Audit all 7 templates in `user_content/`: `upload_confirmation.md`, `progress_updates.md`, `completion_delivery.md`, `rights_usage_prompt.md`, `feedback_refinement.md`, `implicit_feedback.md`, `landing_page.md`. Verify every `{{ variable }}` resolves to a field in the processing report or is fed by `/render-template` callers.
-- [x] **DOC-10.2.2** · `docs` · S · P1 · `landing_page.md` — add license statement (LIC-5.6) and bare-metal CPU performance note ("runs on a $200 i5 laptop").
-- [x] **DOC-10.2.3** · `docs` · S · P1 · `completion_delivery.md` — verify `{{ filename }}`, `{{ si_sdr }}`, `{{ phase_coherence }}`, `{{ avg_confidence }}` all match `create_response_zip:processing_report.json` keys.
-- [x] **DOC-10.2.4** · `docs` · S · P1 · `rights_usage_prompt.md` — add a clause about the Polyform license: "Output is licensed under the same Polyform Small Business License as the model. Commercial use above $1M revenue requires a paid license."
-- [x] **DOC-10.2.5** · `docs` · S · P1 · `progress_updates.md` — adjust latency claims to bare-metal CPU numbers (~30–60s per minute of audio).
-- [x] **DOC-10.2.6** · `docs` · S · P1 · `feedback_refinement.md` — replace the "Web MIDI editor" claim with "DAW-based refinement (MIDI files have CC#127 confidence)".
+- [x] **DOC-10.2.2** · `docs` · S · P1 · `landing_page.md` — add license statement (LIC-5.6) and a bare-metal CPU target caveat; do not promise a $200 i5 timing result before benchmarking.
+- [x] **DOC-10.2.3** · `docs` · S · P1 · `completion_delivery.md` — verify `{{ filename }}`, `{{ separation_proxy }}`, `{{ phase_coherence }}`, `{{ avg_confidence }}` match `create_response_zip:processing_report.json`; retain `si_sdr` only as a deprecated non-SI-SDR alias.
+- [x] **DOC-10.2.4** · `docs` · S · P1 · `rights_usage_prompt.md` — add the current Apache-2.0 software-license and user-input-rights guidance; the earlier PolyForm wording is superseded by ADR 0006.
+- [x] **DOC-10.2.5** · `docs` · S · P1 · `progress_updates.md` — remove uncertified seconds-per-minute promises and state that timing requires a trained-checkpoint benchmark on target hardware.
+- [x] **DOC-10.2.6** · `docs` · S · P1 · `feedback_refinement.md` — replace the web-editor claim with DAW-based refinement using canonical JSON confidence and optional Polyphonic Key Pressure (CC#127 is not emitted).
 
 ## 10.3 Code documentation
 
@@ -353,7 +353,7 @@ These are the features called out in `ARCHITECTURE.md` as designed but not yet b
 
 ## 11.3 From "Separation Module"
 
-- [ ] **ARCH-11.3.1** · `feature` · L · P1 · Phase-coherent overlap-add reconstruction across chunks (currently fakes this — see C-2.5).
+- [x] **ARCH-11.3.1** · `feature` · L · P1 · Waveform overlap-add reconstruction across chunks is implemented; true SSM state passing remains separate planned work (C-2.5).
 - [ ] **ARCH-11.3.2** · `feature` · M · P1 · True SI-SDR computation against a reference (when available, e.g., during validation). Currently uses a centroid proxy (see C-2.6).
 - [ ] **ARCH-11.3.3** · `feature` · M · P1 · Residual stem routing: when `artifact_flags` includes `"phase_cancellation"`, automatically retry separation with `residual_weight` increased by 0.2.
 

@@ -2,9 +2,9 @@
 """
 MIDI building utilities for Stem+MIDI Pro.
 
-Owns conversion of model MIDI-event metadata into Standard MIDI Files.
-(Replaces the old `api.py:create_placeholder_midi`, which actually emitted
-real events — API-6.11 / RF-3.1.4 / RF-3.1.3.)
+Converts model MIDI-event metadata into Standard MIDI Files.  Confidence is
+encoded as MIDI Polyphonic Key Pressure (a note-specific, 0-127 value), not
+CC#127: CC#127 is a channel-mode message and cannot carry per-note metadata.
 
 Event dict shape (as produced by ConfidenceInjector / main.py):
     {
@@ -12,8 +12,15 @@ Event dict shape (as produced by ConfidenceInjector / main.py):
         "note": int,               # MIDI pitch 0-127
         "velocity": int,           # 1-127
         "confidence": float,       # 0-1
-        "cc_127_value": int,       # optional; defaults to confidence*127
+        "confidence_value": int,   # optional; defaults to confidence*127
+        "cc_127_value": int,       # deprecated input alias; never emitted as CC#127
         "duration_frames": int,    # optional; falls back to default duration
+        "channel": int,            # optional MIDI channel, defaults to 0
+        "expression": {             # optional normalized values in [0, 1]
+            "bend": float,         # .5 = center; maps to MIDI pitch-wheel
+            "vibrato": float,      # maps to CC#1 (modulation)
+            "slide": float,        # maps to CC#74 (brightness proxy)
+        },
     }
 """
 
@@ -32,6 +39,49 @@ DEFAULT_SAMPLE_RATE = 44100
 DEFAULT_NOTE_DURATION_BEATS = float(os.getenv("MIDI_DEFAULT_NOTE_DURATION_BEATS", "0.25"))
 
 
+def _clamp_midi(value: Any, low: int = 0, high: int = 127) -> int:
+    return min(high, max(low, int(value)))
+
+
+def _expression_messages(event: dict[str, Any], channel: int) -> list[Message]:
+    """Translate normalized expression fields to standard MIDI messages.
+
+    Pitch bend and CC expression are channel-wide in ordinary MIDI.  The event
+    channel is therefore explicit so callers can provide MPE-style channels if
+    they need independent simultaneous bends.
+    """
+    expression = event.get("expression") or {}
+    messages: list[Message] = []
+
+    if "bend" in expression:
+        # The model head emits [0, 1], where .5 is the neutral pitch-wheel
+        # position. Mido uses the signed 14-bit pitch-wheel range.
+        bend = max(0.0, min(1.0, float(expression["bend"])))
+        pitch = _clamp_midi(round((bend - 0.5) * 16384), -8192, 8191)
+        messages.append(Message("pitchwheel", channel=channel, pitch=pitch, time=0))
+    if "vibrato" in expression:
+        messages.append(
+            Message(
+                "control_change",
+                channel=channel,
+                control=1,
+                value=_clamp_midi(round(float(expression["vibrato"]) * 127)),
+                time=0,
+            )
+        )
+    if "slide" in expression:
+        messages.append(
+            Message(
+                "control_change",
+                channel=channel,
+                control=74,
+                value=_clamp_midi(round(float(expression["slide"]) * 127)),
+                time=0,
+            )
+        )
+    return messages
+
+
 def build_midi_from_events(
     midi_data: dict[str, Any],
     stem_type: str,
@@ -40,15 +90,24 @@ def build_midi_from_events(
     hop_length: int = HOP_LENGTH,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> bytes:
-    """
-    Convert MIDI event metadata to SMF bytes.
+    """Convert MIDI event metadata to SMF bytes.
 
-    Uses `duration_frames` on each event when available (API-6.12);
-    otherwise falls back to `default_duration_beats`
-    (env `MIDI_DEFAULT_NOTE_DURATION_BEATS`, default 0.25 beats).
+    Events are scheduled on an absolute tick timeline before being written as
+    Mido delta times. This preserves chords and overlapping notes instead of
+    forcing every note-off to occur before the next note-on. Audio-frame timing
+    uses ``ticks_per_beat * 1_000_000 / tempo_us``; at 120 BPM and 480 PPQ,
+    that is 960 ticks/sec.
+
+    ``duration_frames`` is honored when available; otherwise the function
+    falls back to ``default_duration_beats`` (environment variable
+    ``MIDI_DEFAULT_NOTE_DURATION_BEATS``, default 0.25 beats).
     """
     if default_duration_beats is None:
         default_duration_beats = DEFAULT_NOTE_DURATION_BEATS
+    if default_duration_beats <= 0:
+        raise ValueError("default_duration_beats must be positive")
+    if hop_length <= 0 or sample_rate <= 0 or ticks_per_beat <= 0:
+        raise ValueError("hop_length, sample_rate, and ticks_per_beat must be positive")
 
     mid = MidiFile(ticks_per_beat=ticks_per_beat)
     track = MidiTrack()
@@ -61,32 +120,99 @@ def build_midi_from_events(
     track.append(MetaMessage("instrument_name", name=instrument))
     track.append(MetaMessage("marker", text=f"{stem_type.capitalize()} - Stem+MIDI Pro"))
 
-    # 120 BPM -> 2 beats/sec -> ticks_per_beat * 2 ticks per second
-    ticks_per_second = ticks_per_beat * (60.0 / (DEFAULT_TEMPO_US / 1_000_000.0))
+    # tempo is microseconds per beat; no extra factor of 60 is needed.
+    ticks_per_second = ticks_per_beat * 1_000_000.0 / DEFAULT_TEMPO_US
 
-    events = midi_data.get("midi_events", [])
-    # Mido `time` is delta-ticks, not absolute. Track a running cursor so that
-    # multi-event files do not drift (B2: was writing absolute ticks as deltas).
-    current_tick = 0
+    # Scheduled entries are (absolute_tick, priority, sequence, message).
+    # Note-offs precede note-ons at the same tick; note-specific metadata and
+    # expression follow the note-on at that tick.
+    scheduled: list[tuple[int, int, int, Message]] = []
+    sequence = 0
+    events = sorted(midi_data.get("midi_events", []), key=lambda e: int(e["onset_frame"]))
     for ev in events:
-        tick = int(ev["onset_frame"] * hop_length / sample_rate * ticks_per_second)
-        delta = tick - current_tick
-        current_tick = tick
         note = int(ev["note"])
-        velocity = min(127, max(1, int(ev["velocity"])))
-        track.append(Message("note_on", note=note, velocity=velocity, time=max(0, delta)))
+        if not 0 <= note <= 127:
+            raise ValueError(f"MIDI note must be in [0, 127], got {note}")
+        channel = int(ev.get("channel", 0))
+        if not 0 <= channel <= 15:
+            raise ValueError(f"MIDI channel must be in [0, 15], got {channel}")
+
+        onset_frame = int(ev["onset_frame"])
+        if onset_frame < 0:
+            raise ValueError(f"onset_frame must be non-negative, got {onset_frame}")
+        onset_tick = max(0, round(onset_frame * hop_length / sample_rate * ticks_per_second))
 
         duration_frames = ev.get("duration_frames")
-        if duration_frames:
-            dur_ticks = max(1, int(duration_frames * hop_length / sample_rate * ticks_per_second))
+        if duration_frames is not None:
+            duration_frames = int(duration_frames)
+            if duration_frames <= 0:
+                raise ValueError(f"duration_frames must be positive, got {duration_frames}")
+            duration_ticks = max(
+                1, round(duration_frames * hop_length / sample_rate * ticks_per_second)
+            )
         else:
-            dur_ticks = max(1, int(default_duration_beats * ticks_per_beat))
-        track.append(Message("note_off", note=note, velocity=0, time=dur_ticks))
-        current_tick += dur_ticks
+            duration_ticks = max(1, round(default_duration_beats * ticks_per_beat))
+        off_tick = onset_tick + duration_ticks
 
-        cc_val = ev.get("cc_127_value", int(ev.get("confidence", 0.0) * 127))
-        cc_clamped = min(127, max(0, int(cc_val)))
-        track.append(Message("control_change", control=127, value=cc_clamped, time=0))
+        sequence += 1
+        scheduled.append(
+            (
+                onset_tick,
+                1,
+                sequence,
+                Message(
+                    "note_on",
+                    channel=channel,
+                    note=note,
+                    velocity=_clamp_midi(ev.get("velocity", 1), 1, 127),
+                    time=0,
+                ),
+            )
+        )
+
+        # Polyphonic key pressure is note-specific and is the confidence lane.
+        # Keep the old cc_127_value key as an input alias for callers, but do
+        # not emit CC#127 because it is a channel-mode command.
+        confidence_value = ev.get(
+            "confidence_value",
+            ev.get("cc_127_value", float(ev.get("confidence", 0.0)) * 127),
+        )
+        sequence += 1
+        scheduled.append(
+            (
+                onset_tick,
+                2,
+                sequence,
+                Message(
+                    "polytouch",
+                    channel=channel,
+                    note=note,
+                    value=_clamp_midi(confidence_value),
+                    time=0,
+                ),
+            )
+        )
+
+        for expression_message in _expression_messages(ev, channel):
+            sequence += 1
+            scheduled.append((onset_tick, 3, sequence, expression_message))
+
+        sequence += 1
+        scheduled.append(
+            (
+                off_tick,
+                0,
+                sequence,
+                Message("note_off", channel=channel, note=note, velocity=0, time=0),
+            )
+        )
+
+    scheduled.sort(key=lambda item: (item[0], item[1], item[2]))
+    current_tick = 0
+    for tick, _priority, _sequence, message in scheduled:
+        message.time = max(0, tick - current_tick)
+        track.append(message)
+        current_tick = tick
 
     track.append(MetaMessage("end_of_track"))
 

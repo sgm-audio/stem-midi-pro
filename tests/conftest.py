@@ -52,6 +52,9 @@ def mock_config():
     return {
         "name": "stem_midi_mamba_test",
         "restore_from_path": None,
+        # This fixture intentionally exercises random test weights. Production
+        # file inference rejects them unless a real checkpoint is loaded.
+        "allow_untrained_inference": True,
         "audio": {
             "sample_rate": 44100,
             "n_fft": 512,

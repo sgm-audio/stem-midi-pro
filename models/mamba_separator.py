@@ -7,7 +7,7 @@ from models._mamba_compat import Mamba
 
 class MambaSeparator(nn.Module):
     """
-    Phase-coherent guitar/bass separation using Mamba SSM.
+    Guitar/bass mask separation using shared mixture phase and Mamba SSM.
 
     Input:  audio (B, C=1, T) mono waveform
     Output: guitar_stem / bass_stem / residual (B, 1, T), None (no state
@@ -139,8 +139,9 @@ class MambaSeparator(nn.Module):
         Takes cached masked-magnitude spectrograms ``(B, F, T_f)`` from
         ``forward`` (so no additional STFT is computed; see C-2.6 / PERF-7.1).
         This is a lightweight proxy for "are the stems spectrally distinct?"
-        True SI-SDR requires a ground-truth reference and is computed
-        only during training (via PerceptualAudioLoss).
+        True reference-based SI-SDR requires a ground-truth reference and is
+        not computed by the current runtime or training loss; it remains a
+        future evaluation requirement.
         Renamed from _estimate_si_sdr per C-2.6 / TODO.md.
         """
         guitar_centroid = self._spectral_centroid(guitar_mag)  # (B, T_f)
