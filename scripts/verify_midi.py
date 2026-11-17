@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Reproduce the MIDI claims in FIXES.md (C-3, M-3).
 
 Run: ``python3 scripts/verify_midi.py``

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Reproduce the API claims in FIXES.md (H-6, API-6.7, API-6.9).
 
 Run: ``python3 scripts/verify_api.py``
