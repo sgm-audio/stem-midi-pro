@@ -23,7 +23,7 @@ Third-party attributions are in [NOTICE](NOTICE).
 ## What It Does
 
 - **Configured stem separation** — the model honors the selected separator backend (`mamba` or optional `demucs`) and returns independent guitar, bass, and residual stems. The pure-PyTorch Mamba path is structural code; useful output requires trained weights.
-- **Independent MIDI transcription** — guitar and bass are transcribed separately. MIDI preserves absolute audio-frame timing, duration, overlapping notes, and same-onset chords.
+- **Independent MIDI transcription** — guitar and bass are transcribed separately. MIDI preserves absolute audio-frame timing, duration, overlapping notes, and same-onset chords. The writer's polyphony is a serialization capability: the pitch head is a 128-way argmax, so one note per onset is what the model can actually emit today (see `AUDIT_REPORT.md` H-5).
 - **Expression mapping** — emitted bend, vibrato, and slide fields are mapped to pitch-wheel, CC1, and CC74 messages. This is a serialization capability, not evidence that an available checkpoint learned expression.
 - **Confidence metadata** — note confidence is canonical in JSON and is also encoded as standard MIDI Polyphonic Key Pressure when supported by a DAW. CC#127 is retained only as a deprecated JSON alias and is never emitted.
 - **Quality gates** — reports expose a named centroid-separation proxy, not SI-SDR. Untrained weights and artifact flags force manual review rather than certification (`utils/quality_gates.py`).
@@ -68,6 +68,33 @@ See [SETUP.md](SETUP.md) for detailed installation, and [USER_GUIDE.md](USER_GUI
 This project targets **bare-metal CPU**, not GPUs. No reproducible benchmark on the stated Intel i5/4–8 GB target is committed yet; do not treat historical 30–60 seconds/minute estimates as certified performance. The current test environment is Python 3.11, while the project target is Python 3.13. A real benchmark must use a trained checkpoint, real audio, peak RSS, and the target hardware.
 
 The pure-PyTorch Mamba fallback runs on CPU. The optional `configs/model_config.cpu.yaml` selects Demucs + Basic Pitch and fails with actionable dependency errors when those packages are absent.
+
+`mamba-ssm` (the upstream CUDA package) is NOT used on this path — CPU inference runs the locally implemented pure-PyTorch Mamba fallback in `models/_mamba_compat.py` (same block math, chunked scan, no fused kernels — functional but slower than upstream's CUDA kernels). `MAMBA_BACKEND` records which implementation is live and is surfaced in logs, `/model-info`, and the processing report; `Mamba.SCAN_CHUNK` (default 256 frames) bounds the scan's working set, and `STEM_MIDI_REQUIRE_MAMBA_SSM=1` makes a missing package a hard error instead of a fallback.
+
+### Measured on the audit machine (not the reference i5)
+
+PR #13 measured the chunked and single-pass paths on its own box: 2 threads, pure-PyTorch fallback,
+`configs/model_config.yaml`, **random weights** (so the numbers describe the runtime, not a trained
+render). Reproduce with `scripts/verify_numerics.py`; the method and the deltas are in
+[`FIXES.md`](FIXES.md). These are the first committed timings, and they are still not an
+Intel i5 / 4–8 GB certification.
+
+| Input length | Path | Wall time | Peak RSS |
+|---|---|---|---|
+| 5 min | chunked (`audio.chunk_duration_sec: 2`, default) | 104.0 s | 1.60 GB |
+| 5 min | one pass (`chunk_duration_sec: 300`) | 69.0 s | 2.16 GB |
+| 10 min | chunked | 173.6 s | 2.22 GB |
+| 10 min | one pass | not measured (peak grows with length) | — |
+
+- That is ~0.25–0.3x realtime for separation + transcription together; imports plus the idle model
+  account for ~0.65 GB of each peak, so most of it is the runtime, not the audio.
+- **Long inputs are separated in overlapping chunks (`audio.chunk_duration_sec`, default 2 s) and
+  transcribed in frame segments (`inference.segment_seconds`, default 60 s), so peak memory tracks the
+  chunk size rather than the file length.** A single pass is faster (no per-chunk re-priming) but its
+  peak grows with the input: 2.16 GB at 5 minutes.
+- One concurrent request. Scale up CPU/RAM for more.
+- **No tempo detection**: MIDI is written on a fixed grid at the tempo you pass (`tempo_us`, default
+  120 BPM), so quantisation is only as good as that choice.
 
 ## Project Structure
 
@@ -119,3 +146,16 @@ Built with PyTorch, [Mamba-SSM](https://github.com/state-spaces/mamba), librosa,
 ---
 
 *Stem+MIDI Pro: stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*
+
+## Before you deploy
+
+A trained checkpoint is required. Without `MODEL_CHECKPOINT_PATH` the API refuses to start serving
+(`/ready` → 503) rather than returning random-weight stems and MIDI:
+
+```bash
+export MODEL_CHECKPOINT_PATH=checkpoints/stem_midi_v1.pt
+export MODEL_CONFIG_PATH=configs/model_config.yaml
+```
+
+`ALLOW_UNTRAINED_MODEL=1` (or `inference.allow_untrained_model: true`) overrides this for smoke tests
+only; `/ready` and `/model-info` will then report `"trained_weights": false`.

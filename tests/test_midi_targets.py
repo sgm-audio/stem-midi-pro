@@ -1,67 +1,93 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for MIDI → frame-aligned training targets (real label pipeline)."""
+"""MIDI → training-target alignment tests.
 
-from __future__ import annotations
+Regression coverage for M-3 (audit): targets were aligned at a hard-coded
+120 BPM regardless of the file's ``set_tempo``, and simultaneous notes
+overwrote each other because the pitch target was a single index.
+"""
 
-import mido
+import pytest
 
-from utils.midi_targets import midi_to_targets
+mido = pytest.importorskip("mido", reason="requires mido")
 
+from utils.midi_targets import build_tempo_map, midi_to_targets, tick_to_seconds  # noqa: E402
 
-def _make_midi(path, note=60, velocity=100, ticks_per_beat=480, note_ticks=480):
-    mid = mido.MidiFile(ticks_per_beat=ticks_per_beat)
-    track = mido.MidiTrack()
-    mid.tracks.append(track)
-    track.append(mido.MetaMessage("set_tempo", tempo=500000))  # 120 BPM
-    track.append(mido.Message("note_on", note=note, velocity=velocity, time=note_ticks))
-    track.append(mido.Message("note_off", note=note, velocity=0, time=480))
-    mid.save(path)
-    return path
+SR = 44100
+HOP = 512
 
 
-def test_midi_to_targets_marks_onset_pitch_velocity(tmp_path):
-    """A single note_on should produce one onset + correct pitch + velocity."""
-    p = _make_midi(tmp_path / "one_note.mid", note=60, velocity=100, note_ticks=480)
-    hop = 512
-    sr = 44100
-    n_frames = 200
-
-    onset, pitch, velocity = midi_to_targets(p, n_frames, hop_length=hop, sample_rate=sr)
-
-    assert onset.shape == (1, n_frames, 1)
-    assert pitch.shape == (1, n_frames, 128)
-    assert velocity.shape == (1, n_frames, 1)
-
-    # exactly one onset frame
-    assert int(onset.sum().item()) == 1
-    frame = int(onset.squeeze(-1).squeeze(0).argmax().item())
-    # 480 ticks @ 120 BPM = 0.5 s → frame = round(0.5 * 44100 / 512)
-    assert frame == round(0.5 * sr / hop)
-
-    assert pitch[0, frame, 60].item() == 1.0
-    assert abs(velocity[0, frame, 0].item() - 100 / 127.0) < 1e-5
-
-
-def test_midi_to_targets_ignores_note_off(tmp_path):
-    """note_off (velocity 0) must not create an onset."""
+def _write(tmp_path, tempo_us, notes, duration_ticks=10):
+    """notes: list of (absolute_tick, pitch, velocity)."""
     mid = mido.MidiFile(ticks_per_beat=480)
     track = mido.MidiTrack()
     mid.tracks.append(track)
-    track.append(mido.MetaMessage("set_tempo", tempo=500000))
-    track.append(mido.Message("note_off", note=60, velocity=0, time=0))
-    p = tmp_path / "off_only.mid"
-    mid.save(p)
+    track.append(mido.MetaMessage("set_tempo", tempo=tempo_us, time=0))
 
-    onset, _, _ = midi_to_targets(p, 100)
-    assert int(onset.sum().item()) == 0
+    # Absolute events, sorted by tick, with note_off before note_on at equal ticks.
+    events = []
+    for tick, pitch, velocity in notes:
+        events.append((tick, 1, "note_on", pitch, velocity))
+        events.append((tick + duration_ticks, 0, "note_off", pitch, 0))
+    events.sort()
+    last = 0
+    for tick, _order, kind, pitch, velocity in events:
+        track.append(mido.Message(kind, note=pitch, velocity=velocity, time=tick - last))
+        last = tick
+    path = tmp_path / "clip.mid"
+    mid.save(str(path))
+    return str(path)
 
 
-def test_midi_to_targets_respects_pitch_vocab(tmp_path):
-    """Notes >= pitch_vocab are skipped for pitch, but onset still recorded."""
-    p = _make_midi(tmp_path / "clip.mid", note=110, velocity=90, note_ticks=0)
-    onset, pitch, velocity = midi_to_targets(p, 50, pitch_vocab=100)
-    # onset at frame 0 still recorded
-    assert onset[0, 0, 0].item() == 1.0
-    # note 110 >= vocab 100 → no pitch bin set
-    assert int(pitch.sum().item()) == 0
-    assert abs(velocity[0, 0, 0].item() - 90 / 127.0) < 1e-5
+@pytest.mark.parametrize(
+    "tempo_us,expected_frame",
+    [(500_000, 86), (1_000_000, 172)],  # beat 2 at 120 BPM / 60 BPM
+)
+def test_tempo_is_honoured(tmp_path, tempo_us, expected_frame):
+    path = _write(tmp_path, tempo_us, [(960, 60, 100)])  # tick 960 = beat 2
+    onset, pitch, velocity = midi_to_targets(path, n_frames=400, hop_length=HOP, sample_rate=SR)
+
+    frames = onset[0, :, 0].nonzero().flatten().tolist()
+    assert frames == [expected_frame]
+    assert pitch[0, expected_frame, 60] == 1.0
+    assert velocity[0, expected_frame, 0] == pytest.approx(100 / 127)
+
+
+def test_chord_is_multi_hot(tmp_path):
+    path = _write(tmp_path, 500_000, [(480, 60, 90), (480, 64, 70)])
+    onset, pitch, _velocity = midi_to_targets(path, n_frames=400, hop_length=HOP, sample_rate=SR)
+
+    frame = int(onset[0, :, 0].nonzero()[0])
+    assert pitch[0, frame, 60] == 1.0
+    assert pitch[0, frame, 64] == 1.0
+    assert float(pitch[0, frame].sum()) == 2.0
+
+
+def test_tempo_map_defaults_to_120_bpm(tmp_path):
+    path = _write(tmp_path, 500_000, [(0, 60, 100)])
+    mid = mido.MidiFile(path)
+    tempo_map = build_tempo_map(mid)
+    assert tempo_map[0][0] == 0
+    assert tick_to_seconds(480, tempo_map, 480) == pytest.approx(0.5)
+
+
+def test_tempo_change_mid_file(tmp_path):
+    """A tempo change must shift later events (old code assumed one tempo)."""
+    mid = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))
+    track.append(mido.Message("note_on", note=60, velocity=100, time=0))
+    track.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    track.append(mido.MetaMessage("set_tempo", tempo=1_000_000, time=0))  # 60 BPM
+    track.append(mido.Message("note_on", note=62, velocity=100, time=480))
+    path = tmp_path / "tempo_change.mid"
+    mid.save(str(path))
+
+    onset, _pitch, _velocity = midi_to_targets(
+        str(path), n_frames=400, hop_length=HOP, sample_rate=SR
+    )
+    # First note at 0.5 s, second one beat later at the slower tempo:
+    # 0.5 s + 1.0 s = 1.5 s.
+    frames = onset[0, :, 0].nonzero().flatten().tolist()
+    assert frames[0] == 0  # note at tick 0
+    assert frames[1] == round(1.5 * SR / HOP)  # 0.5 s at 120 BPM + 1.0 s at 60 BPM

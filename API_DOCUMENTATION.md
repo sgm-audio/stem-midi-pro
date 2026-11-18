@@ -154,6 +154,11 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 2. **Draft** — `avg_confidence ≥ 0.70` without artifacts or untrained weights, but below the studio conditions: refine low-confidence notes in your DAW.
 3. **Complex** — invalid metrics, `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
 
+Every metric in `processing_report.json` is coerced to a finite number and serialised with
+`allow_nan=False`: a NaN would otherwise be written as bare `NaN`, which is not valid JSON and makes
+strict clients reject the whole download (silence, DC and non-finite input produce non-finite metrics
+often enough that this is a normal path, not a corner case).
+
 ## CORS
 
 Configured via the `CORS_ORIGINS` env var (comma-separated list):

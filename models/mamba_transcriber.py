@@ -21,8 +21,13 @@ class MambaTranscriber(nn.Module):
     Decoder honesty: the downstream ``_logits_to_midi`` decoder takes a single
     argmax pitch per onset frame — chords/polyphony are NOT modeled by this
     head layout. True polyphonic decoding requires per-pitch event heads
-    (see TODO ARCH-11.5.x). The expression head exists but is untrained
-    (ARCH-11.4.4); its output is not encoded into MIDI by the orchestrator.
+    (see TODO ARCH-11.5.x and H-5 in AUDIT_REPORT.md). The expression head
+    exists but is untrained (ARCH-11.4.4).
+
+    The mixers are stacked as pre-norm residual blocks (``h = h + mix(norm(h))``
+    plus a final LayerNorm). Bare mixer stacking multiplied the activation RMS
+    by ~0.02 per block, so the 8-layer stack collapsed to a constant and every
+    head emitted a fixed value (C-1 in AUDIT_REPORT.md).
     """
 
     def __init__(self, cfg: dict):
@@ -55,6 +60,10 @@ class MambaTranscriber(nn.Module):
             ),
         )
         self.input_proj = nn.Linear(self.n_mels, d_model)
+
+        # Pre-norm partners for the residual stack (C-1).
+        self.block_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(n_layers)])
+        self.final_norm = nn.LayerNorm(d_model)
 
         gradient_checkpointing = bool(
             (cfg.get("training") or {}).get("gradient_checkpointing", False)
@@ -108,9 +117,10 @@ class MambaTranscriber(nn.Module):
         mel = self._mel_spectrogram(stem.squeeze(1)).transpose(1, 2)
         hidden = self.input_proj(mel)
 
-        # Mamba processing
-        for block in self.mamba:
-            hidden = block(hidden)
+        # Pre-norm residual Mamba stack (C-1)
+        for norm, block in zip(self.block_norms, self.mamba, strict=True):
+            hidden = hidden + block(norm(hidden))
+        hidden = self.final_norm(hidden)
 
         # Task-specific outputs
         onset_logits = self.onset_head(hidden)  # (B, T, 1)
@@ -131,9 +141,16 @@ class MambaTranscriber(nn.Module):
         Eval-only MC-dropout confidence estimate (C-2.10).
 
         Explicitly enables the Dropout inside ``confidence_head`` while in eval
-        mode so the ensemble is non-degenerate (otherwise all 5 samples would
-        be identical because dropout is inactive in eval). The head is
-        restored to eval mode afterwards. Never used during training.
+        mode so the ensemble is non-degenerate (otherwise all samples would be
+        identical because dropout is inactive in eval). The head is restored to
+        eval mode afterwards. Never used during training.
+
+        The score is **ensemble disagreement**, not the ensemble mean: returning
+        ``samples.mean()`` produced a number that looked like a probability but
+        whose spread was measured at ~5e-4, carrying no uncertainty (H-3). For
+        Bernoulli outputs with standard deviation ``sd`` (max 0.5), confidence is
+        ``1 - 2*sd`` clamped to [0, 1]: 1.0 when every sample agrees, 0.0 when
+        they disagree maximally.
         """
         head = self.confidence_head
         head.train()  # activate Dropout
@@ -141,7 +158,8 @@ class MambaTranscriber(nn.Module):
             samples = torch.stack([head(hidden) for _ in range(n_samples)])
         finally:
             head.eval()
-        return samples.mean(dim=0).squeeze(-1)
+        std = samples.std(dim=0, unbiased=False)
+        return (1.0 - 2.0 * std).clamp(0.0, 1.0).squeeze(-1)
 
     def _mel_spectrogram(self, audio: torch.Tensor) -> torch.Tensor:
         """Differentiable mel-spectrogram for end-to-end training."""

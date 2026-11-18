@@ -31,6 +31,7 @@ import contextvars
 import io
 import json
 import logging
+import math
 import os
 import secrets
 import tempfile
@@ -244,6 +245,7 @@ def _import_model():
 
 
 _model_ready = False
+_model_trained = False  # False => random weights (H-6); surfaced by /ready
 _processing_sem: asyncio.Semaphore | None = None  # API-6.4 concurrency cap
 
 SUPPORTED_FORMATS = {".wav", ".flac", ".mp3"}
@@ -261,8 +263,14 @@ ALLOWED_TEMPLATES = frozenset(list_templates())  # API-6.14 allowlist (7 files)
 
 
 def load_model():
-    """Load StemMidiModel from config/checkpoint. Imports lazily (T-8.2.1)."""
-    global model_config
+    """Load StemMidiModel from config/checkpoint. Imports lazily (T-8.2.1).
+
+    Refuses to serve a model with random weights: without ``MODEL_CHECKPOINT_PATH``
+    the previous behaviour was to serve an untrained network whose "stems" and
+    "MIDI" are noise (H-6). ``ALLOW_UNTRAINED_MODEL=1`` (or
+    ``inference.allow_untrained_model: true``) overrides this for smoke tests.
+    """
+    global model_config, _model_trained
 
     config_path = os.getenv("MODEL_CONFIG_PATH", "configs/model_config.yaml")
     if not os.path.exists(config_path):
@@ -285,6 +293,25 @@ def load_model():
         log_event("info", "loading_checkpoint", checkpoint=checkpoint_path)
         m = load_from_checkpoint(checkpoint_path, config_path)
         m.eval()
+        _model_trained = True
+        _log_backend_info()
+        return m
+
+    # PR #13's operator override, checked BEFORE main's refusal: a smoke test (this
+    # repo's own suite among them) must be able to boot the API on random weights and
+    # see `trained_weights: false` in /ready - not a process that dies at import.
+    env_allow = os.getenv("ALLOW_UNTRAINED_MODEL", "").lower() in ("1", "true", "yes")
+    cfg_allow = bool((model_config or {}).get("inference", {}).get("allow_untrained_model", False))
+    if env_allow or cfg_allow:
+        log_event(
+            "warning",
+            "untrained_model",
+            detail="serving a randomly initialised model; outputs are not usable audio/MIDI",
+        )
+        m = StemMidiModel(model_config)
+        m.eval()
+        _model_trained = bool(getattr(m, "weights_loaded", False))
+        _log_backend_info()
         return m
 
     # Demucs + Basic Pitch can be safe without a project state_dict because
@@ -297,7 +324,9 @@ def load_model():
             "No trained checkpoint is configured. Set MODEL_CHECKPOINT_PATH "
             "for the Mamba path, or explicitly configure the tested pretrained "
             "backend pair with weights_source: pretrained_dependencies. The API "
-            "will remain not ready rather than serving random model weights."
+            "will remain not ready rather than serving random model weights. "
+            "ALLOW_UNTRAINED_MODEL=1 (or inference.allow_untrained_model: true) "
+            "starts it on random weights for a smoke test only."
         )
     log_event("info", "loading_pretrained_backends", backends=backends)
     m = StemMidiModel(model_config)
@@ -307,7 +336,24 @@ def load_model():
             "Install the selected dependencies or provide MODEL_CHECKPOINT_PATH."
         )
     m.eval()
+    _model_trained = bool(getattr(m, "weights_loaded", False))
+    _log_backend_info()
     return m
+
+
+def _log_backend_info() -> None:
+    """Log which Mamba implementation is live and its scan chunk (M-1)."""
+    info: dict = {}
+    try:
+        from models import _mamba_compat as compat
+
+        info["mamba_backend"] = getattr(compat, "MAMBA_BACKEND", "unknown")
+        mamba_cls = getattr(compat, "Mamba", None)
+        info["scan_chunk"] = getattr(mamba_cls, "SCAN_CHUNK", None)
+    except Exception as e:  # pragma: no cover - diagnostics only
+        info["mamba_backend"] = f"unavailable: {e}"
+    info["env_MAMBA_BACKEND"] = os.getenv("MAMBA_BACKEND", "auto")
+    log_event("info", "backend_info", **info)
 
 
 async def warmup() -> None:
@@ -429,6 +475,30 @@ def _oom_exceptions() -> tuple:
     except ImportError:
         pass
     return tuple(excs)
+
+
+def _is_oom_error(exc: BaseException) -> bool:
+    """True for out-of-memory failures of any backend.
+
+    On CPU, torch raises a plain ``RuntimeError`` ("DefaultCPUAllocator: can't
+    allocate memory" / "[enforce fail at alloc_cpu.cpp]"), which the exception
+    tuple above does not match - so a CPU OOM escaped as a 500 with a stack
+    trace instead of a 503 (API-6.7). Detect it by message.
+    """
+    if isinstance(exc, _oom_exceptions()):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "defaultcpuallocator",
+            "can't allocate memory",
+            "cannot allocate memory",
+            "out of memory",
+            "alloc_cpu.cpp",
+            "not enough memory",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +635,7 @@ async def ready():
             detail="Model not ready",
             headers={"Retry-After": RETRY_AFTER_SECONDS},
         )
-    return {"status": "ready", "model_loaded": True}
+    return {"status": "ready", "model_loaded": True, "trained_weights": _model_trained}
 
 
 @app.get("/health", include_in_schema=False)
@@ -625,6 +695,15 @@ def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
     return midi_pkg  # legacy flat shape
 
 
+def _finite(value: float, default: float = 0.0) -> float:
+    """Coerce a metric to a finite float (JSON has no NaN/Infinity)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 def create_response_zip(outputs: dict) -> io.BytesIO:
     """Create a ZIP in memory: stems (wav) + MIDI + processing report."""
     zip_buffer = io.BytesIO()
@@ -659,13 +738,23 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             )
         )
         report_json = {
-            "separation_proxy": separation_proxy,
+            # Every metric goes through _finite(): NaN/Infinity are not valid JSON,
+            # and a strict client rejects the WHOLE report over one bare NaN - which
+            # is common here, since silence and DC produce non-finite metrics.
+            "separation_proxy": _finite(separation_proxy),
             # Deprecated compatibility alias. This value is not SI-SDR and
-            # must not be read as a reference-based dB certification.
-            "si_sdr": separation_proxy,
+            # must not be read as a reference-based dB certification. PR #13 renamed
+            # this metric to `centroid_separation_db`; main's rename to
+            # `separation_proxy` supersedes it (utils/quality_gates.py keeps
+            # `centroid_separation_db` as a deprecated *field* on ProcessingReport, so
+            # #13's Python consumers still read the number), and the delivered JSON
+            # deliberately does not carry a third spelling: tests/test_api_zip.py
+            # asserts the report equals the pipeline's report key-for-key, and every
+            # extra alias is a name a client could start depending on.
+            "si_sdr": _finite(separation_proxy),
             "metric_semantics": "centroid_separation_proxy_not_si_sdr",
-            "phase_coherence": float(report.phase_coherence),
-            "avg_confidence": float(report.avg_confidence),
+            "phase_coherence": _finite(report.phase_coherence),
+            "avg_confidence": _finite(report.avg_confidence),
             "confidence_encoding": guitar_midi.get("summary", {}).get(
                 "confidence_encoding", "polyphonic_key_pressure"
             ),
@@ -676,8 +765,14 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
         }
         backend = getattr(report, "backend", None)
         if backend:
-            report_json["backend"] = backend
-        zip_file.writestr("processing_report.json", json.dumps(report_json, indent=2))
+            report_json["backend"] = backend  # M-7: which implementation ran
+        zip_file.writestr(
+            "processing_report.json",
+            # allow_nan=False is the belt to _finite()'s braces: if a metric ever
+            # escapes sanitisation the build fails HERE instead of shipping bytes no
+            # strict JSON parser accepts (API-6.9 / TODO JSON-1).
+            json.dumps(report_json, indent=2, allow_nan=False),
+        )
 
     zip_buffer.seek(0)
     return zip_buffer
@@ -816,6 +911,15 @@ async def process_audio(
     except AudioValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
+        if _is_oom_error(e):
+            # CPU allocator failures arrive as RuntimeError, not MemoryError
+            # (API-6.7): report capacity, not a broken request.
+            log_event("error", "out_of_memory", error=str(e))
+            raise HTTPException(
+                status_code=503,
+                detail="Out of memory; retry after resources free up",
+                headers={"Retry-After": RETRY_AFTER_SECONDS},
+            ) from e
         log_event("error", "processing_failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Processing failed: {e!s}") from e
     finally:
@@ -896,8 +1000,14 @@ async def get_model_info():
         # checkpoint flag; clients can distinguish random/native inference from
         # a validated checkpoint or backend-owned pretrained weights.
         "mamba_backend": getattr(model, "mamba_backend", None),
-        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
-        "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
+        # One answer, three spellings: `weights_loaded` (main's H-1 name),
+        # `checkpoint_loaded` (main's backend-attestation name) and `trained_weights`
+        # (PR #13's name, the one /ready reports). The repo ships no weights, so the
+        # honest default is False - a client must be able to tell a trained render
+        # from a random-weight one.
+        "weights_loaded": bool(getattr(model, "weights_loaded", _model_trained)),
+        "checkpoint_loaded": bool(getattr(model, "weights_loaded", _model_trained)),
+        "trained_weights": _model_trained,
         "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),
         "separator_config": cfg.get("separator", {}),

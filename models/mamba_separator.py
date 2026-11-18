@@ -23,6 +23,18 @@ class MambaSeparator(nn.Module):
             cache yet - see C-2.5), metrics (B, 2) =
             [centroid_separation_proxy, phase_coherence]
 
+    Layer structure is a pre-norm residual stack: every mixer is wrapped as
+    ``h = h + mix(norm(h))`` with a final LayerNorm. Stacking bare mixers (the
+    original behaviour) multiplied the activation RMS by ~0.02 per block, so a
+    12-layer stack collapsed to ~1e-20 and every mask saturated at
+    sigmoid(0) = 0.5 - i.e. the "separator" was a flat 0.5x gain. See C-1 in
+    AUDIT_REPORT.md and tests/test_numerics.py.
+
+    Masks are softmax-normalised across stems by default
+    (``separator.mask_normalization: softmax``), so guitar + bass + residual
+    reconstruct the mixture by construction; ``independent`` restores per-stem
+    sigmoids.
+
     NOTE: Streaming inference with SSM state caching is not yet implemented.
     The original prototype used activation concatenation (not real SSM state),
     which was structurally incorrect. See C-2.5 in TODO.md for the full design
@@ -81,6 +93,20 @@ class MambaSeparator(nn.Module):
                 for _ in range(n_layers)
             ]
         )
+
+        # Pre-norm partners for the residual stack (C-1) + final norm.
+        self.block_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(n_layers)])
+        self.final_norm = nn.LayerNorm(d_model)
+
+        # Mask normalisation: "softmax" (default) makes the three masks sum to 1
+        # at every bin - mixture consistency, and an untrained model can no
+        # longer emit stems whose total energy is ~0.26x the mix (C-1).
+        self.mask_normalization = cfg["separator"].get("mask_normalization", "softmax")
+        if self.mask_normalization not in ("softmax", "independent"):
+            raise ValueError(
+                "separator.mask_normalization must be 'softmax' or 'independent', "
+                f"got {self.mask_normalization!r}"
+            )
 
         # Multi-head output: guitar, bass, residual masks
         self.mask_heads = nn.ModuleDict(
@@ -142,9 +168,10 @@ class MambaSeparator(nn.Module):
                 f"hidden dim {hidden.shape[-1]} != d_model {self.mamba_blocks[0].d_model}"
             )
 
-        # Mamba blocks
-        for block in self.mamba_blocks:
-            hidden = block(hidden)
+        # Pre-norm residual Mamba stack (C-1)
+        for norm, block in zip(self.block_norms, self.mamba_blocks, strict=True):
+            hidden = hidden + block(norm(hidden))
+        hidden = self.final_norm(hidden)
 
         # Apply masks directly to the complex spectrogram: mask_mag * spec is
         # equivalent to (mask_mag * mag) * exp(i*phase). Reuses the cached STFT.
@@ -152,17 +179,32 @@ class MambaSeparator(nn.Module):
         # everything but the reduced centroid - so peak memory stays O(two
         # spectrograms) instead of O(three masks + three magnitudes + spec)
         # on the 4-8 GB CPU target.
+        # Mask logits for all stems (needed together for a softmax across
+        # stems). One (B, T_f, F) f32 tensor per stem: ~21 MB at a 60 s segment.
+        logits = {name: head(hidden) for name, head in self.mask_heads.items()}
+        if self.mask_normalization == "softmax":
+            stacked = torch.stack(list(logits.values()), dim=0)  # (S, B, T_f, F)
+            probs = torch.softmax(stacked, dim=0)
+            masks = {name: probs[i] for i, name in enumerate(logits)}
+            del stacked, probs
+        else:
+            masks = {name: torch.sigmoid(v) for name, v in logits.items()}
+        del logits
+
+        # Apply masks directly to the complex spectrogram: mask * spec is
+        # equivalent to (mask * mag) * exp(i*phase), so the cached STFT is
+        # reused. Each stem is reduced to audio (and, for guitar/bass, a
+        # windowed centroid) and then dropped, so peak memory stays O(two
+        # spectrograms) instead of O(three masks + three magnitudes + spec).
         stems = {}
         centroids = {}
-        for name in self.mask_heads:
-            mask_tf = self.mask_heads[name](hidden).sigmoid_()  # (B, T_f, F)
+        for name, mask in masks.items():
             # Only guitar and bass feed the centroid metric; the residual's
             # magnitude used to be computed and never read.
             if name in ("guitar", "bass"):
-                centroids[name] = self._masked_centroid(mask_tf, spec)
-            stems[name] = self._masked_stem(mask_tf, spec, length=T).unsqueeze(1)
-            del mask_tf
-        del spec
+                centroids[name] = self._masked_centroid(mask, spec)
+            stems[name] = self._masked_stem(mask, spec, length=T).unsqueeze(1)
+        del masks, spec
 
         phase_score = self.phase_head(hidden.mean(dim=1))  # (B, 1)
 

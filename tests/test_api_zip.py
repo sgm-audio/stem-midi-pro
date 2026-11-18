@@ -298,17 +298,16 @@ def test_query_flags_reach_the_model(api_env, tmp_path, params, expected):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "JSON-1",
-    "processing_report.json is written with json.dumps(...) and the default allow_nan=True, so a "
-    "NaN metric (which the pipeline produces for silent, DC and non-finite input — measured: "
-    "centroid_separation_db/phase_coherence/avg_confidence are all NaN for an all-NaN "
-    "upload, and for silence the separator's proxy returns 0.0 while phase_coherence stays "
-    "NaN) emits bare `NaN`, which is "
-    "not valid RFC 8259: browsers' JSON.parse() rejects the whole download. Serialise with "
-    "allow_nan=False after sanitising, or emit null with an explicit 'unreliable' flag.",
-)
 def test_zip_report_is_strict_json(api_env, tmp_path):
+    """Regression guard for JSON-1, fixed by PR #13 (was a strict-xfail lock).
+
+    `json.dumps` with the default `allow_nan=True` wrote bare `NaN`, which RFC 8259
+    forbids, so a strict parser rejected the WHOLE download for a file with
+    non-finite metrics - the normal outcome for silence, DC and NaN input. The fix is
+    `_finite()` on every metric plus `allow_nan=False`, i.e. a bad number is now a
+    loud build failure instead of an unparseable artefact. An all-NaN render must
+    still parse.
+    """
     api, stub = api_env
 
     def process(path, quantize=False):
@@ -516,38 +515,58 @@ def _report_json_from_zip(api_env, tmp_path):
     return json.loads(zf.read("processing_report.json"))
 
 
-@known_bug(
-    "DOC-1",
-    "the user-facing docs still describe confidence as CC#127 - USER_GUIDE.md:11 and :88 "
-    "('use CC#127 to find uncertain notes', with the bands 96-127 / 64-95 / 0-63) and "
-    "API_DOCUMENTATION.md:80/150 - while PR #11 (H-5) moved the controller to CC#16 because "
-    "CC#120-127 are MIDI Channel Mode messages. README.md was updated, the workflow docs were "
-    "not, so a user following USER_GUIDE.md:88 filters on a controller that is "
-    "never written and concludes the export is broken. Update the three doc files to say CC#16 "
-    "(and mention MIDI_CONFIDENCE_CC=127 as the opt-in), then keep this guard.",
-)
-def test_the_documented_confidence_controller_is_the_one_the_writer_emits():
-    """A documented MIDI controller is an API promise: it must be the one we emit."""
-    from utils.midi import DEFAULT_CONFIDENCE_CC, resolve_confidence_cc
+def test_the_documented_confidence_lane_is_the_one_the_writer_emits():
+    """Regression guard for DOC-1 (docs and writer reconciled by PR #15).
 
-    assert DEFAULT_CONFIDENCE_CC == resolve_confidence_cc() == 16
+    DOC-1 was: USER_GUIDE.md:11/:88 and API_DOCUMENTATION.md told users to read
+    confidence off CC#127, which PR #11 (H-5) had already moved off Channel Mode
+    controllers, and which the writer no longer emits at all - PR #15 replaced the CC
+    lane with note-specific Polyphonic Key Pressure. So the docs and the writer now
+    agree, and this test's job changed from "fail knowingly" to "never drift apart
+    again". It is deliberately not importing a controller constant any more: there is
+    no controller to configure, and a guard that only passes while it crashes is worse
+    than none.
+
+    Two halves, both cheap to keep true:
+      * the writer emits poly pressure per note and never touches CC#120-127;
+      * any user-facing doc that mentions CC#127 next to "confidence" must also say it
+        is not emitted (or that the key is a deprecated JSON alias).
+    """
+    import io
+
+    from mido import MidiFile
+
+    from utils.midi import build_midi_from_events
+
+    events = [
+        {"note": 60, "onset_frame": 0, "velocity": 90, "confidence": 0.9},
+        {"note": 61, "onset_frame": 86, "velocity": 90, "confidence": 0.5},
+    ]
+    mid = MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
+    track = mid.tracks[0]
+    assert [m.value for m in track if m.type == "polytouch"] == [114, 63]
+    channel_mode = [m.control for m in track if m.type == "control_change" and m.control >= 120]
+    assert not channel_mode, f"Channel Mode messages written as confidence: {channel_mode}"
+
     offenders = []
     for name in _DOC_FILES:
-        text = (ROOT / name).read_text(encoding="utf-8")
-        mentions_127 = [
+        path = ROOT / name
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        mentions = [
             ln.strip()
             for ln in text.split("\n")
             if re.search(r"CC\s*#?127", ln) and re.search(r"confidence", ln, re.I)
         ]
-        if not mentions_127:
+        if not mentions:
             continue
-        if re.search(r"CC\s*#?16|MIDI_CONFIDENCE_CC", text):
-            continue  # the file explains the default and the opt-in
-        offenders.append(f"{name}: {mentions_127[0][:110]}")
-    assert not offenders, (
-        "docs promise CC#127 for confidence without mentioning that the writer emits CC#16:\n"
-        + "\n".join(offenders)
-    )
+        if re.search(r"not emitted|never emitted|never serialized|deprecated", text, re.I):
+            continue  # the file mentions CC#127 only to say it is gone
+        offenders.append(f"{name}: {mentions[0][:110]}")
+    assert (
+        not offenders
+    ), "docs promise CC#127 for confidence, which the writer never emits:\n" + "\n".join(offenders)
 
 
 @known_bug(

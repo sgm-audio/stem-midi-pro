@@ -1,7 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Attach note-level confidence and alignment metadata to MIDI events."""
+"""Per-note confidence metadata for MIDI events.
 
-from __future__ import annotations
+Aligns note events with the model's frame grid and the stem's frame-level
+energy, and produces per event:
+
+* ``confidence``      — the model's per-frame confidence at the onset.
+* ``stem_energy`` / ``alignment_score`` — the stem energy on that frame and
+                        ``confidence * sigmoid(energy * 10)``, kept as
+                        diagnostics (a note on near-silence is the classic
+                        hallucination signature).
+* ``needs_review``    — a **confidence** decision (``confidence < min_confidence``),
+                        per ARCH-11.6.2 "low-confidence notes are flagged for
+                        human review". Deriving it from ``alignment_score`` made
+                        a confident pianissimo passage always flagged and let
+                        the same events flip on gain alone.
+* ``confidence_value`` (``confidence_cc_value`` / legacy alias ``cc_127_value``)
+  and ``quantization_suggestion`` — consumed by ``utils/midi.py``, which encodes
+  the value as note-specific **Polyphonic Key Pressure** (PR #15). No CC is
+  written: a channel controller cannot distinguish simultaneous notes, and
+  CC#120-127 are Channel Mode messages. ``summary.confidence_encoding`` says
+  which lane a consumer should read.
+
+Both ``confidence`` and ``stem_energy`` must be on the **frame grid** (hop
+length), not the sample grid: indexing a per-sample energy array with a frame
+index looked at audio ~86x earlier than the note (H-3). A length mismatch and
+non-finite values both raise rather than silently mis-aligning or writing NaN.
+"""
 
 import logging
 import math
@@ -24,6 +48,15 @@ class ConfidenceInjector:
         self.onset_threshold = onset_threshold
         self.min_confidence = min_confidence
 
+    @staticmethod
+    def _require_finite(values: torch.Tensor, name: str) -> None:
+        """Refuse non-finite metadata instead of writing corrupt MIDI/JSON."""
+        if values.numel() and not torch.isfinite(values).all():
+            raise ValueError(
+                f"{name} contains non-finite values; the model produced NaN/Inf "
+                "output. Refusing to write corrupt metadata."
+            )
+
     def inject_midi_metadata(
         self, midi_events: list, confidence: torch.Tensor, stem_energy: torch.Tensor
     ) -> dict:
@@ -37,6 +70,16 @@ class ConfidenceInjector:
         confidence = confidence.detach().reshape(-1).float().cpu()
         stem_energy = stem_energy.detach().reshape(-1).float().cpu()
 
+        if confidence.numel() != stem_energy.numel():
+            raise ValueError(
+                "confidence and stem_energy must share the frame grid: "
+                f"got {confidence.numel()} vs {stem_energy.numel()} frames "
+                "(pool sample-rate energy by hop_length before calling)"
+            )
+        self._require_finite(confidence, "confidence")
+        self._require_finite(stem_energy, "stem_energy")
+
+        # Vectorized lookup of per-event confidence / energy / alignment scores
         onset_indices = (
             torch.tensor([int(e["onset_frame"]) for e in midi_events], dtype=torch.long)
             if midi_events
@@ -77,8 +120,9 @@ class ConfidenceInjector:
                     "confidence_cc_value": confidence_value,
                     "stem_energy": energy,
                     "alignment_score": alignment_score,
-                    # Review is a confidence decision; energy remains a
-                    # diagnostic alignment score and must not change the flag.
+                    # The review flag is a CONFIDENCE decision (ARCH-11.6.2):
+                    # "low-confidence notes are flagged for human review".
+                    # Energy stays in alignment_score as a diagnostic.
                     "needs_review": conf_score < self.min_confidence,
                     "quantization_suggestion": "grid" if alignment_score > 0.85 else "human",
                 }

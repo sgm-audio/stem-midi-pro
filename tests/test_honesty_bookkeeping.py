@@ -185,6 +185,57 @@ def test_no_escape_hatches_in_the_tests_i_own() -> None:
     )
 
 
+def test_every_open_entry_is_locked_by_a_test_or_says_why_not() -> None:
+    """An open defect needs a test, an explicit "no test lock", or it is a rumour.
+
+    The weaker rule above only fires when an entry *claims* "Locked by N tests". That is
+    how PR #15 could delete the MIDI-5 and CKPT-1 markers, fix both defects, and leave
+    the entries sitting open in the index with nothing behind them: a reader cannot tell
+    "unfixed and untested" from "fixed and forgotten", and the next regression is free.
+
+    So each open entry must either have a `@known_bug` marker under one of its ids, or
+    carry the literal text `No test lock:` explaining why a test is not the right
+    instrument (analytic findings, e.g. the memory model, qualify).
+    """
+    marked = set(_marked_ids())
+    unaccounted: list[str] = []
+    for line in _todo_181():
+        if not line.startswith("- [ ]"):
+            continue
+        ids = _ids_on(line)
+        if not ids or (ids & marked) or "No test lock:" in line:
+            continue
+        unaccounted.append(f"{'/'.join(sorted(ids))}: {line.strip()[:90]}")
+    assert not unaccounted, (
+        "these open TODO.md 18.1 entries have no @known_bug marker and no 'No test lock:' "
+        "note — either lock the defect, land the fix and check the entry off, or say why a "
+        "test cannot carry it:\n" + "\n".join(unaccounted)
+    )
+
+
+def test_guards_cited_in_the_todo_still_exist() -> None:
+    """``tests/test_x.py::test_y`` in 18.1 must resolve here and now.
+
+    Resolved entries are kept on purpose (the id is the join key), and they name the
+    guard that replaced the marker. Guards get renamed by the next refactor, and then the
+    breadcrumb points at nothing — which reads like "this was fixed and tested" forever.
+    Checked by name only, so a line-number or parametrisation edit cannot break it.
+    """
+    known: set[str] = set()
+    for path in TESTS.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                known.add(node.name)
+    cited = set(re.findall(r"::(test_[a-z0-9_]+)", "\n".join(_todo_181())))
+    missing = sorted(cited - known)
+    assert not missing, (
+        f"TODO.md 18.1 cites guards that no longer exist: {missing}. Either the test was "
+        "renamed (update the citation) or the regression coverage was deleted (put it back "
+        "— a fixed defect without its guard is a defect on loan)"
+    )
+
+
 def _dotted(node: ast.expr) -> str:
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
