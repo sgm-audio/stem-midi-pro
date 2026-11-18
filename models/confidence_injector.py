@@ -94,8 +94,14 @@ class ConfidenceInjector:
             "midi_events": enhanced_events,
             "summary": {
                 "avg_confidence": torch.mean(confidence).item() if len(confidence) > 0 else 0.0,
-                "low_confidence_count": (
-                    (confidence < self.min_confidence).sum().item() if len(confidence) > 0 else 0
+                # GATE-2/REPORT-1: this number is shown to the user as "low
+                # confidence notes" and is compared against thresholds, so it
+                # must count NOTES. It used to be (confidence < thr).sum() --
+                # a count of FRAMES, which grows with file length (one second
+                # is 86 frames) and has nothing to do with how many notes need
+                # attention.
+                "low_confidence_count": sum(
+                    1 for e in enhanced_events if e["confidence"] < self.min_confidence
                 ),
                 "alignment_warnings": sum(1 for e in enhanced_events if e["needs_review"]),
             },

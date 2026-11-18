@@ -245,23 +245,18 @@ def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
     )
 
 
-@known_bug(
-    "GATE-2",
-    "ConfidenceInjector.summary['low_confidence_count'] counts FRAMES of the confidence "
-    "tensor below min_confidence ((confidence < thr).sum()), and main feeds it into "
-    "ProcessingReport.low_confidence_notes / the API's processing_report.json. One second "
-    "of audio is 86 frames, so the number reported to the user as 'low confidence notes' is "
-    "a frame count and grows with file length. Count notes.",
-)
 def test_low_confidence_notes_counts_notes_not_frames(pipeline_config):
     """The field the user sees as 'low confidence notes' must be a note count."""
     n = 200
     conf = torch.full((1, n), 0.3)  # every frame low confidence
     onset = torch.full((1, n, 1), -10.0)
-    for f in (5, 9, 44):  # ... but only three notes
+    # Three notes, spaced past the decoder's minimum inter-onset gap (frames
+    # 5 and 9 collapse into one note, which made this fixture emit 2 events).
+    note_frames = (5, 44, 120)
+    for f in note_frames:  # ... but only three notes
         onset[0, f, 0] = 10.0
     pitch = torch.zeros(1, n, 128)
-    for f in (5, 9, 44):
+    for f in note_frames:
         pitch[0, f, 60] = 10.0
     from main import StemMidiModel
 
@@ -276,7 +271,7 @@ def test_low_confidence_notes_counts_notes_not_frames(pipeline_config):
     )
     with torch.inference_mode():
         out = model(guitar)
-    n_notes = len(out["midi_metadata"]["midi_events"])
+    n_notes = len(out["midi_metadata"]["guitar"]["midi_events"])
     assert n_notes == 3, f"fixture broke: {n_notes} notes"
     assert out["processing_report"].low_confidence_notes == n_notes, (
         f"report says {out['processing_report'].low_confidence_notes} low-confidence notes "
