@@ -38,6 +38,9 @@ from utils.quality_gates import ProcessingReport, route_by_quality  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Provenance label carried on every note that has expression data (ARCH-11.4.4).
+_EXPRESSION_SOURCE = "expression_head (untrained; ARCH-11.4.4)"
+
 # Default loud input cap (C-1 / C-6): with the chunked scan the separator no
 # longer needs O(L·d_inner·N) memory, but STFT-domain buffers and stems still
 # scale with length. Override via cfg["audio"]["max_input_seconds"].
@@ -560,11 +563,16 @@ class StemMidiModel(nn.Module):
                 names = self.cfg["transcriber"].get(
                     "expression_heads", ["bend", "vibrato", "slide"]
                 )
+                # The head is sigmoid, so every channel is already 0..1 with 0.5
+                # neutral (the writer's convention). The value is tagged with
+                # where it came from: an untrained head's output must never pass
+                # for learned phrasing.
                 event["expression"] = {
                     name: max(0.0, min(1.0, float(values[i])))
                     for i, name in enumerate(names)
                     if i < len(values)
                 }
+                event["expression"]["source"] = _EXPRESSION_SOURCE
             events.append(event)
         return events
 

@@ -24,7 +24,7 @@ Third-party attributions are in [NOTICE](NOTICE).
 
 - **Configured stem separation** — the model honors the selected separator backend (`mamba` or optional `demucs`) and returns independent guitar, bass, and residual stems. The pure-PyTorch Mamba path is structural code; useful output requires trained weights.
 - **Independent MIDI transcription** — guitar and bass are transcribed separately. MIDI preserves absolute audio-frame timing, duration, overlapping notes, and same-onset chords.
-- **Expression mapping** — emitted bend, vibrato, and slide fields are mapped to pitch-wheel, CC1, and CC74 messages. This is a serialization capability, not evidence that an available checkpoint learned expression.
+- **Expression mapping** — bend, vibrato, and slide fields map to pitch-wheel, CC1, and CC74 messages, written only when a caller asks for them (`include_expression=True`). Export is off by default on purpose: the head is untrained, so writing it into every file would fabricate phrasing. Every event that carries expression is labelled `source: expression_head (untrained; ARCH-11.4.4)`, and mapping is never evidence that a checkpoint learned expression.
 - **Confidence metadata** — note confidence is canonical in JSON and is also encoded as standard MIDI Polyphonic Key Pressure when supported by a DAW. CC#127 is retained only as a deprecated JSON alias and is never emitted.
 - **Quality gates** — reports expose a named centroid-separation proxy, not SI-SDR. Untrained weights and artifact flags force manual review rather than certification (`utils/quality_gates.py`).
 
