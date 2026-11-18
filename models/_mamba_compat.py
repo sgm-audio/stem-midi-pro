@@ -89,9 +89,12 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             d_conv: int = 4,
             expand: int = 2,
             gradient_checkpointing: bool = False,
+            dt_max: float = 0.1,
             **_ignored,
         ):
             super().__init__()
+            if not 0 < dt_max <= 1.0:
+                raise ValueError(f"dt_max must be in (0, 1], got {dt_max!r}")
             self.d_model = d_model
             self.d_state = d_state
             self.d_conv = d_conv
@@ -99,6 +102,14 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             self.d_inner = expand * d_model
             self.dt_rank = math.ceil(d_model / 16)
             self.gradient_checkpointing = gradient_checkpointing
+            # Runtime ceiling on the discretisation step. The recurrence is
+            # stable for any dt > 0 (dA = exp(dt*A) < 1), but a large dt makes
+            # the state saturate to a pure integrator of the input, which is how
+            # a bounded-input model can still produce a huge DC gain. The init
+            # already lands in [dt_min, dt_max]; this also enforces it when a
+            # data path drives large dt inputs (see AUDIT_REPORT.md, "dt
+            # clamping").
+            self.dt_max = float(dt_max)
 
             self.in_proj = nn.Linear(d_model, 2 * self.d_inner, bias=False)
             self.conv1d = nn.Conv1d(
@@ -129,15 +140,40 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
 
             self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """(B, L, D) -> (B, L, D)"""
-            if self.gradient_checkpointing and self.training and x.requires_grad:
-                return torch.utils.checkpoint.checkpoint(
-                    self._block_forward, x, use_reentrant=False
-                )
-            return self._block_forward(x)
+        def forward(self, x: torch.Tensor, state: dict | None = None, return_state: bool = False):
+            """(B, L, D) -> (B, L, D), optionally carrying SSM state across calls.
 
-        def _block_forward(self, x: torch.Tensor) -> torch.Tensor:
+            ``state``/``return_state`` implement the streaming path (C-2.5): a
+            caller that feeds consecutive pieces of one sequence can thread the
+            returned state into the next call and get the same result as one
+            long call, instead of restarting the recurrence at every boundary.
+            The state is ``{"h": (B, d_inner, d_state), "conv": (B, d_conv-1, d_inner)}``
+            — the SSM accumulator plus the causal convolution's history.
+            """
+            if state is None and self.gradient_checkpointing and self.training and x.requires_grad:
+                out = torch.utils.checkpoint.checkpoint(self._block_forward, x, use_reentrant=False)
+                return (out, self.initial_state(x)) if return_state else out
+            out, new_state = self._block_forward(x, state=state, return_state=True)
+            return (out, new_state) if return_state else out
+
+        def initial_state(self, x: torch.Tensor) -> dict:
+            """Zero state for the first call of a streaming session (C-2.5)."""
+            B = x.shape[0]
+            return {
+                "h": torch.zeros(
+                    B, self.d_inner, self.d_state, device=x.device, dtype=torch.float32
+                ),
+                "conv": torch.zeros(
+                    B, self.d_conv - 1, self.d_inner, device=x.device, dtype=x.dtype
+                ),
+            }
+
+        def _block_forward(
+            self,
+            x: torch.Tensor,
+            state: dict | None = None,
+            return_state: bool = False,
+        ):
             """(B, L, D) -> (B, L, D).
 
             Fused chunking: projections, the causal conv, the scan and the
@@ -157,25 +193,35 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
             hist = self.d_conv - 1
             out = torch.empty(B, L, self.d_model, device=x.device, dtype=x.dtype)
             A = -torch.exp(self.A_log)  # (d_inner, N), negative => contraction
-            h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=torch.float32)
+            if state is None:
+                h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=torch.float32)
+                # Convolution history in *pre-conv* space: the depthwise kernel
+                # reaches back exactly d_conv-1 frames, and zeros reproduce the
+                # left padding the whole-sequence form uses at the start.
+                conv_tail = torch.zeros(B, hist, self.d_inner, device=x.device, dtype=x.dtype)
+            else:
+                h = state["h"].to(device=x.device, dtype=torch.float32)
+                conv_tail = state["conv"].to(device=x.device, dtype=x.dtype)
 
             for start in range(0, L, self.SCAN_CHUNK):
                 stop = min(start + self.SCAN_CHUNK, L)
-                ctx_start = max(0, start - hist)  # conv context from previous window
-                n_hist = start - ctx_start
-                win = stop - start
 
-                # --- projections over [ctx_start, stop) -------------------
-                xz = self.in_proj(x[:, ctx_start:stop])  # (B, n_hist+win, 2*d_inner)
+                # --- projections over this window only -------------------
+                xz = self.in_proj(x[:, start:stop])  # (B, win, 2*d_inner)
                 x_in, z = xz.chunk(2, dim=-1)
 
-                # --- causal depthwise conv (needs d_conv-1 frames of lookback)
-                xc = self.conv1d(x_in.transpose(1, 2))  # (B, d_inner, n_hist+win+hist)
-                # conv1d pads `hist` on the left, so index n_hist.. aligns
-                # with the first output frame of this window.
-                xc = xc[..., n_hist : n_hist + win]
-                xc = F.silu(xc).transpose(1, 2)  # (B, win, d_inner) — this window only
-                z = z[:, n_hist:, :]  # gate for this window only (B, win, d_inner)
+                # --- causal depthwise conv, fed with the carried history ---
+                # Equivalent to convolving the whole sequence: the previous
+                # window's last d_conv-1 frames ARE this window's lookback.
+                conv_in = torch.cat([conv_tail, x_in], dim=1)  # (B, hist+win, d_inner)
+                conv_tail = conv_in[:, -hist:, :] if hist else conv_in[:, :0, :]
+                xc = F.conv1d(
+                    conv_in.transpose(1, 2),
+                    self.conv1d.weight,
+                    self.conv1d.bias,
+                    groups=self.d_inner,
+                )  # (B, d_inner, win)
+                xc = F.silu(xc).transpose(1, 2)  # (B, win, d_inner)
 
                 x_dbl = self.x_proj(xc)  # (B, win, dt_rank + 2*N)
                 dt_raw, Bmat, Cmat = torch.split(
@@ -186,12 +232,16 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
                 # *constant* input) is removed by the per-block LayerNorm in
                 # the models plus the bounded log-mel input; see review §3.
                 dt = F.softplus(self.dt_proj(dt_raw))
+                if self.dt_max < float("inf"):
+                    dt = dt.clamp(max=self.dt_max)
 
                 y, h = self._selective_scan(xc, dt, Bmat, Cmat, A=A, h=h, return_state=True)
                 y = y + self.D.unsqueeze(0).unsqueeze(0) * xc  # skip connection
                 y = y * F.silu(z)  # gate
                 out[:, start:stop] = self.out_proj(y)
 
+            if return_state:
+                return out, {"h": h, "conv": conv_tail}
             return out
 
         def _selective_scan(

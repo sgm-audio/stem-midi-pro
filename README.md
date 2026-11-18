@@ -2,7 +2,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM and optional Demucs/Basic Pitch backends. The repository contains model code and tests, but **does not ship trained checkpoint weights**. Python **3.13** and CPU execution are targets; reference-i5 throughput and audio quality are not certified by this repository.
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM and optional Demucs/Basic Pitch backends. The repository contains model code and tests, but **does not ship trained checkpoint weights**. Python **3.13** and CPU execution are targets; reference-i5 throughput and audio quality are not certified by this repository. Test suite on the rebased tree: `pytest -q` → **400 passed, 4 skipped, 28 xfailed, 0 failed**.
 
 > **Status:** Active development; **not production-ready without a separately trained and validated checkpoint**. The CLI and API refuse to serve file inference from random initialization. See [TODO.md](TODO.md), [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md), and [SUMMARY.md](SUMMARY.md) for current evidence and limitations.
 
@@ -69,6 +69,22 @@ This project targets **bare-metal CPU**, not GPUs. No reproducible benchmark on 
 
 The pure-PyTorch Mamba fallback runs on CPU. The optional `configs/model_config.cpu.yaml` selects Demucs + Basic Pitch and fails with actionable dependency errors when those packages are absent.
 
+### Measured on a 2-vCPU cloud box (not the reference i5, **random weights**)
+
+Structural cost only — the weights are untrained, so these numbers bound the pipeline's time and
+memory, not its audio quality (`process_audio_file`, separation + transcription, MIDI written,
+`configs/model_config.yaml`, 2 threads):
+
+| Input length | Path | Wall time | Peak RSS |
+|---|---|---|---|
+| 5 min | chunked (`chunk_duration_sec: 2`, default) | 104.0 s | 1.60 GB |
+| 5 min | one pass (`chunk_duration_sec: 300`) | 69.0 s | 2.16 GB |
+| 10 min | chunked (`chunk_duration_sec: 2`) | 173.6 s | 2.22 GB |
+
+Long inputs are separated in overlapping chunks (`audio.chunk_duration_sec`, default 2 s) and
+transcribed in frame segments (`inference.segment_seconds`, default 60 s), so peak memory tracks the
+chunk size rather than the file length. Imports plus the idle model account for ~0.7 GB of each peak.
+
 ## Project Structure
 
 ```
@@ -119,3 +135,16 @@ Built with PyTorch, [Mamba-SSM](https://github.com/state-spaces/mamba), librosa,
 ---
 
 *Stem+MIDI Pro: stem separation + editable MIDI drafts. Not magic—just math that respects your craft.*
+
+## Before you deploy
+
+A trained checkpoint is required. Without `MODEL_CHECKPOINT_PATH` the API refuses to start serving
+(`/ready` → 503) rather than returning random-weight stems and MIDI:
+
+```bash
+export MODEL_CHECKPOINT_PATH=checkpoints/stem_midi_v1.pt
+export MODEL_CONFIG_PATH=configs/model_config.yaml
+```
+
+`ALLOW_UNTRAINED_MODEL=1` (or `inference.allow_untrained_model: true`) overrides this for smoke tests
+only; `/ready` and `/model-info` will then report `"trained_weights": false`.

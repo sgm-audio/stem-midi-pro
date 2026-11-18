@@ -15,6 +15,11 @@ import numpy as np
 import soundfile as sf
 
 SUPPORTED_SAMPLE_RATES = {44100, 48000}
+# Integer PCM only. Float WAV/FLAC and compressed formats are accepted (they are
+# decoded to float32 anyway) and their subtype is reported in ``info``; 8-bit and
+# 32-bit integer PCM are rejected because they are almost always an export
+# mistake and the model has no headroom handling for them (audit M-5: the
+# constant existed but was never enforced).
 SUPPORTED_BIT_DEPTHS = {16, 24}
 MAX_DURATION_SECONDS = 600  # 10 minutes
 
@@ -58,10 +63,27 @@ def open_and_validate(file_path: str, max_duration_seconds: int = MAX_DURATION_S
         "bit_depth": _infer_bit_depth(snd.subtype),
     }
 
+    if info["frames"] <= 0 or info["duration"] <= 0:
+        snd.close()
+        raise AudioValidationError(
+            f"Audio file {file_path!r} contains no frames ({info['frames']} frames, "
+            f"{info['duration']:.3f}s). A zero-length file is a client error: there is "
+            "nothing to separate or transcribe."
+        )
+
     if info["duration"] > max_duration_seconds:
         snd.close()
         raise AudioValidationError(
             f"Audio duration {info['duration']:.2f}s exceeds maximum {max_duration_seconds}s"
+        )
+
+    subtype = str(info["format"] and info["subtype"] and snd.subtype)
+    if subtype.startswith("PCM") and info["bit_depth"] not in SUPPORTED_BIT_DEPTHS:
+        snd.close()
+        raise AudioValidationError(
+            f"Unsupported PCM bit depth {info['bit_depth']} (subtype {snd.subtype}). "
+            f"Supported integer depths: {sorted(SUPPORTED_BIT_DEPTHS)}. "
+            "Export as 16- or 24-bit PCM, or as float."
         )
 
     if info["sample_rate"] not in SUPPORTED_SAMPLE_RATES:
@@ -77,6 +99,27 @@ def open_and_validate(file_path: str, max_duration_seconds: int = MAX_DURATION_S
         snd.close()
 
 
+def check_finite(file_path: str, chunk_frames: int = 1 << 20) -> None:
+    """Stream ``file_path`` and raise if any sample is NaN or Inf (IO-3).
+
+    Headers cannot tell you a file is corrupt; the samples can. This walks the
+    file in ``chunk_frames`` blocks so the check costs O(1) memory even for the
+    600 s maximum, and stops at the first bad sample.
+    """
+    with sf.SoundFile(file_path) as snd:
+        while True:
+            block = snd.read(frames=chunk_frames, dtype="float32", always_2d=True)
+            if block.size == 0:
+                return
+            if not np.isfinite(block).all():
+                bad = int(np.count_nonzero(~np.isfinite(block)))
+                raise AudioValidationError(
+                    f"Audio contains {bad} non-finite sample(s) (NaN/Inf) near frame "
+                    f"{int(snd.tell())}; refusing to process. Check the file for corrupt "
+                    "frames or a broken decoder."
+                )
+
+
 def load_native_mono(snd: sf.SoundFile) -> tuple[np.ndarray, int]:
     """
     Read from an open SoundFile handle at NATIVE sample rate (sr=None — no
@@ -85,7 +128,16 @@ def load_native_mono(snd: sf.SoundFile) -> tuple[np.ndarray, int]:
     audio = snd.read(dtype="float32", always_2d=True)
     sr = snd.samplerate
     audio = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
-    return np.asarray(audio, dtype=np.float32), sr
+    audio = np.asarray(audio, dtype=np.float32)
+    # NaN/Inf samples survive every decoder and then poison the STFT, the masks
+    # and finally the JSON report (IO-3). Refuse them at the boundary.
+    if not np.isfinite(audio).all():
+        bad = int(np.count_nonzero(~np.isfinite(audio)))
+        raise AudioValidationError(
+            f"Audio contains {bad} non-finite sample(s) (NaN/Inf); refusing to process. "
+            "Check the file for corrupt frames or a broken decoder."
+        )
+    return audio, sr
 
 
 def load_audio(

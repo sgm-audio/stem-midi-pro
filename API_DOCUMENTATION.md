@@ -69,7 +69,7 @@ Upload an audio file; receive a ZIP with stems, MIDI, and a processing report.
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `quantize` | bool | `false` | When `true`, run inference with INT8 dynamic quantization of Linear layers (PERF-7.7/7.8). Lower CPU matmul cost; same output shapes. |
+| `quantize` | bool | `false` | When `true`, run inference with INT8 dynamic quantization of Linear layers (PERF-7.7/7.8). **Measured on this CPU target it is not faster**: 0.21 s fp32 vs 0.22 s INT8 for a 3 s clip (d_model 128, 4 layers, 2 threads) — the Python selective scan dominates, not the matmuls — and the stems differ from fp32 by max 5.9e-3. Same output shapes; kept for completeness, not as an optimisation. |
 
 **Success — `200 OK`**, `Content-Type: application/zip`. ZIP contents:
 
@@ -153,6 +153,16 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 1. **Studio gate** — `avg_confidence ≥ 0.85`, no artifact flags, and `low_confidence_notes == 0`: direct download with a warning to verify; the reported proxy is observability only and this is not SI-SDR certification.
 2. **Draft** — `avg_confidence ≥ 0.70` without artifacts or untrained weights, but below the studio conditions: refine low-confidence notes in your DAW.
 3. **Complex** — invalid metrics, `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
+
+## MIDI export behaviour
+
+| Setting (model config) | Default | Effect |
+|---|---|---|
+| `midi.tempo` | `auto` | `auto` estimates the beat grid from the upload (`utils/tempo.py`; falls back to 120 BPM when there is no measurable pulse), `fixed` always writes 120 BPM, a number is read as BPM. The estimate never changes absolute note times — onset ticks are converted with the same tempo that is written into `set_tempo`. |
+| `midi.include_expression` | `false` | When `true`, exported files carry the expression head's bend/vibrato/slide as pitch-wheel + CC. The head is untrained, so each event tags `expression.source`; values are omitted by default rather than invented. |
+
+`/model-info` and the processing report stay unchanged; the detected tempo is reported per stem
+(`tempo_us`, `tempo_source`) and once in `summary.timing` (`source`, `bpm`, `confidence`).
 
 ## CORS
 

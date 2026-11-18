@@ -523,16 +523,8 @@ def test_zero_onsets_never_produce_notes(pipeline_config):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "GATE-3",
-    "route_by_quality never looks at what the render actually contains: with non-silent "
-    "stems, confidence 0.95 and a 25 dB proxy it stamps STUDIO on a render with ZERO "
-    "notes, and the user gets direct_download on an empty MIDI. ProcessingReport must "
-    "carry note_count (and the input RMS) and a studio/draft tier must require a sane, "
-    "non-empty note stream — 'draft' is a promise that there is something to edit.",
-)
 def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
-    """0 notes with happy metrics must route to fallback_options, not direct_download."""
+    """Regression guard for GATE-3: 0 notes routes to fallback_options, never direct_download."""
     # A 220 Hz TONE, not torch.full(...): a constant is pure DC, and once
     # _detect_artifacts flags input DC offset this fixture routes to COMPLEX for
     # that reason instead of exercising the empty-render path this test pins.
@@ -551,15 +543,6 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     assert out["routing_decision"]["action"] == "fallback_options"
 
 
-@pytest.mark.real_mamba
-@known_bug(
-    "SEP-1",
-    "the separator learns three INDEPENDENT sigmoid masks (guitar/bass/residual), so "
-    "guitar+bass+residual != mix: measured relative error 0.46-0.51 across seeds 0-3 (i.e. "
-    "the three stems together account for ~half the mixture's energy). Users hear holes in "
-    "the mix and 'sum to mix' checks in a DAW fail. Either define residual = mix - guitar - "
-    "bass or add a sum-consistency term, and assert it here.",
-)
 def test_stems_sum_back_to_the_mix(pipeline_config, synth):
     from main import StemMidiModel
 

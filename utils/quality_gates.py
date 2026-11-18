@@ -20,6 +20,8 @@ KNOWN_ARTIFACT_FLAGS = {
     "untrained_weights",
     "silence",
     "dc_offset",
+    # 0 transcribed notes: nothing to deliver, whatever the metrics say.
+    "empty_render",
 }
 
 
@@ -43,6 +45,10 @@ class ProcessingReport:
     avg_confidence: float = 0.0
     artifact_flags: list[str] | None = None
     low_confidence_notes: int = 0
+    # Number of notes in the render. ``None`` = unknown (a hand-built report);
+    # 0 means there is nothing to deliver, which must never grade as STUDIO or
+    # DRAFT however good the metrics look (GATE-3).
+    total_notes: int | None = None
     config: dict[str, Any] | None = None
     model_weights_loaded: bool | None = None
     si_sdr: float | None = None  # deprecated input/output compatibility alias
@@ -96,6 +102,8 @@ class ProcessingReport:
         ]
         if self.invalid and "non_finite" not in self.artifact_flags:
             self.artifact_flags.append("non_finite")
+        if self.total_notes == 0 and "empty_render" not in self.artifact_flags:
+            self.artifact_flags.append("empty_render")
 
         # The centroid value is a saturation-prone proxy, not SI-SDR (C-2.6):
         # one FFT bin of separation reports exactly 20.00 dB, which clears
@@ -119,6 +127,15 @@ class ProcessingReport:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+    @property
+    def separation_proxy_db(self) -> float:
+        """The same number as ``centroid_separation_db``, under a functional name.
+
+        Kept for callers written against the pre-C-2.6 name; it reads the
+        renamed field, so it cannot drift from the dataclass again.
+        """
+        return self.centroid_separation_db
 
     @property
     def quality_tier(self) -> QualityTier:
@@ -164,6 +181,7 @@ class ProcessingReport:
             "avg_confidence": _safe(self.avg_confidence),
             "artifact_flags": list(self.artifact_flags),
             "low_confidence_notes": int(self.low_confidence_notes),
+            "total_notes": None if self.total_notes is None else int(self.total_notes),
             "quality_tier": self.quality_tier.value,
             "invalid": self.invalid,
             "backend": self.backend,
@@ -177,6 +195,22 @@ def route_by_quality(report: ProcessingReport) -> dict[str, Any]:
     system in this repository. Routing therefore points the user to their DAW
     instead of advertising nonexistent services.
     """
+    # Nothing to deliver: no tier can make an empty render useful, so this is
+    # checked before the tiers (GATE-3).
+    if "empty_render" in (report.artifact_flags or []):
+        return {
+            "action": "fallback_options",
+            "badge": "No notes detected",
+            "message": (
+                "Transcription found no notes in this upload. Download the raw stems and "
+                "check the input, or try a longer/cleaner excerpt."
+            ),
+            "review_in_daw": True,
+            "options": [
+                {"id": "raw", "label": "Download raw output", "confidence_overlay": True},
+                {"id": "cancel", "label": "Discard this output"},
+            ],
+        }
     if report.quality_tier == QualityTier.STUDIO:
         return {
             "action": "direct_download",
