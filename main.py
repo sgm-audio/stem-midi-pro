@@ -475,6 +475,26 @@ class StemMidiModel(nn.Module):
         return StemMidiModel._stem_is_silent(guitar) and StemMidiModel._stem_is_silent(bass)
 
     @staticmethod
+    def _noise_fraction(stem: torch.Tensor) -> float:
+        """Fraction of a stem's energy sitting in the top band of the spectrum.
+
+        A proxy for "is this broadband hiss?" rather than "is this loud?".
+        Silent or near-silent stems return 0.0 -- silence is reported by
+        `_stems_are_silent`, and a quiet stem must not be labelled noisy.
+        """
+        energy = torch.mean(stem**2)
+        if not bool(torch.isfinite(energy)) or float(energy) <= 1e-10:
+            return 0.0
+        # (B, C, T) -> per-example 1-D spectra
+        flat = stem.reshape(-1, stem.shape[-1])
+        spectrum = torch.fft.rfft(flat, dim=-1).abs() ** 2  # (N, F)
+        total = spectrum.sum(dim=-1)
+        if not bool((total > 0).all()):
+            return 0.0
+        top_band = spectrum[:, spectrum.shape[-1] // 4 :].sum(dim=-1)
+        return float((top_band / total).max())
+
+    @staticmethod
     def _detect_artifacts(guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:
         """Simple artifact detection for quality gating.
 
@@ -507,10 +527,22 @@ class StemMidiModel(nn.Module):
         if guitar.abs().max() > 0.99 or bass.abs().max() > 0.99:
             flags.append("clipping")
 
-        # Check for excessive noise (simplified)
-        guitar_noise = torch.mean(guitar**2, dim=[1, 2])
-        bass_noise = torch.mean(bass**2, dim=[1, 2])
-        if torch.any(guitar_noise > 0.1) or torch.any(bass_noise > 0.1):
+        # Noise-floor estimate (ART-1). This used to be
+        #   mean(stem**2) > 0.1
+        # which is a LOUDNESS test wearing a noise test's name: anything above
+        # about -10 dBFS RMS was flagged, so every real recording raised
+        # "noise_floor" and the artifact flag forced COMPLEX (ARCH-11.7) --
+        # making STUDIO unreachable for actual music. Level alone is not noise.
+        #
+        # What distinguishes noise from signal is the *high-frequency* energy
+        # fraction: musical content is dominated by low/mid partials, while a
+        # broadband floor spreads energy into the top band. Compare the energy
+        # above ~1/4 Nyquist against the total; a quiet, clean render has a
+        # small ratio however loud it is.
+        if (
+            StemMidiModel._noise_fraction(guitar) > 0.35
+            or StemMidiModel._noise_fraction(bass) > 0.35
+        ):
             flags.append("noise_floor")
 
         # Check for phase cancellation: stems that are nearly perfectly

@@ -211,15 +211,6 @@ def test_hard_clipped_input_is_flagged(separator, synth):
     assert "clipping" in flags, f"a ±1.0 square wave was not flagged as clipped: {flags}"
 
 
-@known_bug(
-    "ART-1",
-    "main._detect_artifacts flags 'noise_floor' whenever mean(stem**2) > 0.1 over the whole "
-    "file — i.e. any material louder than about -3.5 dBFS RMS — and any artifact flag forces "
-    "COMPLEX (quality_gates.ARCH-11.7). Verified: a clean 0.5-amplitude sine (no clipping, no "
-    "noise) yields ['noise_floor'], so on real music the gate always reports 'complex "
-    "material' and the studio/draft tiers are unreachable. Compute noise from a silent-"
-    "section floor estimate, and never treat level alone as noise.",
-)
 def test_clean_loud_audio_is_not_flagged_as_artificial():
     from main import StemMidiModel
 

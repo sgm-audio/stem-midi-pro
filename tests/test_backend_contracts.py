@@ -162,29 +162,50 @@ def test_shim_reports_the_backend_it_actually_uses():
     )
 
 
-@known_bug(
-    "SHIM-1",
-    "the pure-torch fallback's signature ends in `**_ignored`, so CUDA-only kwargs "
-    "(causal_conv1d_impl=, selective_scan_impl=, use_fast_path= — the exact C-2.1 bug class) "
-    "are silently swallowed on CPU and only blow up on a CUDA box. Validate kwargs and raise "
-    "TypeError, so the fallback rejects what real mamba-ssm rejects.",
-)
+def test_shim_rejects_unknown_kwargs():
+    """The fallback must reject what real mamba-ssm rejects (SHIM-1).
+
+    `**_ignored` used to swallow anything, so a config carrying a CUDA-only
+    kwarg (`causal_conv1d_impl=`, `selective_scan_impl=` -- the C-2.1 bug class)
+    constructed happily on CPU and only failed on a CUDA box.
+    """
+    from models._mamba_compat import Mamba
+
+    for kwargs in (
+        {"causal_conv1d_impl": "triton"},
+        {"selective_scan_impl": "cudnn"},
+        {"n_groups": 1},
+        {"bogus_kwarg": 1},
+    ):
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            Mamba(d_model=8, d_state=4, d_conv=4, expand=2, **kwargs)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"causal_conv1d_impl": "triton"},
-        {"selective_scan_impl": "cudnn"},
         {"use_fast_path": False},
-        {"n_groups": 1},
-        {"bogus_kwarg": 1},
+        {"use_fast_path": True},
+        {"layer_idx": 0},
+        {"bias": True},
+        {"conv_bias": False},
+        {"dt_rank": 4},
+        {"dt_min": 1e-4},
     ],
-    ids=["causal_conv1d_impl", "selective_scan_impl", "use_fast_path", "n_groups", "bogus"],
+    ids=["fast_path_off", "fast_path_on", "layer_idx", "bias", "no_conv_bias", "dt_rank", "dt_min"],
 )
-def test_shim_rejects_unknown_kwargs(kwargs):
+def test_shim_accepts_every_upstream_mamba_kwarg(kwargs):
+    """These ARE real mamba-ssm parameters -- rejecting them would be a regression.
+
+    Checked against research/mamba-ssm-reference/mamba/mamba_ssm/modules/
+    mamba_simple.py, which is the signature the fallback stands in for. The
+    fused-kernel knobs (`use_fast_path`) are accepted and ignored: the CPU path
+    has no fused kernels, but a config that sets them must still construct.
+    """
     from models._mamba_compat import Mamba
 
-    with pytest.raises(TypeError):
-        Mamba(d_model=8, d_state=4, d_conv=4, expand=2, **kwargs)
+    blk = Mamba(d_model=8, d_state=4, d_conv=4, expand=2, **kwargs)
+    assert blk(torch.randn(1, 6, 8)).shape == (1, 6, 8)
 
 
 def test_shim_accepts_the_documented_signature_only():
