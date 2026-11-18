@@ -287,3 +287,38 @@ def test_io_4_in_phase_stereo_still_loads(tmp_path, scale):
     sf.write(p, np.stack([base, scale * base], axis=1), SR)
     audio, sr, _ = audio_io.load_audio(str(p))
     assert sr == SR and np.isfinite(audio).all()
+
+
+def test_repro_1_the_same_input_gives_bitwise_identical_confidence(pipeline_config):
+    """REPRO-1: the same paid request returned different confidence on a retry.
+
+    `mc_dropout_eval` drew its masks from the global RNG, so two runs differed by
+    up to 6.5e-3 -- enough to flip `needs_review` and move a CC value.
+    """
+    from models.mamba_transcriber import MambaTranscriber
+
+    tr = MambaTranscriber(pipeline_config)
+    tr.eval()
+    hidden = torch.randn(1, 20, int(pipeline_config["transcriber"]["d_model"]))
+    first = tr.mc_dropout_eval(hidden)
+    second = tr.mc_dropout_eval(hidden)
+    assert torch.equal(first, second), (
+        f"MC-dropout estimate is not reproducible (max |delta| = "
+        f"{float((first - second).abs().max()):.6f})"
+    )
+
+
+def test_repro_1_the_ensemble_is_still_non_degenerate(pipeline_config):
+    """The reproducibility fix must not turn C-2.10's ensemble into a no-op."""
+    from models.mamba_transcriber import MambaTranscriber
+
+    tr = MambaTranscriber(pipeline_config)
+    tr.eval()
+    hidden = torch.randn(1, 20, int(pipeline_config["transcriber"]["d_model"]))
+    mc = tr.mc_dropout_eval(hidden)
+    with torch.no_grad():
+        plain = tr.confidence_head(hidden).squeeze(-1)
+    assert not torch.allclose(mc, plain, atol=1e-6), (
+        "the MC estimate is identical to a single eval-mode forward, so dropout "
+        "is inactive and the ensemble does nothing"
+    )

@@ -7,6 +7,11 @@ import torch.nn as nn
 
 from models._mamba_compat import MAMBA_BACKEND, Mamba
 
+# REPRO-1: fixed seed for the eval-time MC-dropout mask stream. A constant, not a
+# config knob: the point is that the same weights + input always give the same
+# confidence, which a tunable would silently reintroduce as a bug.
+MC_DROPOUT_SEED = 0
+
 logger = logging.getLogger(__name__)
 
 
@@ -138,7 +143,20 @@ class MambaTranscriber(nn.Module):
         head = self.confidence_head
         head.train()  # activate Dropout
         try:
-            samples = torch.stack([head(hidden) for _ in range(n_samples)])
+            # REPRO-1: the masks were drawn from the GLOBAL RNG, so the same
+            # file gave different confidence on every retry (measured max
+            # |dconf| = 0.0065). That moves the CC value, can flip
+            # `needs_review` at the threshold, and can change the quality tier
+            # between two runs of the same paid request.
+            #
+            # `fork_rng` gives this estimate its own RNG stream derived from a
+            # fixed seed: the ensemble stays non-degenerate (5 genuinely
+            # different masks, so C-2.10 still holds) while being a pure
+            # function of (weights, input). The global stream is untouched, so
+            # training and any caller that seeds deliberately are unaffected.
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(MC_DROPOUT_SEED)
+                samples = torch.stack([head(hidden) for _ in range(n_samples)])
         finally:
             head.eval()
         return samples.mean(dim=0).squeeze(-1)

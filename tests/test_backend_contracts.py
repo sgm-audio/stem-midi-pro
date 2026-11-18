@@ -27,7 +27,7 @@ from __future__ import annotations
 import pytest
 
 from tests.doubles import inject
-from tests.honesty import known_bug, mamba_ssm_available, require
+from tests.honesty import mamba_ssm_available, require
 
 torch = require("torch", "backend contract tests", module_level=True)
 
@@ -288,14 +288,6 @@ def test_mamba_block_is_stateless_between_calls():
 
 
 @pytest.mark.real_mamba
-@known_bug(
-    "REPRO-1",
-    "inference is not reproducible: mc_dropout_eval() calls head.train() to keep Dropout live "
-    "in eval mode, so two identical calls on the same file return different confidence "
-    "(measured max |Δconf| = 0.0065 on an 8192-sample input). That moves CC#127, can flip "
-    "needs_review at the threshold, and can change the quality tier between retries of the "
-    "same paid request. Seed it per request or make the eval-time estimate deterministic.",
-)
 def test_inference_on_the_same_file_is_bitwise_reproducible(pipeline_config, make_wav, synth):
     from main import StemMidiModel
 
@@ -305,10 +297,19 @@ def test_inference_on_the_same_file_is_bitwise_reproducible(pipeline_config, mak
     model.eval()
     first = model.process_audio_file(path)
     second = model.process_audio_file(path)
-    a = [e["confidence"] for e in first["midi"]["midi_events"]]
-    b = [e["confidence"] for e in second["midi"]["midi_events"]]
-    assert [e["note"] for e in first["midi"]["midi_events"]] == [
-        e["note"] for e in second["midi"]["midi_events"]
+
+    # `outputs["midi"]` is the per-stem dict {"guitar":…, "bass":…, "summary":…}
+    def _events(out):
+        return [
+            e
+            for stem in ("guitar", "bass")
+            for e in (out["midi"].get(stem) or {}).get("midi_events") or []
+        ]
+
+    a = [e["confidence"] for e in _events(first)]
+    b = [e["confidence"] for e in _events(second)]
+    assert [e["note"] for e in _events(first)] == [
+        e["note"] for e in _events(second)
     ], "the same file transcribed differently on a retry"
     assert a == b, (
         f"confidences differ between two runs of the same file "
