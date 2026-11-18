@@ -846,6 +846,11 @@ async def get_model_info():
     return {
         "model_name": cfg.get("name", "unknown"),
         "backend": backend,  # M-7: which Mamba implementation / backend pair
+        # H-1/H-2: the implementation actually running, and whether TRAINED
+        # weights produced the response. The repo ships no weights, so the
+        # default is False - a client must be able to tell.
+        "mamba_backend": getattr(model, "mamba_backend", None),
+        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
         "audio_config": cfg.get("audio", {}),
         "separator_config": cfg.get("separator", {}),
         "transcriber_config": cfg.get("transcriber", {}),

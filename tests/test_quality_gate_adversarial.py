@@ -62,28 +62,44 @@ def _tier(**kw):
 # ---------------------------------------------------------------------------
 
 
-def test_thresholds_come_from_the_config_not_from_hardcoded_defaults():
-    """Same numbers, different gate config → different commercial outcome."""
-    strict, _ = _tier(centroid_separation_db=19.0, avg_confidence=0.86)
+def test_confidence_thresholds_come_from_the_config_not_from_defaults():
+    """The thresholds that DO decide the tier must be read from the config.
+
+    Scope note: `min_centroid_separation_db` is deliberately *not* consulted.
+    The centroid proxy saturates (a single FFT bin reports exactly 20.00 dB, the
+    shipped threshold), so it cannot be allowed to mint a Studio badge — see
+    `test_residual_reliability_fixes.py::test_one_bin_of_separation_does_not_decide_studio`
+    and `::test_legacy_min_si_sdr_key_warns_and_does_not_gate`, which pin that
+    contract. This test previously asserted the opposite (that lowering the
+    separation threshold must change the tier), which contradicted those two and
+    left `main` red.
+    """
     from utils.quality_gates import ProcessingReport
 
+    strict = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "studio_confidence_threshold": 0.95}},
+    )
     lenient = ProcessingReport(
         centroid_separation_db=19.0,
         phase_coherence=0.5,
         avg_confidence=0.86,
         artifact_flags=["none"],
         low_confidence_notes=0,
-        config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
+        config={"quality_gates": {**GATES, "studio_confidence_threshold": 0.85}},
     )
-    assert strict is not lenient.quality_tier, (
-        f"min_centroid_separation_db 20 -> {strict.value}, 10 -> {lenient.quality_tier.value}: "
-        "the gate ignores its own config"
+    assert strict.quality_tier is not lenient.quality_tier, (
+        f"studio_confidence_threshold 0.95 -> {strict.quality_tier.value}, "
+        f"0.85 -> {lenient.quality_tier.value}: the gate ignores its own config"
     )
 
-    # C-2.6 renamed the field but kept the old CONFIG key working on purpose (every
-    # shipped yaml used `min_centroid_separation_db`); a user with an existing config must not
-    # silently get the 20.0 default instead of the threshold they wrote.
-    legacy = ProcessingReport(
+    # The separation threshold is recorded for reporting, but a config that
+    # lowers it must not silently re-tier a render (the proxy is not evidence).
+    lowered = ProcessingReport(
         centroid_separation_db=19.0,
         phase_coherence=0.5,
         avg_confidence=0.86,
@@ -91,9 +107,19 @@ def test_thresholds_come_from_the_config_not_from_hardcoded_defaults():
         low_confidence_notes=0,
         config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
     )
-    assert legacy.quality_tier is lenient.quality_tier, (
-        "the pre-rename `min_centroid_separation_db` config key is no longer honoured, so existing "
-        "configs silently fall back to the 20.0 default and re-tier"
+    assert (
+        lowered.quality_tier
+        is ProcessingReport(
+            centroid_separation_db=19.0,
+            phase_coherence=0.5,
+            avg_confidence=0.86,
+            artifact_flags=["none"],
+            low_confidence_notes=0,
+            config={"quality_gates": {**GATES, "min_centroid_separation_db": 25.0}},
+        ).quality_tier
+    ), (
+        "min_centroid_separation_db changed the tier; the saturated centroid proxy must not "
+        "decide the tier (see test_residual_reliability_fixes.py)"
     )
 
 
