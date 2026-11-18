@@ -156,6 +156,21 @@ wrong it is recorded here rather than quietly dropped.
    the "bug is still here" evidence was self-generated. The merged versions drive the real
    `forward` and assert the structure they replay; `SEP-2` is closed on that basis.
 
+### Was anything from PR #13 lost? (checked against its final tip)
+
+`#13` was force-pushed once more before it was closed: its head is now `535ee86`
+(“Add SPDX headers to the verification scripts”) on top of `985549f` + `ad50bc7`,
+whereas this branch merged `50e2d46`. `git diff 535ee86 HEAD` over the product files
+lists 92 removed lines, and each one is a line this merge deliberately replaced rather
+than dropped: the pre-chord `_logits_to_midi` body, the truncating velocity mapping, the
+unconditional `_expression_messages` call (now gated by `include_expression`),
+`DEFAULT_TEMPO_US` hard-coded in the writer (now the `tempo_us` parameter), the duplicated
+`pitch_bce_loss_fn`, and `weights_loaded`/`checkpoint_loaded` reading only the attribute
+(now `getattr(model, "weights_loaded", _model_trained)`, one value for three spellings).
+The one commit that was new since this branch read #13 — the SPDX headers — is already
+satisfied: the tracked-file sweep reports 0 missing headers, which is what CI's
+`license` job checks.
+
 ### Re-measured on the round-2 merge
 
 ```bash
