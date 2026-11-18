@@ -104,6 +104,23 @@ def load_native_mono(snd: sf.SoundFile) -> tuple[np.ndarray, int]:
     """
     audio = snd.read(dtype="float32", always_2d=True)
     sr = snd.samplerate
+
+    # IO-4: mean-downmixing an anti-phase stereo file (L = -R) produces exact
+    # silence from a full-level input. Every downstream stage then reports an
+    # empty render blamed on "complex material". Compare the downmix energy
+    # against the per-channel energy and refuse when it collapses.
+    if audio.shape[1] > 1:
+        mono_sum = audio.mean(axis=1)
+        channel_rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        mono_rms = float(np.sqrt(np.mean(mono_sum.astype(np.float64) ** 2)))
+        if channel_rms > 1e-6 and mono_rms < 0.05 * channel_rms:
+            raise AudioValidationError(
+                "Stereo channels cancel when mixed to mono "
+                f"(downmix RMS {mono_rms:.2e} vs channel RMS {channel_rms:.2e}). "
+                "This file is anti-phase; mixing it to mono leaves silence. "
+                "Re-export with the channels in phase, or process each channel separately."
+            )
+
     audio = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
     audio = np.asarray(audio, dtype=np.float32)
 

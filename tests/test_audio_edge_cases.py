@@ -385,13 +385,6 @@ def test_non_finite_input_never_leaks_into_stems(nonfinite_corpus, separator):
         )
 
 
-@known_bug(
-    "IO-4",
-    "mean-downmixing an anti-phase stereo file (L = -R) yields silence, and nothing in the "
-    "pipeline notices: audio_io.load_native_mono returns an all-zero track for a full-level "
-    "input, so the user gets an empty render blamed on 'complex material'. Measure the "
-    "downmix energy vs. the channels' energy and reject/warn when the ratio collapses.",
-)
 def test_mono_cancellation_is_surfaced(make_wav, synth):
     from audio_io import AudioValidationError, load_audio
 

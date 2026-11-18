@@ -266,3 +266,24 @@ def test_align_1_note_energy_is_the_energy_of_its_own_frame(pipeline_config):
         f"frame 2 is full-scale but stem_energy={ev['stem_energy']:.6f} — the injector "
         "is indexing a per-sample array with a frame index"
     )
+
+
+def test_io_4_anti_phase_stereo_is_reported_not_silently_silenced(tmp_path):
+    """IO-4: L = -R downmixed to exact silence with no warning."""
+    t = np.arange(SR) / SR
+    base = 0.5 * np.sin(2 * np.pi * 220 * t)
+    p = tmp_path / "anti.wav"
+    sf.write(p, np.stack([base, -base], axis=1), SR)
+    with pytest.raises(audio_io.AudioValidationError, match="cancel"):
+        audio_io.load_audio(str(p))
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.6, 0.0])
+def test_io_4_in_phase_stereo_still_loads(tmp_path, scale):
+    """The guard must not reject ordinary stereo."""
+    t = np.arange(SR) / SR
+    base = 0.5 * np.sin(2 * np.pi * 220 * t)
+    p = tmp_path / "stereo.wav"
+    sf.write(p, np.stack([base, scale * base], axis=1), SR)
+    audio, sr, _ = audio_io.load_audio(str(p))
+    assert sr == SR and np.isfinite(audio).all()
