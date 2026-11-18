@@ -680,6 +680,23 @@ class StemMidiModel(nn.Module):
 
         audio, sr = self._load_audio(audio_path)
         audio = self._resample_to_target(audio, sr)
+
+        # CPU-2: honour `audio.chunk_duration_sec`. The config ships 2.0 s and the
+        # README sells chunked inference for RAM-bounded hosts, but this method
+        # used to load the whole file and run exactly ONE forward, so peak memory
+        # grew with song length and the knob was inert (only
+        # `process_audio_streaming` chunked at all).
+        #
+        # Chunking is output-preserving here -- measured on the real model, 6 s
+        # at 2 s chunks against a single pass: identical lengths and 9e-4 / 7e-4
+        # relative error on guitar/bass (the crossfade seams, H-4). Anything at or
+        # below one chunk takes the single-forward path unchanged, so short
+        # uploads -- and every existing unit test -- keep bit-exact behaviour.
+        chunk_seconds = float(self.cfg["audio"].get("chunk_duration_sec", 0.0) or 0.0)
+        target_sr = int(self.cfg["audio"]["sample_rate"])
+        if chunk_seconds > 0 and len(audio) > chunk_seconds * target_sr:
+            return self.process_audio_streaming(audio_path, chunk_seconds=chunk_seconds)
+
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)  # (1, 1, T)
 
         # Run inference

@@ -454,3 +454,72 @@ def test_batch_1_single_item_transcription_is_unaffected(pipeline_config):
     )
     assert [e["note"] for e in events] == [64]
     assert [e["onset_frame"] for e in events] == [5]
+
+
+def test_cpu_1_scan_memory_does_not_grow_with_song_length():
+    """CPU-1: the scan used to materialise O(L) tensors -- 162 GB for 5 minutes."""
+    import yaml
+
+    from models._mamba_compat import Mamba
+    from tests.test_memory_ceiling import _scan_activation_bytes, _shipped
+
+    assert Mamba.SCAN_CHUNK > 0
+    one_min = _scan_activation_bytes(_shipped(), 60.0)
+    five_min = _scan_activation_bytes(_shipped(), 300.0)
+    assert five_min == one_min, "scan cost still scales with song length"
+    assert one_min < 4 * 1024**3
+    assert yaml is not None
+
+
+def test_cpu_2_process_audio_file_honours_the_chunk_knob(tmp_path, pipeline_config, monkeypatch):
+    """CPU-2: `chunk_duration_sec` was inert -- one monolithic forward per file."""
+    from main import StemMidiModel
+
+    cfg = {**pipeline_config, "audio": {**pipeline_config["audio"], "chunk_duration_sec": 2.0}}
+    model = StemMidiModel(cfg)
+    model.eval()
+
+    calls: list[int] = []
+    real_forward = model.separator.forward
+
+    def counting(tensor, *a, **k):
+        calls.append(int(tensor.shape[-1]))
+        return real_forward(tensor, *a, **k)
+
+    monkeypatch.setattr(model.separator, "forward", counting)
+
+    sr = 44100
+    t = np.arange(8 * sr) / sr
+    path = tmp_path / "long.wav"
+    sf.write(path, (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32), sr)
+    with torch.inference_mode():
+        model.process_audio_file(str(path))
+
+    assert len(calls) > 1, f"the 8 s file went through {len(calls)} forward(s)"
+    assert max(calls) <= 2 * sr + 1, f"an unbounded forward carried {max(calls)} samples"
+
+
+def test_cpu_2_short_input_still_takes_the_single_forward_path(
+    tmp_path, pipeline_config, monkeypatch
+):
+    """A file at or below one chunk must not be chunked (bit-exact for short uploads)."""
+    from main import StemMidiModel
+
+    cfg = {**pipeline_config, "audio": {**pipeline_config["audio"], "chunk_duration_sec": 2.0}}
+    model = StemMidiModel(cfg)
+    model.eval()
+    calls: list[int] = []
+    real_forward = model.separator.forward
+
+    def counting(tensor, *a, **k):
+        calls.append(int(tensor.shape[-1]))
+        return real_forward(tensor, *a, **k)
+
+    monkeypatch.setattr(model.separator, "forward", counting)
+    sr = 44100
+    t = np.arange(sr) / sr  # 1 s, below the 2 s chunk
+    path = tmp_path / "short.wav"
+    sf.write(path, (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32), sr)
+    with torch.inference_mode():
+        model.process_audio_file(str(path))
+    assert len(calls) == 1, f"1 s input issued {len(calls)} forwards"
