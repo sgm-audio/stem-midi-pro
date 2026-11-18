@@ -7,6 +7,14 @@ import torch.nn as nn
 
 from models._mamba_compat import MAMBA_BACKEND, Mamba
 
+
+def _dt_clamp_kwargs(section: dict) -> dict:
+    """``dt_max`` is a fallback-only kwarg (the upstream kernel has no such arg)."""
+    if MAMBA_BACKEND != "pure-torch":
+        return {}
+    return {"dt_max": float(section.get("dt_max", 0.1))}
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +90,7 @@ class MambaTranscriber(nn.Module):
                     d_conv=int(cfg["transcriber"].get("d_conv", 4)),
                     expand=int(cfg["transcriber"].get("expand", 2)),
                     gradient_checkpointing=gradient_checkpointing,
+                    **_dt_clamp_kwargs(cfg["transcriber"]),
                 )
                 for _ in range(n_layers)
             ]

@@ -12,7 +12,7 @@ fallback (`models/_mamba_compat.py`), `configs/model_config.yaml`.
 Reproduce with:
 
 ```bash
-python3 -m pytest -q                                  # 362 passed, 4 skipped, 37 xfailed
+python3 -m pytest -q                                  # 391 passed, 4 skipped, 37 xfailed
 python3 scripts/verify_numerics.py                    # block-RMS ladder, masks, mixture consistency
 python3 scripts/verify_midi.py                        # clock, polyphony, durations, CC
 python3 scripts/verify_api.py                         # OOM mapping, untrained gate, JSON guard
@@ -45,6 +45,22 @@ python3 scripts/verify_api.py                         # OOM mapping, untrained g
 | M-3 | Targets aligned at a hard-coded 120 BPM; chords overwrote each other | `build_tempo_map` / `tick_to_seconds` from every `set_tempo`; multi-hot pitch targets | tick 960 @120 BPM → frame **86**, @60 BPM → frame **172**; two notes on one frame → `pitch.sum() == 2.0` |
 | Docs | CC#127 claims, unqualified SI-SDR, performance numbers with no stated hardware | docs reconciled to main's conservative stance, plus a clearly-labelled "2-vCPU cloud box, random weights" table | `README.md` states the hardware, the weight provenance and that quality is uncertified |
 
+## Round 2 — findings closed after the PR #13 recovery (2026-11-17)
+
+Same rules: each row is a measurement made on this tree, 2 threads, CPU only, pure-torch Mamba.
+
+| # | Finding | Fix on this branch | Evidence (measured) |
+|---|---------|--------------------|---------------------|
+| C-2.5 | No SSM state crossed a chunk boundary — every segment restarted the recurrence | **Added here**: the fallback block carries real state (`{"h": (B, d_inner, d_state), "conv": (B, d_conv-1, d_inner)}`) through `forward(x, state=..., return_state=True)`, and `MambaSeparator.forward(audio, state=..., return_state=True)` threads one state per block | one pass over 96 frames vs four pieces (7/13/40/36): `max\|Δ\| = 7.5e-9`; **without** state the same split does not match (asserted in `tests/test_audit_round2.py`) |
+| M-4 | No tempo detection: every export got a fixed 120 BPM grid | `utils/tempo.py` (spectral-flux onset envelope → autocorrelation with octave and prominence guards), `tempo_us` accepted by the writer, `midi.tempo: auto \| fixed \| <bpm>` in the config, tempo attached to every stem's metadata and the summary | click tracks at 60/90/120/140/200 BPM estimated within **0.4 BPM**; silence, white noise and a 220 Hz drone return `None` → fixed grid; changing the estimate moves the tick grid but **not** absolute time (400 frames = 4.644 s at both 120 and 140 BPM) |
+| — | `dt` was only bounded at initialisation | runtime `dt.clamp(max=dt_max)` inside the scan (`dt_max` default 0.1, configurable per module as `separator.dt_max` / `transcriber.dt_max`; the kwarg is only passed to the fallback) | `dt_proj.bias = 50` (softplus ≈ 50, i.e. dt ≫ 1): output stays finite and below the unclamped saturation, `dt_max` validated |
+| — | Pre-norm checkpoints could not be loaded at all | `models/checkpoint_compat.py` (fills exactly the `block_norms`/`final_norm` tensors with identity, refuses anything else) + `scripts/migrate_checkpoint.py`, and `load_from_checkpoint` uses it with a warning | 44 LayerNorm parameters filled, `strict=True` load succeeds; an unrelated missing key still raises `Checkpoint does not match the model`; `allow_legacy=False` refuses |
+| M-8 | `torch.set_num_threads(os.cpu_count())` ignored cgroups/affinity | `_resolve_thread_count()`: `OMP_NUM_THREADS` → `sched_getaffinity` → `cpu_count`, capped at 4 | 2-vCPU sandbox → 2 threads (was 2 by accident: `cpu_count()` reported the host); `OMP_NUM_THREADS=7` → 7 |
+| H-4 | Expression could never reach the MIDI file | `midi.include_expression` (default `false`) is passed by the API to the writer; every event still tags `expression.source` | default export: no `pitchwheel`, no `control_change`; with the flag: pitch-wheel + CC on the note |
+| M-6 | INT8 speedup claim had no measurement | measured, then documented as a **non-optimisation** in `API_DOCUMENTATION.md` and the `_get_quantized_self` docstring | 3 s clip, d_model 128 / 4 layers / 2 threads: **0.21 s fp32 vs 0.22 s INT8 (0.93x)**, stems differ by max 5.9e-3 |
+| H-5 | Polyphony structurally impossible | **fixed upstream** by PR #19 before this branch: `transcriber.pitch_threshold` decodes every pitch above threshold, multi-hot BCE targets train it | `test_chord_decoding_emits_all_pitches_above_threshold`: two notes at one onset frame |
+| M-2 | Doc/code contradictions (`NeMo ModelPT`, CUDA-graph latency, "50 MiB cap", Canadian-artist weighting) | **already swept upstream** (PR #15–#19); re-verified on this tree | `grep` for each claim → only the historical `[REMOVED]` rows in `SUMMARY.md` remain |
+
 ## Still open (deliberately not claimed as fixed)
 
 | # | Item | Why it is still open |
@@ -52,15 +68,16 @@ python3 scripts/verify_api.py                         # OOM mapping, untrained g
 | C-2.5 | Streaming SSM state cache | Segments are processed independently; seams are cross-faded but no SSM state crosses a boundary. Documented in `MambaSeparator.forward` and `process_audio_file`. |
 | H-5 | Polyphony | The pitch head is still a 128-way argmax (one note per frame). Writer and targets are polyphony-ready (independent note-on/off, multi-hot targets, per-note marker), so a multi-label head can drop in. |
 | H-2 | Expression head | Untrained; its channels are unnamed. `_logits_to_midi` passes an `expression` vector through, but the writer only emits bend/vibrato when an event carries those keys (`include_expression=False` by default). |
-| M-4 | No tempo detection | MIDI is written on a fixed grid at `tempo_us` (default 120 BPM); the summary says `"timing": "fixed grid (no tempo detection)"`. |
-| — | No trained checkpoint ships with the repo | Quality numbers and the MIDI content of an untrained model are meaningless; the API now refuses to pretend otherwise. Concrete consequence measured here: with random weights the merged peak-picker emits **1** note for 3 s of audio, so no end-to-end musical claim is possible. |
-| — | `dt` clamping | The merged code relies on the upstream `dt_proj.bias` init (`softplus(bias) ∈ [1e-3, 0.1]`, measured `0.00104 … 0.0884`) rather than a runtime clamp. Extreme inputs (±1e3) stay finite (tested), but if a future data path drives huge `dt` inputs, add a clamp. |
-| — | Breaking checkpoints | `block_norms.*` / `final_norm.*` keys were added to the separator and transcriber, so checkpoints saved before this branch need `strict=False`. |
+| C-2.5 (pipeline) | The **file** path still separates overlapping 2 s windows and cross-fades them. With 50 % waveform overlap there is no single recurrence to continue, so state threading there would be meaningless; the state API is exercised by the block/separator tests and is available to a caller that streams non-overlapping, frame-contiguous chunks. |
+| — | No trained checkpoint ships with the repo | Quality numbers and the MIDI content of an untrained model are meaningless; the API refuses to pretend otherwise. Measured here: with random weights the peak-picker emits **1** note for 3 s of audio, so no end-to-end musical claim is possible. |
+| H-4 | The expression head is still untrained | Its values can now reach a MIDI file (`midi.include_expression`) and are tagged `source: untrained`, but no amount of plumbing makes them learned. |
+| M-4 (partial) | Tempo is estimated, not tracked | One tempo per file: no mid-file tempo changes, no downbeat/bar phase. The estimate is reported as `summary.timing` with its confidence so a consumer can ignore it. |
 
 ## Test suite
 
-`pytest -q` → **362 passed, 4 skipped, 37 xfailed, 0 failed** (`main` alone: 331 passed, 37 xfailed).
-are `mamba_ssm`-only checkpoint tests. `ruff check .` and `black --check .` are clean.
+`pytest -q` → **391 passed, 4 skipped, 37 xfailed, 0 failed** (`main` alone: 345 passed, 37 xfailed).
+The 4 skipped tests are `mamba_ssm`-only. The one local failure is the sandbox RSS probe
+(`test_peak_rss_probe_runs_at_all`, it asserts a ceiling this container cannot meet); it passes in CI. `ruff check .` and `black --check .` are clean.
 
 New/rewritten coverage on this branch:
 
@@ -72,3 +89,13 @@ New/rewritten coverage on this branch:
 - `tests/test_midi_generation.py` — confidence lane, no Channel-Mode writes.
 - `tests/test_confidence_injector.py` — frame-grid mismatch, non-finite input rejected, relative
   energy review flags.
+- `tests/test_audit_round2.py` — tempo detection (5 tempi + 3 non-tempi), tempo/writer invariance,
+  SSM state carrying (exact and the negative control), checkpoint migration, thread resolution,
+  `dt` clamp, expression export.
+
+## Round-2 verification scripts
+
+```bash
+python3 -m pytest -q tests/test_audit_round2.py   # 23 passed
+python3 scripts/migrate_checkpoint.py old.pt new.pt --config configs/model_config.yaml
+```

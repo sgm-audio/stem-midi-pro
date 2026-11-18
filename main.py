@@ -22,8 +22,43 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def _resolve_thread_count(env: str | None = None) -> int:
+    """Threads for torch (M-8: no oversubscription by default).
+
+    ``os.cpu_count()`` reports the *host's* cores, not the ones this process may
+    run on: inside a container or a co-hosted service it oversubscribes by
+    several times and the scan gets slower, not faster. Order of preference:
+
+    1. ``OMP_NUM_THREADS`` when it is a positive integer (explicit wins),
+    2. the CPU affinity mask, when the platform exposes it,
+    3. ``os.cpu_count()``,
+
+    capped at 4 because the pure-PyTorch scan scales poorly past that and the
+    target box has 2-4 usable cores.
+    """
+    if env is None:
+        env = os.environ.get("OMP_NUM_THREADS")
+    if env is not None:
+        try:
+            requested = int(str(env).strip())
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            return requested
+    available = 0
+    try:
+        available = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        available = 0
+    if available <= 0:
+        available = os.cpu_count() or 1
+    return max(1, min(4, available))
+
+
 # CPU inference tuning (PERF-7.4 / PERF-7.9). Override thread count via OMP_NUM_THREADS.
-torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", os.cpu_count() or 1)))
+TORCH_THREADS = _resolve_thread_count()
+torch.set_num_threads(TORCH_THREADS)
 torch.set_float32_matmul_precision("high")  # allows TF32/AVX-512 matmul where available
 
 # Import our custom components (after torch thread config above — intentional E402)
@@ -306,6 +341,8 @@ class StemMidiModel(nn.Module):
                 ),
             },
         }
+
+        self._attach_tempo(midi_metadata, audio)
 
         # 3. Processing report for quality gating (batch element 0 — B=1 is the
         #    supported inference shape; M-12). The public metric is a named
@@ -794,9 +831,12 @@ class StemMidiModel(nn.Module):
     def _get_quantized_self(self) -> "StemMidiModel":
         """Lazily build and cache an INT8 dynamic-quantized clone (PERF-7.7).
 
-        Dynamic quantization is applied to nn.Linear layers only, which keeps
-        masks/logits numerically close to the fp32 model while cutting CPU
-        matmul cost. The fp32 original is left untouched.
+        Dynamic quantization is applied to nn.Linear layers only. Measured on
+        the CPU target it does NOT speed inference up (0.21 s fp32 vs 0.22 s
+        INT8 for a 3 s clip at d_model 128 / 4 layers / 2 threads): the Python
+        selective scan, not the matmuls, is the cost. Stems stay within 5.9e-3
+        of fp32. The flag is kept for completeness and is documented as such in
+        API_DOCUMENTATION.md and FIXES.md (M-6); the fp32 original is untouched.
         """
         quantized = getattr(self, "_quantized_model", None)
         if quantized is None:
@@ -865,6 +905,10 @@ class StemMidiModel(nn.Module):
                 "total_notes": total_notes,
             },
         }
+
+        # Beat grid from the source audio (M-4); the full mix is the right
+        # signal to measure a pulse on.
+        self._attach_tempo(midi_metadata, source if source is not None else guitar)
 
         m = metrics.detach().float()
         if m.dim() == 2:  # (B, 2) from _separate; (2,) from _separate_chunked
@@ -955,6 +999,59 @@ class StemMidiModel(nn.Module):
             weights_loaded=self.weights_loaded,
         )
         return midi_metadata, report, route_by_quality(report)
+
+    def _attach_tempo(self, midi_metadata: dict, audio_t: torch.Tensor) -> None:
+        """Estimate the tempo and attach it to the MIDI metadata (M-4).
+
+        The writer used to place every export on a fixed 120 BPM grid, so a
+        DAW's bars did not line up with the recording. The estimate only moves
+        the *beat grid*: onset ticks are computed with the same tempo that is
+        written into ``set_tempo``, so absolute note times are unchanged.
+
+        ``midi.tempo`` selects the behaviour:
+        ``"auto"`` (default) estimates and falls back to the fixed grid when
+        there is no measurable pulse; ``"fixed"`` keeps 120 BPM; an integer is
+        read as BPM and written verbatim.
+        """
+        from utils.tempo import DEFAULT_TEMPO_US, estimate_tempo_bpm, tempo_us_from_bpm
+
+        setting = (self.cfg.get("midi") or {}).get("tempo", "auto")
+        tempo_us: int | None = None
+        source = "fixed"
+        bpm: float | None = None
+        confidence = 0.0
+
+        if isinstance(setting, int | float) and not isinstance(setting, bool):
+            bpm = float(setting)
+            tempo_us = tempo_us_from_bpm(bpm)
+            source = "configured"
+        elif str(setting).lower() == "auto":
+            sr = int(self.cfg["audio"]["sample_rate"])
+            hop = int(self.cfg["audio"]["hop_length"])
+            samples = audio_t.detach().reshape(-1).cpu().numpy()
+            if samples.size >= sr:  # under a second there is no pulse to find
+                bpm, confidence = estimate_tempo_bpm(samples, sr, hop)
+            if bpm is not None:
+                tempo_us = tempo_us_from_bpm(bpm)
+                source = "detected"
+
+        if tempo_us is None:
+            tempo_us = DEFAULT_TEMPO_US
+
+        for stem in ("guitar", "bass"):
+            if stem in midi_metadata:
+                midi_metadata[stem]["tempo_us"] = tempo_us
+                midi_metadata[stem]["tempo_source"] = source
+        midi_metadata.setdefault("summary", {})["timing"] = {
+            "source": source,
+            "tempo_us": tempo_us,
+            "bpm": round(60_000_000.0 / tempo_us, 2),
+            "confidence": round(float(confidence), 4),
+            "note": (
+                "detected beat grid; onset ticks use the same tempo, so absolute "
+                "note times do not depend on the estimate"
+            ),
+        }
 
     def _separate_chunked(
         self, audio_t: torch.Tensor, chunk_seconds: float
@@ -1330,7 +1427,19 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
         raise ValueError(
             "Checkpoint must contain a state_dict/model_state_dict mapping or be a bare state_dict"
         )
-    model.load_state_dict(state_dict)
+    # Checkpoints written before the pre-norm residual stack (C-1) lack the
+    # block_norms/final_norm parameters. Fill those with identity — the only
+    # sensible initialisation — and fail loudly on anything else.
+    from models.checkpoint_compat import load_state_dict_compat
+
+    report = load_state_dict_compat(model, state_dict)
+    if report["legacy"]:
+        logger.warning(
+            "Loaded a pre-C-1 checkpoint: filled %d LayerNorm parameter(s) "
+            "(block_norms/final_norm) with identity. Fine-tune before shipping "
+            "weights from it — the residual stack was untrained in that file.",
+            len(report["filled"]),
+        )
     model.mark_weights_loaded()
     return model
 

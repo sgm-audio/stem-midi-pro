@@ -674,6 +674,17 @@ def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
     return midi_pkg  # legacy flat shape
 
 
+def _include_expression() -> bool:
+    """Whether exported MIDI carries the expression head's values (H-4).
+
+    Off by default: the head is untrained (ARCH-11.4.4), so writing bend /
+    vibrato values into every export would invent phrasing the model never
+    learned. ``midi.include_expression: true`` opts in; each event still carries
+    ``expression.source``, so a consumer can see the values are unlearnt.
+    """
+    return bool(((model_config or {}).get("midi") or {}).get("include_expression", False))
+
+
 def _finite(value: float, default: float = 0.0) -> float:
     """Coerce a metric to a finite float (JSON has no NaN/Infinity)."""
     try:
@@ -701,11 +712,25 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
         bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
             "guitar.mid",
-            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                guitar_midi,
+                "guitar",
+                hop_length=hop_length,
+                sample_rate=sr,
+                tempo_us=guitar_midi.get("tempo_us"),
+                include_expression=_include_expression(),
+            ),
         )
         zip_file.writestr(
             "bass.mid",
-            build_midi_from_events(bass_midi, "bass", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                bass_midi,
+                "bass",
+                hop_length=hop_length,
+                sample_rate=sr,
+                tempo_us=bass_midi.get("tempo_us"),
+                include_expression=_include_expression(),
+            ),
         )
 
         report = outputs["report"]

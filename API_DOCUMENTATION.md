@@ -69,7 +69,7 @@ Upload an audio file; receive a ZIP with stems, MIDI, and a processing report.
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `quantize` | bool | `false` | When `true`, run inference with INT8 dynamic quantization of Linear layers (PERF-7.7/7.8). Lower CPU matmul cost; same output shapes. |
+| `quantize` | bool | `false` | When `true`, run inference with INT8 dynamic quantization of Linear layers (PERF-7.7/7.8). **Measured on this CPU target it is not faster**: 0.21 s fp32 vs 0.22 s INT8 for a 3 s clip (d_model 128, 4 layers, 2 threads) — the Python selective scan dominates, not the matmuls — and the stems differ from fp32 by max 5.9e-3. Same output shapes; kept for completeness, not as an optimisation. |
 
 **Success — `200 OK`**, `Content-Type: application/zip`. ZIP contents:
 
