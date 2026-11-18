@@ -16,6 +16,11 @@ KNOWN_ARTIFACT_FLAGS = {
     "phase_cancellation",
     "non_finite",
     "silent_output",
+    # Input-level flags (the upload, not the stems): a silent source is a
+    # different finding from a silent separator output, and a DC offset is
+    # invisible once the masks are applied.
+    "silence",
+    "dc_offset",
 }
 
 
@@ -41,6 +46,10 @@ class ProcessingReport:
     # "mamba (pure-torch)" vs "mamba (mamba-ssm)" vs a backend pair like
     # "separator=demucs,transcriber=basic_pitch".
     backend: str | None = None
+    # Whether TRAINED weights produced this report, or the repo's
+    # randomly-initialised defaults (HONESTY-1). None = unknown (a report built
+    # by hand, e.g. in a unit test).
+    weights_loaded: bool | None = None
     # True when any metric is NaN/Inf: the render is unusable regardless of
     # what the other numbers say (review §4).
     invalid: bool = field(default=False, init=False)

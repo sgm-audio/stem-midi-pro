@@ -37,7 +37,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirement
 PYTHONPATH=. .venv/bin/python -m pytest -q -m "not cuda"
 # at audit time (6ab1a1e): 96 passed, 2 skipped  (with torchaudio)
 # defects pinned:          119 passed, 8 skipped, 33 xfailed
-# current (main + this branch): 193 passed, 2 skipped, 0 xfailed; coverage 76.9%
+# after main's own review suite landed: 336 passed, 1 skipped, 42 xfailed
+# (the xfails are main's `known_bug` pins, strict: they fail the run when fixed)
 ```
 
 The 33 `xfail` pins did their job: each turned green exactly when its defect was

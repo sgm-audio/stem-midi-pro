@@ -37,7 +37,6 @@ import torch.utils.checkpoint
 # (CFG-4) calls torch.utils.checkpoint.checkpoint(...) under
 # training.gradient_checkpointing, so importing it here is what makes the
 # documented CPU memory mitigation reachable at all.
-import torch.utils.checkpoint  # must follow `import torch`
 
 logger = logging.getLogger(__name__)
 

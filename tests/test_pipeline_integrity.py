@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 
 import pytest
 
@@ -531,7 +532,10 @@ def test_zero_onsets_never_produce_notes(pipeline_config):
 )
 def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     """0 notes with happy metrics must route to fallback_options, not direct_download."""
-    guitar = torch.full((1, 1, SR), 0.2)  # clean, non-silent, no artifact flags
+    # A 220 Hz TONE, not torch.full(...): a constant is pure DC, and once
+    # _detect_artifacts flags input DC offset this fixture routes to COMPLEX for
+    # that reason instead of exercising the empty-render path this test pins.
+    guitar = 0.2 * torch.sin(2 * math.pi * 220 * torch.arange(SR).float() / SR)[None, None]
     model = _model_with_stems(pipeline_config, guitar, guitar * 0.5, onsets=[], pitches=[])
     with torch.inference_mode():
         out = model(guitar)

@@ -77,7 +77,13 @@ class ConfidenceInjector:
                     "confidence": conf_score,
                     "stem_energy": energy,
                     "alignment_score": alignment_score,
-                    "needs_review": alignment_score < self.min_confidence,
+                    # The review flag is a CONFIDENCE decision (ARCH-11.6.2:
+                    # "low-confidence notes are flagged for human review"), not
+                    # an energy one. It used to be alignment_score (conf *
+                    # sigmoid(energy*10)), so a confident pianissimo passage was
+                    # always flagged and the same events flipped on gain alone.
+                    # Energy stays in alignment_score as a diagnostic.
+                    "needs_review": conf_score < self.min_confidence,
                     # DAW-friendly metadata
                     "confidence_cc_value": cc_value,
                     "cc_127_value": cc_value,  # legacy alias (pre-H-5 name)
@@ -85,13 +91,17 @@ class ConfidenceInjector:
                 }
             )
 
+        # Count NOTES, not frames: `(confidence < thr).sum()` counts STFT frames,
+        # so 1 s of audio reported ~86 "low confidence notes" no matter how many
+        # notes were emitted, and the number grew with file length. The reviewer
+        # listens to notes.
+        low_confidence_notes = sum(1 for e in enhanced_events if e["needs_review"])
         return {
             "midi_events": enhanced_events,
             "summary": {
                 "avg_confidence": torch.mean(confidence).item() if len(confidence) > 0 else 0.0,
-                "low_confidence_count": (
-                    (confidence < self.min_confidence).sum().item() if len(confidence) > 0 else 0
-                ),
-                "alignment_warnings": sum(1 for e in enhanced_events if e["needs_review"]),
+                "low_confidence_count": low_confidence_notes,
+                "alignment_warnings": low_confidence_notes,
+                "total_notes": len(enhanced_events),
             },
         }
