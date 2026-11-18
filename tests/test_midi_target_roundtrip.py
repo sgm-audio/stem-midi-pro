@@ -28,7 +28,7 @@ import io
 
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 mido = require("mido", "round-trip tests require mido", module_level=True)
 
@@ -150,17 +150,39 @@ def test_writer_and_reader_agree_on_default_tempo():
 
 
 def _write_midi(path, tempo_us, notes, tpb=480, extra_tempo_events=()):
+    """Write a MIDI file whose absolute tick positions match `notes`.
+
+    Tempo changes are interleaved with the note events at their own absolute
+    tick. The previous version appended every `extra_tempo_event` immediately
+    after the initial set_tempo, so their `time` deltas were consumed as if
+    they were rests *before* the first note -- a tempo change "at tick 480"
+    shifted every note by 480 ticks and pushed the second note of the MIDI-7
+    fixture past the end of the grid. That made the test measure the fixture,
+    not the reader.
+    """
     mid = mido.MidiFile(ticks_per_beat=tpb)
     trk = mido.MidiTrack()
     mid.tracks.append(trk)
     trk.append(mido.MetaMessage("set_tempo", tempo=tempo_us, time=0))
+
+    # (absolute tick, order, event) so tempo changes and notes merge in tick order
+    pending = [(0, 1, mido.MetaMessage("set_tempo", tempo=tempo_us, time=0))]
     for kwargs in extra_tempo_events:
-        trk.append(mido.MetaMessage("set_tempo", **kwargs))
-    last = 0
+        tick = kwargs.get("time", 0)
+        rest = {k: v for k, v in kwargs.items() if k != "time"}
+        pending.append((tick, 0, mido.MetaMessage("set_tempo", time=0, **rest)))
     for tick, note, vel in notes:
-        trk.append(mido.Message("note_on", note=note, velocity=vel, time=tick - last))
+        pending.append((tick, 0, mido.Message("note_on", note=note, velocity=vel, time=0)))
+        pending.append((tick + 240, 1, mido.Message("note_off", note=note, velocity=0, time=0)))
+
+    # the initial set_tempo at tick 0 is already written; drop its duplicate
+    pending = pending[1:]
+    pending.sort(key=lambda e: (e[0], e[1]))
+    last = 0
+    for tick, _order, msg in pending:
+        msg.time = tick - last
+        trk.append(msg)
         last = tick
-        trk.append(mido.Message("note_off", note=note, velocity=0, time=240))
     mid.save(str(path))
     return str(path)
 
@@ -200,16 +222,6 @@ def test_reader_honours_the_files_tempo(tmp_path, tempo_us, beats):
     )
 
 
-@known_bug(
-    "MIDI-7",
-    "utils/midi_targets.py reads ONE tempo (DEFAULT_TEMPO_US / the file's first set_tempo, "
-    "whichever it picks) and converts every message's tick offset with it, so a tempo MAP in "
-    "the middle of a file is ignored: measured on a 480-PPQ file with 120 BPM at tick 0, "
-    "60 BPM from tick 480 and a note at tick 1440, midi_to_targets reports frame 129 (=1.500 s, "
-    "the 120 BPM answer) where the correct onset is 2.500 s (frame 215) — a 1-second drift on a "
-    "60 BPM ballad movement. Anything exported from a DAW with a tempo change lands off-grid. "
-    "Accumulate time per track while applying each set_tempo at its own tick.",
-)
 def test_reader_handles_a_tempo_change_mid_file(tmp_path):
     p = _write_midi(
         tmp_path / "map.mid",

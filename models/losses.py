@@ -160,10 +160,8 @@ class PerceptualAudioLoss(nn.Module):
             "spectral": spectral_loss.item(),
             "flatness": flatness_loss.item(),
             "crest": crest_loss.item(),
-            # PR #13's split, kept: the hard F1 has no gradient, so it is reported as
-            # a metric while onset_bce is what the optimiser actually minimises (H-4).
-            "onset_bce": _scalar(onset_bce_loss),
-            "onset_f1": _scalar(onset_f1_metric),
+            "onset_bce": _scalar(onset_bce_loss),  # the optimised onset term
+            "onset_f1": _scalar(onset_f1_metric),  # metric only (no gradient)
             "pitch": _scalar(pitch_ce_loss),  # CE (single-label) or BCE (chords)
             "pitch_ce": _scalar(pitch_ce_loss),  # same number, PR #13's key name
             "velocity_mae": _scalar(velocity_mae_loss),

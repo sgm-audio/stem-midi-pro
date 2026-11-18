@@ -40,7 +40,17 @@ DEFAULT_NOTE_DURATION_BEATS = float(os.getenv("MIDI_DEFAULT_NOTE_DURATION_BEATS"
 
 
 def _clamp_midi(value: Any, low: int = 0, high: int = 127) -> int:
-    return min(high, max(low, int(value)))
+    """Clamp to the MIDI byte range, rounding rather than truncating (MIDI-4).
+
+    `int()` here silently turned 63.5 into 63 and 126.9 into 126, so a
+    confidence of ~1.0 could never reach 127. Callers that already pass an int
+    are unaffected.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = float(low)
+    return min(high, max(low, round(numeric)))
 
 
 def _expression_messages(event: dict[str, Any], channel: int) -> list[Message]:
@@ -89,9 +99,9 @@ def build_midi_from_events(
     default_duration_beats: float | None = None,
     hop_length: int = HOP_LENGTH,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
-    tempo_us: int = DEFAULT_TEMPO_US,
     include_confidence_track: bool = False,
     include_expression: bool = False,
+    tempo_us: int | None = None,
 ) -> bytes:
     """Convert MIDI event metadata to SMF bytes.
 
@@ -116,6 +126,11 @@ def build_midi_from_events(
     ``duration_frames`` is honored when available; otherwise the function
     falls back to ``default_duration_beats`` (environment variable
     ``MIDI_DEFAULT_NOTE_DURATION_BEATS``, default 0.25 beats).
+
+    ``tempo_us`` (microseconds per beat) sets the written ``set_tempo`` and the
+    tick conversion together, so a detected tempo (utils/tempo.py, M-4) moves
+    the beat grid without moving the notes: absolute onset times are identical
+    whichever tempo is passed.
     """
     if default_duration_beats is None:
         default_duration_beats = DEFAULT_NOTE_DURATION_BEATS
@@ -123,14 +138,19 @@ def build_midi_from_events(
         raise ValueError("default_duration_beats must be positive")
     if hop_length <= 0 or sample_rate <= 0 or ticks_per_beat <= 0:
         raise ValueError("hop_length, sample_rate, and ticks_per_beat must be positive")
-    if tempo_us <= 0:
-        raise ValueError(f"tempo_us must be positive, got {tempo_us}")
+    if tempo_us is None:
+        tempo_us = DEFAULT_TEMPO_US
+    if not isinstance(tempo_us, int | float) or not 1 <= tempo_us <= 16_777_215:
+        raise ValueError(
+            f"tempo_us must be an integer microsecond-per-beat in [1, 16777215], got {tempo_us!r}"
+        )
+    tempo_us = round(tempo_us)
 
     mid = MidiFile(ticks_per_beat=ticks_per_beat)
     track = MidiTrack()
     mid.tracks.append(track)
 
-    track.append(MetaMessage("set_tempo", tempo=int(tempo_us)))
+    track.append(MetaMessage("set_tempo", tempo=tempo_us))
     track.append(MetaMessage("time_signature", numerator=4, denominator=4))
     track.append(MetaMessage("track_name", name=f"{stem_type} transcription"))
     instrument = "Electric Guitar" if stem_type == "guitar" else "Electric Bass"
@@ -138,9 +158,9 @@ def build_midi_from_events(
     track.append(MetaMessage("marker", text=f"{stem_type.capitalize()} - Stem+MIDI Pro"))
 
     # tempo is microseconds per beat; no extra factor of 60 is needed (MIDI-1).
-    # This must divide by the CALLER's tempo, the same value written into the
-    # set_tempo meta above, or the file's own tempo map contradicts its ticks.
-    ticks_per_second = ticks_per_beat * 1_000_000.0 / float(tempo_us)
+    # This divides by the CALLER's tempo - the same value written into the set_tempo
+    # meta above - or the file's own tempo map contradicts its tick rate.
+    ticks_per_second = ticks_per_beat * 1_000_000.0 / tempo_us
 
     # Scheduled entries are (absolute_tick, priority, sequence, message).
     # Note-offs precede note-ons at the same tick; note-specific metadata and
@@ -207,9 +227,14 @@ def build_midi_from_events(
         # Polyphonic key pressure is note-specific and is the confidence lane.
         # Keep the old cc_127_value key as an input alias for callers, but do
         # not emit CC#127 because it is a channel-mode command.
+        # MIDI-4: round, not truncate. `int()` made confidence 0.999 -> 126, so
+        # the top of the 0-127 range ("fully confident") was unreachable, and
+        # 0.5 -> 63 rather than 64. This is the writer half of the fix; the
+        # injector rounds too, because rounding only one changes nothing for a
+        # model-produced event (the injector has already written the integer).
         confidence_value = ev.get(
             "confidence_value",
-            ev.get("cc_127_value", float(ev.get("confidence", 0.0)) * 127),
+            ev.get("cc_127_value", round(float(ev.get("confidence", 0.0)) * 127)),
         )
         sequence += 1
         scheduled.append(

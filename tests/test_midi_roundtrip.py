@@ -57,7 +57,10 @@ def test_confidence_values_roundtrip():
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
 
     pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
-    assert pressures == [int(c * 127) for c in confidences]
+    # MIDI-4: round, not truncate -- 0.9*127 = 114.3 must be 114 (round and
+    # truncate agree here), but 0.5*127 = 63.5 must be 64, not 63. Upstream
+    # introduced the same `int()` on the Polyphonic Key Pressure lane.
+    assert pressures == [round(c * 127) for c in confidences]
 
 
 def test_explicit_confidence_value_overrides_confidence():
@@ -237,10 +240,12 @@ def test_confidence_marker_track_is_opt_in():
     ]
     assert [row[0] for row in parsed] == [60, 64], "the marker must name the note it describes"
     assert all(row[1] == 0 for row in parsed), "both notes start at tick 0"
-    # 0.8 confidence reaches the file as int(0.8 * 127) = 101 - the truncation MIDI-4
-    # documents - and the marker lane must agree with the poly-pressure lane exactly:
-    # two spellings of one number, never two numbers.
-    byte = 101
+    # 0.8 confidence reaches the file as round(0.8 * 127) = 102. MIDI-4 is closed: both
+    # call sites (the injector and `_clamp_midi`) round, which is what lets a
+    # confidently-rendered note actually reach 127 instead of stopping at 126. The marker
+    # lane must agree with the poly-pressure lane exactly: two spellings of one number,
+    # never two numbers.
+    byte = round(0.8 * 127)  # 102
     pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
     assert pressures == [byte, byte], pressures
     # the text is written with 3 decimals, so it is the byte rounded, not the byte

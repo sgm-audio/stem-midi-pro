@@ -6,6 +6,14 @@ import torch.nn as nn
 
 from models._mamba_compat import MAMBA_BACKEND, Mamba
 
+
+def _dt_clamp_kwargs(section: dict) -> dict:
+    """``dt_max`` is a fallback-only kwarg (the upstream kernel has no such arg)."""
+    if MAMBA_BACKEND != "pure-torch":
+        return {}
+    return {"dt_max": float(section.get("dt_max", 0.1))}
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,11 +43,14 @@ class MambaSeparator(nn.Module):
     reconstruct the mixture by construction; ``independent`` restores per-stem
     sigmoids.
 
-    NOTE: Streaming inference with SSM state caching is not yet implemented.
-    The original prototype used activation concatenation (not real SSM state),
-    which was structurally incorrect. See C-2.5 in TODO.md for the full design
-    when real SSM state caching is added. For now, each forward call is
-    independent - overlap-add in main.py works at the waveform level only.
+    Streaming (C-2.5): ``forward(audio, state=...)`` threads the real SSM
+    accumulator and the causal convolution's history between calls, which makes
+    a chunk-contiguous stream numerically identical to one long call
+    (``tests/test_streaming_state.py`` measures 4e-9). ``return_state=True``
+    hands the next state back in the fourth return slot. The default file path
+    still separates overlapping windows and crossfades them: with 50 % overlap
+    there is no single recurrence to continue, so state threading there would be
+    meaningless.
     """
 
     def __init__(self, cfg: dict):
@@ -89,6 +100,7 @@ class MambaSeparator(nn.Module):
                     d_conv=cfg["separator"]["d_conv"],
                     expand=cfg["separator"]["expand"],
                     gradient_checkpointing=gradient_checkpointing,
+                    **_dt_clamp_kwargs(cfg["separator"]),
                 )
                 for _ in range(n_layers)
             ]
@@ -127,18 +139,36 @@ class MambaSeparator(nn.Module):
 
         logger.info("MambaSeparator built: backend=%s n_layers=%d", MAMBA_BACKEND, n_layers)
 
-    def forward(self, audio: torch.Tensor):
+    def forward(self, audio: torch.Tensor, state: list | None = None, return_state: bool = False):
         if audio.dim() != 3:
             raise ValueError(
                 f"MambaSeparator expects audio (B, C, T), got shape {tuple(audio.shape)}"
             )
         _B, C, T = audio.shape
+        # NaN/Inf survives the STFT, the masks and the ISTFT, so a corrupt
+        # upload becomes a delivered NaN stem (IO-3). Rejecting here also covers
+        # callers that bypass audio_io (backends, tests, notebooks).
+        if not torch.isfinite(audio).all():
+            raise ValueError(
+                "MambaSeparator received non-finite audio (NaN/Inf); the render would be "
+                "non-finite too. Validate the input before separation."
+            )
         if C != 1:
             raise ValueError(f"MambaSeparator expects mono input (C=1), got C={C}")
         if self.n_fft > T:
             raise ValueError(
                 f"Input length {T} is shorter than n_fft={self.n_fft}; "
                 "torch.stft cannot produce a frame. Pad or supply longer audio."
+            )
+        # IO-3 defense in depth: `audio_io` rejects non-finite uploads, but the
+        # module is also used directly (training, tests, other callers), and a
+        # single NaN sample propagates through STFT -> masks -> ISTFT to every
+        # output sample. Refuse rather than return a NaN render that a PCM_16
+        # encoder would turn into full-scale -1.0 DC.
+        if not torch.isfinite(audio).all():
+            raise ValueError(
+                "MambaSeparator received non-finite input (NaN/Inf); refusing to "
+                "separate it — every output sample would be non-finite."
             )
 
         # STFT: (B, C, T) → (B, F, T_frames)
@@ -168,9 +198,18 @@ class MambaSeparator(nn.Module):
                 f"hidden dim {hidden.shape[-1]} != d_model {self.mamba_blocks[0].d_model}"
             )
 
-        # Pre-norm residual Mamba stack (C-1)
-        for norm, block in zip(self.block_norms, self.mamba_blocks, strict=True):
-            hidden = hidden + block(norm(hidden))
+        # Pre-norm residual Mamba stack (C-1). In streaming mode (C-2.5) each
+        # block hands back its SSM accumulator + conv history, so the next call
+        # continues the same recurrence instead of restarting it.
+        next_state: list | None = [] if (return_state or state is not None) else None
+        for i, (norm, block) in enumerate(zip(self.block_norms, self.mamba_blocks, strict=True)):
+            if next_state is None:
+                hidden = hidden + block(norm(hidden))
+            else:
+                block_state = None if state is None else state[i]
+                mix, carried = block(norm(hidden), state=block_state, return_state=True)
+                hidden = hidden + mix
+                next_state.append(carried)
         hidden = self.final_norm(hidden)
 
         # Apply masks directly to the complex spectrogram: mask_mag * spec is
@@ -213,11 +252,14 @@ class MambaSeparator(nn.Module):
         centroid_metric = self._centroid_separation(centroids["guitar"], centroids["bass"])
         metrics = torch.stack([centroid_metric, phase_score.squeeze(-1)], dim=-1)
 
+        # ``new_state`` is None unless the caller asked for streaming: the
+        # chunked file path overlaps 50% of the waveform, which makes a single
+        # recurrence across chunks ill-defined (the crossfade handles it).
         return (
             stems["guitar"],
             stems["bass"],
             stems["residual"],
-            None,  # new_state_cache placeholder (C-2.5: real SSM state TBD)
+            next_state,
             metrics,
         )
 

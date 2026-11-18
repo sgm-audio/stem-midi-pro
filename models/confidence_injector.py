@@ -70,16 +70,24 @@ class ConfidenceInjector:
         confidence = confidence.detach().reshape(-1).float().cpu()
         stem_energy = stem_energy.detach().reshape(-1).float().cpu()
 
+        # Both arrays must be on the SAME frame grid: indexing a per-sample
+        # energy array with a frame index looked at audio ~86x earlier than the
+        # note (H-3), so a mismatch is a bug in the caller, not something to
+        # paper over with zero padding.
         if confidence.numel() != stem_energy.numel():
             raise ValueError(
                 "confidence and stem_energy must share the frame grid: "
                 f"got {confidence.numel()} vs {stem_energy.numel()} frames "
                 "(pool sample-rate energy by hop_length before calling)"
             )
-        self._require_finite(confidence, "confidence")
-        self._require_finite(stem_energy, "stem_energy")
+        # Non-finite model output would otherwise reach the MIDI/JSON verbatim.
+        for _values, _name in ((confidence, "confidence"), (stem_energy, "stem_energy")):
+            if _values.numel() and not torch.isfinite(_values).all():
+                raise ValueError(
+                    f"{_name} contains non-finite values; the model produced NaN/Inf "
+                    "output. Refusing to write corrupt metadata."
+                )
 
-        # Vectorized lookup of per-event confidence / energy / alignment scores
         onset_indices = (
             torch.tensor([int(e["onset_frame"]) for e in midi_events], dtype=torch.long)
             if midi_events
@@ -108,7 +116,14 @@ class ConfidenceInjector:
                     f"MIDI event {i}: non-finite confidence {conf_score}; the model "
                     "produced NaN/Inf output. Refusing to write corrupt metadata."
                 )
-            confidence_value = int(max(0, min(127, conf_score * 127)))
+            # MIDI-4: `int()` truncates, so confidence 0.999 -> 126 and the top
+            # of the 0-127 range ("fully confident") is unreachable. `round()`
+            # makes 0.999 -> 127 and 0.5 -> 64. Upstream introduced this
+            # `confidence_value` clamp on the Polyphonic Key Pressure lane with
+            # the same truncation, so the fix applies here too -- rounding only
+            # the writer changes nothing for a model-produced event, because
+            # this line has already written the integer.
+            confidence_value = max(0, min(127, round(conf_score * 127)))
 
             enhanced_events.append(
                 {
@@ -142,6 +157,10 @@ class ConfidenceInjector:
                     "Standard MIDI note-specific pressure; DAW interpretation varies. "
                     "Use JSON confidence fields when unsupported."
                 ),
+                # GATE-2: `low_confidence_count` below counts NOTES, not frames.
+                # Upstream reached the same conclusion independently
+                # (`note_confidences` is indexed by note onset), so this branch
+                # keeps upstream's implementation.
                 "avg_confidence": (
                     float(note_confidences.mean().item()) if len(note_confidences) > 0 else 0.0
                 ),

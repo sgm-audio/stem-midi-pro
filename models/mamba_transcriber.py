@@ -7,6 +7,19 @@ import torch.nn as nn
 
 from models._mamba_compat import MAMBA_BACKEND, Mamba
 
+# REPRO-1: fixed seed for the eval-time MC-dropout mask stream. A constant, not a
+# config knob: the point is that the same weights + input always give the same
+# confidence, which a tunable would silently reintroduce as a bug.
+MC_DROPOUT_SEED = 0
+
+
+def _dt_clamp_kwargs(section: dict) -> dict:
+    """``dt_max`` is a fallback-only kwarg (the upstream kernel has no such arg)."""
+    if MAMBA_BACKEND != "pure-torch":
+        return {}
+    return {"dt_max": float(section.get("dt_max", 0.1))}
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,11 +41,10 @@ class MambaTranscriber(nn.Module):
     128-way cross-entropy. The expression head exists but is untrained
     (ARCH-11.4.4); its output is not encoded into MIDI by the orchestrator.
 
-    The mixers are stacked as pre-norm residual blocks (``h = h + mix(norm(h))`` plus a
-    final LayerNorm). Bare mixer stacking multiplied the activation RMS by ~0.02 per
-    block, so an 8-layer stack collapsed to a constant and every head emitted a fixed
-    value regardless of input (C-1 in AUDIT_REPORT.md; the fix is PR #13's, and the
-    separator carries the same structure).
+    The mixers are stacked as pre-norm residual blocks (``h = h + mix(norm(h))``
+    plus a final LayerNorm). Bare mixer stacking multiplied the activation RMS
+    by ~0.02 per block, so the 8-layer stack collapsed to a constant and every
+    head emitted a fixed value (C-1 in AUDIT_REPORT.md).
     """
 
     def __init__(self, cfg: dict):
@@ -83,6 +95,7 @@ class MambaTranscriber(nn.Module):
                     d_conv=int(cfg["transcriber"].get("d_conv", 4)),
                     expand=int(cfg["transcriber"].get("expand", 2)),
                     gradient_checkpointing=gradient_checkpointing,
+                    **_dt_clamp_kwargs(cfg["transcriber"]),
                 )
                 for _ in range(n_layers)
             ]
@@ -160,7 +173,20 @@ class MambaTranscriber(nn.Module):
         head = self.confidence_head
         head.train()  # activate Dropout
         try:
-            samples = torch.stack([head(hidden) for _ in range(n_samples)])
+            # REPRO-1: the masks were drawn from the GLOBAL RNG, so the same
+            # file gave different confidence on every retry (measured max
+            # |dconf| = 0.0065). That moves the CC value, can flip
+            # `needs_review` at the threshold, and can change the quality tier
+            # between two runs of the same paid request.
+            #
+            # `fork_rng` gives this estimate its own RNG stream derived from a
+            # fixed seed: the ensemble stays non-degenerate (5 genuinely
+            # different masks, so C-2.10 still holds) while being a pure
+            # function of (weights, input). The global stream is untouched, so
+            # training and any caller that seeds deliberately are unaffected.
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(MC_DROPOUT_SEED)
+                samples = torch.stack([head(hidden) for _ in range(n_samples)])
         finally:
             head.eval()
         std = samples.std(dim=0, unbiased=False)

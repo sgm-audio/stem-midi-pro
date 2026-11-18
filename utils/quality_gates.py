@@ -20,6 +20,8 @@ KNOWN_ARTIFACT_FLAGS = {
     "untrained_weights",
     "silence",
     "dc_offset",
+    # 0 transcribed notes: nothing to deliver, whatever the metrics say.
+    "empty_render",
 }
 
 
@@ -43,6 +45,10 @@ class ProcessingReport:
     avg_confidence: float = 0.0
     artifact_flags: list[str] | None = None
     low_confidence_notes: int = 0
+    # Number of notes in the render. ``None`` = unknown (a hand-built report);
+    # 0 means there is nothing to deliver, which must never grade as STUDIO or
+    # DRAFT however good the metrics look (GATE-3).
+    total_notes: int | None = None
     config: dict[str, Any] | None = None
     model_weights_loaded: bool | None = None
     si_sdr: float | None = None  # deprecated input/output compatibility alias
@@ -52,6 +58,11 @@ class ProcessingReport:
     # randomly-initialised defaults (HONESTY-1). None = unknown (a report built
     # by hand, e.g. in a unit test).
     weights_loaded: bool | None = None
+    # How many note events the render actually contains (GATE-3). `None` means
+    # "caller did not supply it" -- reports built by older call sites (and test
+    # doubles) keep working, and the empty-render rule then does not apply.
+    # Supplying it is what lets the gate refuse to sell an empty MIDI.
+    note_count: int | None = None
     # True when any metric is NaN/Inf: the render is unusable regardless of
     # what the other numbers say (review §4).
     invalid: bool = field(default=False, init=False)
@@ -96,6 +107,8 @@ class ProcessingReport:
         ]
         if self.invalid and "non_finite" not in self.artifact_flags:
             self.artifact_flags.append("non_finite")
+        if self.total_notes == 0 and "empty_render" not in self.artifact_flags:
+            self.artifact_flags.append("empty_render")
 
         # The centroid value is a saturation-prone proxy, not SI-SDR (C-2.6):
         # one FFT bin of separation reports exactly 20.00 dB, which clears
@@ -139,6 +152,12 @@ class ProcessingReport:
         real_flags = [f for f in self.artifact_flags if f != "none"]
         if real_flags:
             return QualityTier.COMPLEX
+        # GATE-3: a render with no notes is not a deliverable, however good its
+        # numbers look. `draft` promises there is something to edit and
+        # `studio`/direct_download promises there is something to use, so an
+        # empty MIDI falls through to COMPLEX (fallback + refund options).
+        if self.note_count is not None and self.note_count <= 0:
+            return QualityTier.COMPLEX
         # STUDIO additionally requires that no individual note was unreliable:
         # a render whose average confidence clears 0.85 while dozens of notes
         # are individually doubtful is not studio-ready (review §9).
@@ -173,6 +192,13 @@ class ProcessingReport:
             "avg_confidence": _safe(self.avg_confidence),
             "artifact_flags": list(self.artifact_flags),
             "low_confidence_notes": int(self.low_confidence_notes),
+            # GATE-3: two names, both truthful. `total_notes` is upstream's
+            # canonical count and drives the `empty_render` flag; `note_count`
+            # is this branch's stricter carry-through, which also rejects a
+            # negative count. Kept as an alias rather than dropped so existing
+            # reports and guards keep working.
+            "note_count": None if self.note_count is None else int(self.note_count),
+            "total_notes": None if self.total_notes is None else int(self.total_notes),
             "quality_tier": self.quality_tier.value,
             "invalid": self.invalid,
             "backend": self.backend,
@@ -186,6 +212,22 @@ def route_by_quality(report: ProcessingReport) -> dict[str, Any]:
     system in this repository. Routing therefore points the user to their DAW
     instead of advertising nonexistent services.
     """
+    # Nothing to deliver: no tier can make an empty render useful, so this is
+    # checked before the tiers (GATE-3).
+    if "empty_render" in (report.artifact_flags or []):
+        return {
+            "action": "fallback_options",
+            "badge": "No notes detected",
+            "message": (
+                "Transcription found no notes in this upload. Download the raw stems and "
+                "check the input, or try a longer/cleaner excerpt."
+            ),
+            "review_in_daw": True,
+            "options": [
+                {"id": "raw", "label": "Download raw output", "confidence_overlay": True},
+                {"id": "cancel", "label": "Discard this output"},
+            ],
+        }
     if report.quality_tier == QualityTier.STUDIO:
         return {
             "action": "direct_download",

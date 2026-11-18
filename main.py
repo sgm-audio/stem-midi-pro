@@ -22,8 +22,43 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def _resolve_thread_count(env: str | None = None) -> int:
+    """Threads for torch (M-8: no oversubscription by default).
+
+    ``os.cpu_count()`` reports the *host's* cores, not the ones this process may
+    run on: inside a container or a co-hosted service it oversubscribes by
+    several times and the scan gets slower, not faster. Order of preference:
+
+    1. ``OMP_NUM_THREADS`` when it is a positive integer (explicit wins),
+    2. the CPU affinity mask, when the platform exposes it,
+    3. ``os.cpu_count()``,
+
+    capped at 4 because the pure-PyTorch scan scales poorly past that and the
+    target box has 2-4 usable cores.
+    """
+    if env is None:
+        env = os.environ.get("OMP_NUM_THREADS")
+    if env is not None:
+        try:
+            requested = int(str(env).strip())
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            return requested
+    available = 0
+    try:
+        available = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        available = 0
+    if available <= 0:
+        available = os.cpu_count() or 1
+    return max(1, min(4, available))
+
+
 # CPU inference tuning (PERF-7.4 / PERF-7.9). Override thread count via OMP_NUM_THREADS.
-torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", os.cpu_count() or 1)))
+TORCH_THREADS = _resolve_thread_count()
+torch.set_num_threads(TORCH_THREADS)
 torch.set_float32_matmul_precision("high")  # allows TF32/AVX-512 matmul where available
 
 # Import our custom components (after torch thread config above — intentional E402)
@@ -307,18 +342,32 @@ class StemMidiModel(nn.Module):
             },
         }
 
+        self._attach_tempo(midi_metadata, audio)
+
         # 3. Processing report for quality gating (batch element 0 — B=1 is the
         #    supported inference shape; M-12). The public metric is a named
         #    heuristic proxy, not reference-based SI-SDR.
         artifact_flags = self._detect_artifacts(guitar_stem, bass_stem, source=audio)
         if not self._weights_loaded and "untrained_weights" not in artifact_flags:
             artifact_flags.append("untrained_weights")
+        # REPORT-1: average over the batch (upstream reached the same fix with
+        # `.mean()`). `nanmean` is deliberate: if one item's metric is
+        # non-finite, `.mean()` poisons the whole report and hides which item was
+        # bad, while `nanmean` reports the items that have a real measurement --
+        # and `_detect_artifacts`' non_finite flag still surfaces the bad one.
         report = ProcessingReport(
-            separation_proxy=float(sep_metrics[:, 0].mean().item()),
-            phase_coherence=float(sep_metrics[:, 1].mean().item()),
+            separation_proxy=float(torch.nanmean(sep_metrics[:, 0].float()).item()),
+            phase_coherence=float(torch.nanmean(sep_metrics[:, 1].float()).item()),
             avg_confidence=avg_confidence,
             artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            # GATE-3: the gate must be able to refuse an empty render. Both
+            # counters are set: `total_notes` is upstream's canonical field and
+            # drives `empty_render`, `note_count` is this branch's stricter one
+            # (it also rejects a negative count).
+            note_count=len(midi_metadata["guitar"].get("midi_events") or [])
+            + len(midi_metadata["bass"].get("midi_events") or []),
+            total_notes=midi_metadata["summary"]["total_notes"],
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -559,23 +608,29 @@ class StemMidiModel(nn.Module):
         ``onset_refractory_frames: 0`` disables the suppression entirely
         (every above-threshold frame fires - the pre-H-6 behavior).
 
+        Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold``
+        is set (production configs set 0.5): every pitch whose sigmoid
+        probability exceeds it at the accepted onset frame emits its own
+        note_on, so polyphonic frames produce chords. If no pitch crosses
+        the threshold at a fired onset, the argmax pitch is emitted as a
+        fallback - a fired onset always yields at least one note. Unset/None
+        keeps legacy single-argmax decoding: untrained noise-centered logits
+        split ~50/50 around any fixed threshold, which would otherwise decode
+        one noisy frame into dozens of phantom chord notes.
+
         Each event also carries ``duration_frames`` estimated from the spacing
         to the next onset (clamped to ``transcriber.min/max_note_seconds``), so
         the MIDI writer emits note lengths that follow the performance instead
-        of a fixed 1/16 note; the final note uses the median length. When
-        ``expression`` is given (B, T, E), its mean over the note is attached
-        per event (the channels are unnamed and the head is untrained -
-        ARCH-11.4.4).
+        of a fixed 1/16 note; the final note uses the median length. Length is
+        derived per ONSET frame, so every note of a chord shares one duration -
+        a chord is one event in the audio timeline and the refractory window is
+        what bounds the density. When ``expression`` is given (B, T, E), its
+        mean over the note (not just its onset frame) is attached per event and
+        labelled with its source, because the head is untrained (ARCH-11.4.4).
 
-        Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold`` is set
-        (main's PR #19): every pitch whose sigmoid exceeds it at an accepted onset
-        frame emits its own note_on, and the argmax pitch is the fallback when none
-        does. ``duration_frames`` and the note-length logic above apply per onset
-        frame, so every note of a chord shares one duration - a chord is one event in
-        the audio timeline, and the refractory window is what bounds the density.
-
-        Assumes B=1 for inference; batch >1 still returns all batches' events with
-        onset frames as-is.
+        B=1 only: a batch that produces any onset raises (BATCH-1), because the
+        return value is ONE flat list whose frames cannot be attributed to an
+        item. A batched call with no onsets has nothing to merge and is allowed.
         """
         tcfg = self.cfg.get("transcriber", {})
         # Defaults keep hand-built configs (unit tests, backends) working: the
@@ -595,7 +650,28 @@ class StemMidiModel(nn.Module):
         pitches = torch.argmax(pitch_logits, dim=-1)
         vel_values = (velocity.squeeze(-1).clamp(0, 1) * 127).round().clamp(1, 127).long()
 
-        pitch_threshold = self.cfg["transcriber"].get("pitch_threshold")
+        # BATCH-1: this function returns ONE flat list whose events carry the raw
+        # per-item `onset_frame`. For B>1 that merges separate recordings into a
+        # single unattributable MIDI file -- two songs' notes interleaved, with no
+        # way to tell which note came from which -- and it did so silently.
+        #
+        # The guard sits here, not on `forward`, for two reasons:
+        #  * this loop is the only place the merging happens;
+        #  * it fires only when the batch actually produces events. A B>1 call
+        #    that produces no onsets (e.g. a fixture probing the batched quality
+        #    report) has nothing to merge, so refusing it would break a
+        #    legitimate use without protecting anything.
+        n_batch = int(candidates[:, 0].max().item()) + 1 if candidates.shape[0] else 0
+        if n_batch > 1:
+            raise ValueError(
+                f"_logits_to_midi converts one recording at a time; got batch size "
+                f"{n_batch}. Batched inference would merge every item's notes into a "
+                "single MIDI file. Call the model once per recording."
+            )
+
+        # Chord (polyphony) decoding, added upstream while this branch was in
+        # flight. Independent of the batch guard above.
+        pitch_threshold = tcfg.get("pitch_threshold")
         chord_probs = None
         if pitch_threshold is not None:
             if not 0.0 < float(pitch_threshold) < 1.0:
@@ -620,6 +696,8 @@ class StemMidiModel(nn.Module):
 
         events: list[dict] = []
         for b, frames in frames_by_batch.items():
+            # Duration follows the performance: the gap to the next onset,
+            # clamped to min/max_note_seconds; the last note takes the median.
             gaps = [
                 min(max_frames, max(min_frames, frames[i + 1] - frames[i]))
                 for i in range(len(frames) - 1)
@@ -687,10 +765,34 @@ class StemMidiModel(nn.Module):
         """
         return StemMidiModel._stem_is_silent(guitar) and StemMidiModel._stem_is_silent(bass)
 
+    @staticmethod
+    def _noise_fraction(stem: torch.Tensor) -> float:
+        """Fraction of a stem's energy sitting in the top band of the spectrum.
+
+        A proxy for "is this broadband hiss?" rather than "is this loud?".
+        Silent or near-silent stems return 0.0 -- silence is reported by
+        `_stems_are_silent`, and a quiet stem must not be labelled noisy.
+        """
+        energy = torch.mean(stem**2)
+        if not bool(torch.isfinite(energy)) or float(energy) <= 1e-10:
+            return 0.0
+        # (B, C, T) -> per-example 1-D spectra
+        flat = stem.reshape(-1, stem.shape[-1])
+        spectrum = torch.fft.rfft(flat, dim=-1).abs() ** 2  # (N, F)
+        total = spectrum.sum(dim=-1)
+        if not bool((total > 0).all()):
+            return 0.0
+        top_band = spectrum[:, spectrum.shape[-1] // 4 :].sum(dim=-1)
+        return float((top_band / total).max())
+
     def _detect_artifacts(
         self, guitar: torch.Tensor, bass: torch.Tensor, source: torch.Tensor | None = None
     ) -> list[str]:
         """Simple artifact detection for quality gating.
+
+        An instance method only for ``self._input_flags`` / ``self._weights_loaded``
+        access; the stem logic itself is class-qualified (``StemMidiModel._…``)
+        so tests can still call it unbound with ``self=None``.
 
         Finiteness and silence are checked FIRST (review §4): without them an
         all-NaN render raised no flag, and because `NaN >= x` is False the
@@ -724,10 +826,22 @@ class StemMidiModel(nn.Module):
         if guitar.abs().max() > 0.99 or bass.abs().max() > 0.99:
             flags.append("clipping")
 
-        # Check for excessive noise (simplified)
-        guitar_noise = torch.mean(guitar**2, dim=[1, 2])
-        bass_noise = torch.mean(bass**2, dim=[1, 2])
-        if torch.any(guitar_noise > 0.1) or torch.any(bass_noise > 0.1):
+        # Noise-floor estimate (ART-1). This used to be
+        #   mean(stem**2) > 0.1
+        # which is a LOUDNESS test wearing a noise test's name: anything above
+        # about -10 dBFS RMS was flagged, so every real recording raised
+        # "noise_floor" and the artifact flag forced COMPLEX (ARCH-11.7) --
+        # making STUDIO unreachable for actual music. Level alone is not noise.
+        #
+        # What distinguishes noise from signal is the *high-frequency* energy
+        # fraction: musical content is dominated by low/mid partials, while a
+        # broadband floor spreads energy into the top band. Compare the energy
+        # above ~1/4 Nyquist against the total; a quiet, clean render has a
+        # small ratio however loud it is.
+        if (
+            StemMidiModel._noise_fraction(guitar) > 0.35
+            or StemMidiModel._noise_fraction(bass) > 0.35
+        ):
             flags.append("noise_floor")
 
         # Check for phase cancellation: stems that are nearly perfectly
@@ -749,10 +863,10 @@ class StemMidiModel(nn.Module):
     def _transcribe_segmented(self, stem: torch.Tensor, instrument: str | None = None) -> dict:
         """Run the transcriber in frame segments for long stems.
 
-        Merge of PR #13's bound with main's `_transcribe(stem, instrument)`: the
-        instrument must still reach a backend that selects a model per stem, and the
-        expression tensor must survive the concat, or EXPR-1 comes back through the
-        segmented path only (i.e. exactly when a long upload is processed).
+        Peak memory for the decode stage becomes a function of
+        ``inference.segment_seconds`` rather than of the stem length. Segments
+        are independent (no SSM state carry, C-2.5); the concatenation is
+        trimmed to the frame count the STFT grid produces.
         """
         acfg = self.cfg.get("audio", {})
         sr = int(acfg.get("sample_rate", 44100))
@@ -777,7 +891,9 @@ class StemMidiModel(nn.Module):
         # Per-segment `events` cannot be concatenated: their onset_frames are local
         # to each segment, so merging them would silently mis-place every note after
         # the first seam. Dropping them sends _enhance down the logits path, which
-        # rebuilds events on the merged timeline.
+        # rebuilds events on the merged timeline. Expression is carried explicitly
+        # for the same reason: a per-segment tensor concatenated frame-wise is only
+        # correct if the frames stay in order, which is what _transcribe returns.
         merged["events"] = None
         return merged
 
@@ -803,9 +919,12 @@ class StemMidiModel(nn.Module):
     def _get_quantized_self(self) -> "StemMidiModel":
         """Lazily build and cache an INT8 dynamic-quantized clone (PERF-7.7).
 
-        Dynamic quantization is applied to nn.Linear layers only, which keeps
-        masks/logits numerically close to the fp32 model while cutting CPU
-        matmul cost. The fp32 original is left untouched.
+        Dynamic quantization is applied to nn.Linear layers only. Measured on
+        the CPU target it does NOT speed inference up (0.21 s fp32 vs 0.22 s
+        INT8 for a 3 s clip at d_model 128 / 4 layers / 2 threads): the Python
+        selective scan, not the matmuls, is the cost. Stems stay within 5.9e-3
+        of fp32. The flag is kept for completeness and is documented as such in
+        API_DOCUMENTATION.md and FIXES.md (M-6); the fp32 original is untouched.
         """
         quantized = getattr(self, "_quantized_model", None)
         if quantized is None:
@@ -875,6 +994,10 @@ class StemMidiModel(nn.Module):
             },
         }
 
+        # Beat grid from the source audio (M-4); the full mix is the right
+        # signal to measure a pulse on.
+        self._attach_tempo(midi_metadata, source if source is not None else guitar)
+
         m = metrics.detach().float()
         if m.dim() == 2:  # (B, 2) from _separate; (2,) from _separate_chunked
             m = m.mean(dim=0)
@@ -887,6 +1010,7 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            total_notes=midi_metadata["summary"]["total_notes"],
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -964,6 +1088,59 @@ class StemMidiModel(nn.Module):
             weights_loaded=self.weights_loaded,
         )
         return midi_metadata, report, route_by_quality(report)
+
+    def _attach_tempo(self, midi_metadata: dict, audio_t: torch.Tensor) -> None:
+        """Estimate the tempo and attach it to the MIDI metadata (M-4).
+
+        The writer used to place every export on a fixed 120 BPM grid, so a
+        DAW's bars did not line up with the recording. The estimate only moves
+        the *beat grid*: onset ticks are computed with the same tempo that is
+        written into ``set_tempo``, so absolute note times are unchanged.
+
+        ``midi.tempo`` selects the behaviour:
+        ``"auto"`` (default) estimates and falls back to the fixed grid when
+        there is no measurable pulse; ``"fixed"`` keeps 120 BPM; an integer is
+        read as BPM and written verbatim.
+        """
+        from utils.tempo import DEFAULT_TEMPO_US, estimate_tempo_bpm, tempo_us_from_bpm
+
+        setting = (self.cfg.get("midi") or {}).get("tempo", "auto")
+        tempo_us: int | None = None
+        source = "fixed"
+        bpm: float | None = None
+        confidence = 0.0
+
+        if isinstance(setting, int | float) and not isinstance(setting, bool):
+            bpm = float(setting)
+            tempo_us = tempo_us_from_bpm(bpm)
+            source = "configured"
+        elif str(setting).lower() == "auto":
+            sr = int(self.cfg["audio"]["sample_rate"])
+            hop = int(self.cfg["audio"]["hop_length"])
+            samples = audio_t.detach().reshape(-1).cpu().numpy()
+            if samples.size >= sr:  # under a second there is no pulse to find
+                bpm, confidence = estimate_tempo_bpm(samples, sr, hop)
+            if bpm is not None:
+                tempo_us = tempo_us_from_bpm(bpm)
+                source = "detected"
+
+        if tempo_us is None:
+            tempo_us = DEFAULT_TEMPO_US
+
+        for stem in ("guitar", "bass"):
+            if stem in midi_metadata:
+                midi_metadata[stem]["tempo_us"] = tempo_us
+                midi_metadata[stem]["tempo_source"] = source
+        midi_metadata.setdefault("summary", {})["timing"] = {
+            "source": source,
+            "tempo_us": tempo_us,
+            "bpm": round(60_000_000.0 / tempo_us, 2),
+            "confidence": round(float(confidence), 4),
+            "note": (
+                "detected beat grid; onset ticks use the same tempo, so absolute "
+                "note times do not depend on the estimate"
+            ),
+        }
 
     def _separate_chunked(
         self, audio_t: torch.Tensor, chunk_seconds: float
@@ -1102,6 +1279,23 @@ class StemMidiModel(nn.Module):
 
         audio, sr = self._load_audio(audio_path)
         audio = self._resample_to_target(audio, sr)
+
+        # CPU-2: honour `audio.chunk_duration_sec`. The config ships 2.0 s and the
+        # README sells chunked inference for RAM-bounded hosts, but this method
+        # used to load the whole file and run exactly ONE forward, so peak memory
+        # grew with song length and the knob was inert (only
+        # `process_audio_streaming` chunked at all).
+        #
+        # Chunking is output-preserving here -- measured on the real model, 6 s
+        # at 2 s chunks against a single pass: identical lengths and 9e-4 / 7e-4
+        # relative error on guitar/bass (the crossfade seams, H-4). Anything at or
+        # below one chunk takes the single-forward path unchanged, so short
+        # uploads -- and every existing unit test -- keep bit-exact behaviour.
+        chunk_seconds = float(self.cfg["audio"].get("chunk_duration_sec", 0.0) or 0.0)
+        target_sr = int(self.cfg["audio"]["sample_rate"])
+        if chunk_seconds > 0 and len(audio) > chunk_seconds * target_sr:
+            return self.process_audio_streaming(audio_path, chunk_seconds=chunk_seconds)
+
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)  # (1, 1, T)
         self._validate_audio(audio_t, audio_path)
         sample_rate = int(self.cfg["audio"]["sample_rate"])
@@ -1227,19 +1421,32 @@ class StemMidiModel(nn.Module):
                 pos += hop_len
                 n_chunks += 1
 
-        full_guitar = out_guitar / weight_sum.clamp(min=1e-8)
-        full_bass = out_bass / weight_sum.clamp(min=1e-8)
+            # Everything from here to the report is downstream of the model, so
+            # it stays inside `inference_mode`. Leaving it outside rebuilt an
+            # autograd graph over the RECOMBINED FULL-LENGTH stem on every
+            # transcriptions' backward-supporting tensors: a 60 s upload held
+            # ~4.5 MB per frame (5168 frames of 128-bin pitch logits plus the
+            # mamba activations kept alive through the graph) and was OOM-killed
+            # at 4 GB. Measured 875 MB -> this path, and it is what made the
+            # 60 s memory probe fail on CI (torch 2.15) while `main` stayed
+            # green: `main`'s file path kept `_finalize` inside
+            # `inference_mode`, and this method — a copy of it — did not.
+            #
+            # The chunk loop above was never the problem (measured flat at
+            # ~774 MB across 30 chunks); the transcribe call was.
+            full_guitar = out_guitar / weight_sum.clamp(min=1e-8)
+            full_bass = out_bass / weight_sum.clamp(min=1e-8)
 
-        final_metrics = torch.stack(metrics_acc).mean(dim=0)  # (2,) real per-chunk mean
+            final_metrics = torch.stack(metrics_acc).mean(dim=0)  # (2,) real per-chunk mean
 
-        # Transcribe the recombined stems once — real logits on the full
-        # timeline (C-2), no per-chunk frame-grid drift.
-        guitar_tr = self._transcribe(full_guitar, "guitar")
-        bass_tr = self._transcribe(full_bass, "bass")
-        self._ensure_finite(guitar_tr, "guitar")
-        self._ensure_finite(bass_tr, "bass")
-        guitar_meta, _ = self._enhance(guitar_tr, full_guitar)
-        bass_meta, _ = self._enhance(bass_tr, full_bass)
+            # Transcribe the recombined stems once — real logits on the full
+            # timeline (C-2), no per-chunk frame-grid drift.
+            guitar_tr = self._transcribe(full_guitar, "guitar")
+            bass_tr = self._transcribe(full_bass, "bass")
+            self._ensure_finite(guitar_tr, "guitar")
+            self._ensure_finite(bass_tr, "bass")
+            guitar_meta, _ = self._enhance(guitar_tr, full_guitar)
+            bass_meta, _ = self._enhance(bass_tr, full_bass)
 
         guitar_notes = len(guitar_meta["midi_events"])
         bass_notes = len(bass_meta["midi_events"])
@@ -1281,6 +1488,13 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=stream_artifacts,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            # GATE-3: the gate must be able to refuse an empty render. Both
+            # counters are set: `total_notes` is upstream's canonical field and
+            # drives `empty_render`, `note_count` is this branch's stricter one
+            # (it also rejects a negative count).
+            note_count=len(midi_metadata["guitar"].get("midi_events") or [])
+            + len(midi_metadata["bass"].get("midi_events") or []),
+            total_notes=midi_metadata["summary"]["total_notes"],
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -1305,8 +1519,15 @@ class StemMidiModel(nn.Module):
 def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -> StemMidiModel:
     """Load model weights from a plain PyTorch checkpoint.
 
-    Expects either a raw ``state_dict`` or a dict with a ``"state_dict"`` key
-    (e.g. saved by ``train.py``). Config must come from ``config_path``.
+    Accepts a raw ``state_dict``, or a dict wrapping it under ``state_dict``
+    (``train.py``) or ``model_state_dict`` (``scripts/export_fine_tuned.py``,
+    ``scripts/fine_tune_demucs.py``, ``scripts/verify_cpu_export.py``). Config
+    must come from ``config_path``.
+
+    CKPT-1: only ``state_dict`` used to be unwrapped, so every fine-tune export
+    a user follows the docs to produce raised Missing/Unexpected key(s). A dict
+    with neither key is rejected explicitly rather than silently treated as a
+    state dict, which is what produced the confusing key errors.
     """
     if config_path is None:
         raise ValueError(
@@ -1332,6 +1553,16 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
         elif "model_state_dict" in ckpt:
             state_dict = ckpt["model_state_dict"]
         else:
+            # A checkpoint dict carrying neither wrapper: accept it as a bare
+            # state dict, but only if that is plausibly what it is. Feeding a
+            # config/optimizer dict to `load_state_dict` produces the confusing
+            # "Missing key(s)" error CKPT-1 was filed about.
+            if not all(isinstance(v, torch.Tensor) for v in ckpt.values()):
+                raise ValueError(
+                    f"Checkpoint {checkpoint_path!r} has neither a 'state_dict' nor a "
+                    "'model_state_dict' key and does not look like a raw state dict "
+                    f"(keys: {sorted(ckpt)[:8]})."
+                )
             state_dict = ckpt
     else:
         state_dict = ckpt
@@ -1339,7 +1570,19 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
         raise ValueError(
             "Checkpoint must contain a state_dict/model_state_dict mapping or be a bare state_dict"
         )
-    model.load_state_dict(state_dict)
+    # Checkpoints written before the pre-norm residual stack (C-1) lack the
+    # block_norms/final_norm parameters. Fill those with identity — the only
+    # sensible initialisation — and fail loudly on anything else.
+    from models.checkpoint_compat import load_state_dict_compat
+
+    report = load_state_dict_compat(model, state_dict)
+    if report["legacy"]:
+        logger.warning(
+            "Loaded a pre-C-1 checkpoint: filled %d LayerNorm parameter(s) "
+            "(block_norms/final_norm) with identity. Fine-tune before shipping "
+            "weights from it — the residual stack was untrained in that file.",
+            len(report["filled"]),
+        )
     model.mark_weights_loaded()
     return model
 

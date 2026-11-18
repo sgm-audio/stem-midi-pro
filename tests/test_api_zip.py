@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 soundfile = require("soundfile", "ZIP/stem round-trip")
 mido = require("mido", "MIDI parsing")
@@ -235,14 +235,6 @@ def test_zip_stems_are_playable_and_are_not_two_copies_of_each_other(api_env, tm
     assert rel > 0.05, f"guitar and bass differ by {rel:.2%} — a copy, not a separation"
 
 
-@known_bug(
-    "ZIP-1",
-    "create_response_zip calls sf.write(buf, stem, sr, format='WAV') with no subtype, so "
-    "libsndfile picks PCM_16: every float32 stem is quantised to 1/32768 and any sample outside "
-    "[-1, 1] is hard-clipped in the delivery layer itself (measured: a 3.0 peak decodes as "
-    "exactly 1.0). A clipped or hot stem therefore becomes a permanently clipped file with no "
-    "flag or warning. Write subtype='FLOAT' (or normalise and report the gain).",
-)
 def test_zip_stems_keep_the_pipeline_amplitude_and_precision(api_env, tmp_path):
     api, _ = api_env
     hot = np.full(int(SR * 0.1), 3.0, dtype="float32")
@@ -257,7 +249,8 @@ def test_zip_stems_keep_the_pipeline_amplitude_and_precision(api_env, tmp_path):
     stub.process_audio_file = process
     zf = _zip(_post(api, tmp_path, _wav_bytes(seconds=0.1)))
     for name, expected in monkey_stems.items():
-        audio, _ = soundfile.read(io.BytesIO(zf.read(name)), dtype="float32")
+        # the archive entry is "<stem>_stem.wav"; the stem dict key is not a path
+        audio, _ = soundfile.read(io.BytesIO(zf.read(f"{name}_stem.wav")), dtype="float32")
         err = float(np.max(np.abs(audio - expected)))
         assert err < 1e-4, (
             f"{name} was re-encoded on the way out: max |Δ| = {err:.6f} "
@@ -280,6 +273,10 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
         "low_confidence_notes": 0,
         "model_weights_loaded": None,
         "quality_tier": "complex",
+        # delivered since JSON-1/DOC-2: the render is finite, and the backend
+        # key is always present so a parser never branches on its existence.
+        "invalid": False,
+        "backend": None,
     }, "the ZIP report disagrees with the pipeline's ProcessingReport"
 
 
@@ -411,16 +408,6 @@ def test_zip_midi_note_off_pairs_every_note_on(api_env, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "IO-2",
-    "a 0-frame WAV passes audio_io.open_and_validate (frames=0.0 is never compared against a "
-    "minimum — measured info: {'duration': 0.0, 'frames': 0}) and then dies inside torch with "
-    "`RuntimeError: Expected 2D or 3D (batch mode) tensor ... but got: [1, 1, 0]`, which the "
-    "endpoint's catch-all turns into HTTP 500 'Processing failed: Expected 2D or 3D…'. A "
-    "truncated/empty upload is a client error: reject it in validate_audio_file/open_and_validate "
-    "(frames == 0, or duration below one hop) so it never reaches the model and no torch "
-    "internals leak to the caller.",
-)
 def test_empty_upload_is_a_client_error_not_a_500(api_env, tmp_path):
     from audio_io import open_and_validate
 
@@ -452,16 +439,6 @@ def test_empty_upload_is_a_client_error_not_a_500(api_env, tmp_path):
         pytest.param(np.full(8820, np.inf), "Inf", id="inf"),
         pytest.param(np.full(8820, -np.inf), "-Inf", id="-inf"),
     ],
-)
-@known_bug(
-    "IO-3",
-    "non-finite samples sail through validation and out the other end as a *successful* "
-    "delivery: an all-NaN upload returns 200 with artifact_flags=['none'], quality_tier='complex' "
-    "and centroid_separation_db/phase_coherence/avg_confidence all NaN, and because the ZIP "
-    "encodes PCM_16 the "
-    "customer's 'stems' decode as a constant -1.0 full-scale block (uniq == [-1.0], rms 1.0) — "
-    "2 seconds of digital clipping billed as a result. validate_audio_file must assert "
-    "np.isfinite(data).all(), and _detect_artifacts must flag non-finite stems as 'corrupt'.",
 )
 def test_non_finite_upload_is_refused(api_env, tmp_path, array, label):
     api, _ = api_env
@@ -544,7 +521,9 @@ def test_the_documented_confidence_lane_is_the_one_the_writer_emits():
     ]
     mid = MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
     track = mid.tracks[0]
-    assert [m.value for m in track if m.type == "polytouch"] == [114, 63]
+    # 0.9 -> round(114.3) = 114, 0.5 -> round(63.5) = 64 (MIDI-4: the writer rounds,
+    # so the top of the range is reachable).
+    assert [m.value for m in track if m.type == "polytouch"] == [114, 64]
     channel_mode = [m.control for m in track if m.type == "control_change" and m.control >= 120]
     assert not channel_mode, f"Channel Mode messages written as confidence: {channel_mode}"
 
@@ -569,16 +548,6 @@ def test_the_documented_confidence_lane_is_the_one_the_writer_emits():
     ), "docs promise CC#127 for confidence, which the writer never emits:\n" + "\n".join(offenders)
 
 
-@known_bug(
-    "DOC-2",
-    "API_DOCUMENTATION.md's 'Processing Report Schema' table lists 6 fields, but the delivered "
-    "processing_report.json has 7 in production: main always sets report.backend (M-7) and "
-    "api.create_response_zip copies it into the JSON (api.py:631-633), so the shipped artefact "
-    'carries an undocumented `backend` key (`"mamba (pure-torch)" / "separator=demucs,..."). '
-    "An integrator generating a parser from the table gets an unexpected field, and the operator "
-    "who needs to know which stack produced a render cannot find the key documented. Add the row: "
-    "`| backend | string | Which Mamba/backend stack produced this result (M-7) |`.",
-)
 def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path, monkeypatch):
     """`processing_report.json` is a paid artefact; its key set is a contract.
 
@@ -586,6 +555,12 @@ def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path,
     parses. Both directions are asserted in one place: no undocumented key ships, and no
     documented key is missing. The report is built with `backend` set, because that is what
     main.StemMidiModel does (M-7) - a stub that omitted it would hide exactly the drift above.
+
+    DOC-2 was the `backend` half of that contract: `create_response_zip` copied a key the
+    table did not list. `main` closed it by documenting the row (API_DOCUMENTATION.md) and
+    having `ProcessingReport.as_dict()` always emit the field, so the round-3 merge drops the
+    `@known_bug("DOC-2")` marker instead of XPASS-ing on a fixed defect; this test is the
+    guard, and `TODO.md` 18.1 keeps the id as `[x]`.
     """
     api, _ = api_env
     real = api.model.process_audio_file

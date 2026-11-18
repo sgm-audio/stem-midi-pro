@@ -2,7 +2,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM and optional Demucs/Basic Pitch backends. The repository contains model code and tests, but **does not ship trained checkpoint weights**. Python **3.13** and CPU execution are targets; reference-i5 throughput and audio quality are not certified by this repository.
+Audio AI for guitar/bass stem separation and MIDI transcription, built on Mamba-SSM and optional Demucs/Basic Pitch backends. The repository contains model code and tests, but **does not ship trained checkpoint weights**. Python **3.13** and CPU execution are targets; reference-i5 throughput and audio quality are not certified by this repository. Test suite on the rebased tree: `pytest -q` → **400 passed, 4 skipped, 28 xfailed, 0 failed**.
 
 > **Status:** Active development; **not production-ready without a separately trained and validated checkpoint**. The CLI and API refuse to serve file inference from random initialization. See [TODO.md](TODO.md), [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md), and [SUMMARY.md](SUMMARY.md) for current evidence and limitations.
 
@@ -69,35 +69,21 @@ This project targets **bare-metal CPU**, not GPUs. No reproducible benchmark on 
 
 The pure-PyTorch Mamba fallback runs on CPU. The optional `configs/model_config.cpu.yaml` selects Demucs + Basic Pitch and fails with actionable dependency errors when those packages are absent.
 
-`mamba-ssm` (the upstream CUDA package) is NOT used on this path — CPU inference runs the locally implemented pure-PyTorch Mamba fallback in `models/_mamba_compat.py` (same block math, chunked scan, no fused kernels — functional but slower than upstream's CUDA kernels). `MAMBA_BACKEND` records which implementation is live and is surfaced in logs, `/model-info`, and the processing report; `Mamba.SCAN_CHUNK` (default 256 frames) bounds the scan's working set, and `STEM_MIDI_REQUIRE_MAMBA_SSM=1` makes a missing package a hard error instead of a fallback.
+### Measured on a 2-vCPU cloud box (not the reference i5, **random weights**)
 
-### Measured on the audit machine (not the reference i5)
-
-PR #13 re-measured the chunked and single-pass paths on the audit machine: 2 threads, pure-PyTorch
-fallback, `configs/model_config.yaml`, **random weights** (so the numbers describe the runtime, not a
-trained render). Reproduce with `scripts/verify_numerics.py`; the method and the deltas are in
-[`FIXES.md`](FIXES.md). It is a second opinion on the figures in the capability list above, not an
-Intel i5 / 4–8 GB certification.
+Structural cost only — the weights are untrained, so these numbers bound the pipeline's time and
+memory, not its audio quality (`process_audio_file`, separation + transcription, MIDI written,
+`configs/model_config.yaml`, 2 threads):
 
 | Input length | Path | Wall time | Peak RSS |
 |---|---|---|---|
-| 5 min | chunked (`audio.chunk_duration_sec: 2`, default) | 104.0 s | 1.60 GB |
+| 5 min | chunked (`chunk_duration_sec: 2`, default) | 104.0 s | 1.60 GB |
 | 5 min | one pass (`chunk_duration_sec: 300`) | 69.0 s | 2.16 GB |
-| 10 min | chunked | 173.6 s | 2.22 GB |
-| 10 min | one pass | not measured (peak grows with length) | — |
+| 10 min | chunked (`chunk_duration_sec: 2`) | 173.6 s | 2.22 GB |
 
-- Separation + transcription together run at **~2.9x realtime chunked** (5 min in 104.0 s) and
-  **~4.35x realtime in one pass** (5 min in 69.0 s). That is the same order as the ~4x figure in the
-  capability list above, which main measured at 1 minute on a 2-vCPU runner; different silicon and
-  random weights keep it short of a certification, but the claim itself holds.
-- **Peak memory tracks the chunk, not the file, as long as chunking is on**: separated in overlapping
-  chunks (`audio.chunk_duration_sec`, default 2 s) and transcribed in frame segments
-  (`inference.segment_seconds`, default 60 s) it is 1.60 GB at 5 min and 2.22 GB at 10 min. One pass is
-  faster (no per-chunk re-priming) but its peak grows with the input: 2.16 GB at 5 min. ~0.65 GB of
-  every peak is imports plus the idle model.
-- One concurrent request. Scale up CPU/RAM for more.
-- **No tempo detection**: MIDI is written on a fixed grid at the tempo you pass (`tempo_us`, default
-  120 BPM), so quantisation is only as good as that choice.
+Long inputs are separated in overlapping chunks (`audio.chunk_duration_sec`, default 2 s) and
+transcribed in frame segments (`inference.segment_seconds`, default 60 s), so peak memory tracks the
+chunk size rather than the file length. Imports plus the idle model account for ~0.7 GB of each peak.
 
 ## Project Structure
 

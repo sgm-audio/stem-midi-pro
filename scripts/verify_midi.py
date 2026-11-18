@@ -101,16 +101,17 @@ def check_confidence() -> None:
     track = mid.tracks[0]
     polytouch = {m.note: m.value for m in track if m.type == "polytouch"}
     controls = sorted({m.control for m in track if m.type == "control_change"})
-    # The writer's lane truncates (`int(conf * 127)`, the surviving half of MIDI-4);
-    # `round()` would give 114 / 51. Both spellings are printed so the difference is a
-    # documented divergence rather than an unexplained diff, and the assert pins the one
-    # the writer actually guarantees. Note the expression lanes above DO round
-    # (`round((bend - 0.5) * 16384)`, `round(vibrato * 127)`) - one file, two mappings.
-    truncated = {60: int(0.9 * 127), 64: int(0.4 * 127)}
+    # MIDI-4 is closed: `_clamp_midi` and the injector both ROUND, so 0.9 -> 114 and
+    # 0.4 -> 51, and a confidence near 1.0 can actually reach 127 instead of stopping at
+    # 126. Both spellings are printed because the truncating mapping is what every
+    # pre-#15 render in the wild carries - a consumer that parses old files must know the
+    # difference is one byte, not a scale change.
     rounded = {60: round(0.9 * 127), 64: round(0.4 * 127)}
-    assert polytouch == truncated, f"polytouch {polytouch} != truncated {truncated}"
-    assert all(abs(polytouch[n] - rounded[n]) <= 1 for n in rounded), polytouch
-    print(f"confidence  : polytouch per note {polytouch} (int() mapping; round() -> {rounded})")
+    truncated = {60: int(0.9 * 127), 64: int(0.4 * 127)}
+    assert polytouch == rounded, f"polytouch {polytouch} != rounded {rounded}"
+    print(
+        f"confidence  : polytouch per note {polytouch} (round(); the old int() map -> {truncated})"
+    )
     print(f"              CC lanes used {controls} (CC#120-127 are Channel Mode; none emitted)")
 
 

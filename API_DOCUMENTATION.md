@@ -69,7 +69,7 @@ Upload an audio file; receive a ZIP with stems, MIDI, and a processing report.
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `quantize` | bool | `false` | When `true`, run inference with INT8 dynamic quantization of Linear layers (PERF-7.7/7.8). Lower CPU matmul cost; same output shapes. |
+| `quantize` | bool | `false` | When `true`, run inference with INT8 dynamic quantization of Linear layers (PERF-7.7/7.8). **Measured on this CPU target it is not faster**: 0.21 s fp32 vs 0.22 s INT8 for a 3 s clip (d_model 128, 4 layers, 2 threads) — the Python selective scan dominates, not the matmuls — and the stems differ from fp32 by max 5.9e-3. Same output shapes; kept for completeness, not as an optimisation. |
 
 **Success — `200 OK`**, `Content-Type: application/zip`. ZIP contents:
 
@@ -147,6 +147,10 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 | `low_confidence_notes` | int | Emitted notes below the confidence threshold, not all low-confidence frames |
 | `model_weights_loaded` | bool/null | Whether a validated checkpoint was loaded |
 | `quality_tier` | string | Heuristic `"studio"` / `"draft"` / `"complex"`, not an accuracy certificate |
+| `invalid` | bool | True when any reported metric was NaN/Inf, i.e. the render is unusable regardless of the other numbers |
+| `backend` | string/null | Which separator implementation produced the render; always present so a parser never branches on its existence |
+
+**Numeric values may be `null` rather than `NaN`.** A non-finite metric (which the pipeline really produces for silent, DC-offset and non-finite input) is delivered as `null` so the document stays valid RFC 8259 — bare `NaN` is not JSON and makes `JSON.parse()` reject the whole download.
 
 ## Quality Tiers
 
@@ -158,6 +162,15 @@ Every metric in `processing_report.json` is coerced to a finite number and seria
 `allow_nan=False`: a NaN would otherwise be written as bare `NaN`, which is not valid JSON and makes
 strict clients reject the whole download (silence, DC and non-finite input produce non-finite metrics
 often enough that this is a normal path, not a corner case).
+## MIDI export behaviour
+
+| Setting (model config) | Default | Effect |
+|---|---|---|
+| `midi.tempo` | `auto` | `auto` estimates the beat grid from the upload (`utils/tempo.py`; falls back to 120 BPM when there is no measurable pulse), `fixed` always writes 120 BPM, a number is read as BPM. The estimate never changes absolute note times — onset ticks are converted with the same tempo that is written into `set_tempo`. |
+| `midi.include_expression` | `false` | When `true`, exported files carry the expression head's bend/vibrato/slide as pitch-wheel + CC. The head is untrained, so each event tags `expression.source`; values are omitted by default rather than invented. |
+
+`/model-info` and the processing report stay unchanged; the detected tempo is reported per stem
+(`tempo_us`, `tempo_source`) and once in `summary.timing` (`source`, `bpm`, `confidence`).
 
 ## CORS
 

@@ -119,6 +119,10 @@ One refinement the audit should have made: `MIDI-4` is not a one-line `int() -> 
 hands the writer an already-truncated `confidence_cc_value`, so rounding only the writer
 changes nothing for a model-produced event. The `xfail` reason now names both call sites.
 
+*Reconciled again in round 3:* both call sites have since converged on `round()` (MIDI-4 is
+closed) and the name `confidence_cc_value` no longer exists — PR #15 hands the writer a
+polytouch `confidence` value. Read that paragraph as the tree at audit time, not today.
+
 
 ### …and PR #14 landed during the reconciliation (same mechanism, second round)
 
@@ -128,7 +132,8 @@ against it produced 12 failures here, all of them *this suite's* fault, and one 
 finding worth the merge: `api.py`'s `processing_report.json` ships a `backend` key
 (M-7) that the "Processing Report Schema" table does not document (**DOC-2**), and
 `USER_GUIDE.md` / `API_DOCUMENTATION.md` still instruct users to filter notes on
-**CC#127** although #11 moved confidence to CC#16 (**DOC-1**). Both were locked; DOC-1 is
+**CC#127** although #11 had already moved confidence off CC#127 (onto CC#16, then note-specific
+**Polyphonic Key Pressure** in #15) (**DOC-1**). Both were locked; DOC-1 is
 now **resolved**, and its lock was replaced by
 `tests/test_api_zip.py::test_the_documented_confidence_lane_is_the_one_the_writer_emits`,
 which reads a rendered file and fails if any guide names a CC the writer does not emit.
@@ -441,6 +446,33 @@ hypotheses that measurement killed:
   test, i.e. a config change that makes the suite red for the wrong reason. The
   numerical-precision worries it would have caught are instead covered explicitly by
   the NaN/Inf corpus in `test_audio_edge_cases.py`.
+
+---
+
+## 6.5 Remediation status (2026-11-17, branch `arena/2fcfcea6-stem-midi-pro`)
+
+Everything above is a snapshot of this audit at the time it was written. It has since
+been worked: **36 of the locked defects are closed**, and the suite went from
+`3 failed / 42 xfailed` to **`0 failed / 6 xfailed` (344 passed)**. The full
+per-defect record — what was wrong, what the fix does, and the measurements — is in
+`docs/reviews/2026-11-17-audit-remediation-plan.md`. Read that before quoting a
+finding from this document as still-live.
+
+The six that remain open are exactly the ones blocked on something outside this
+branch: `TRANS-1` and `CONF-1` need trained weights, `GATE-4` needs a reference-free
+metric validated on a corpus, `SEP-1` and `CPU-3` change model output, `EXPR-1` is a
+product decision.
+
+Three corrections to this document worth carrying forward, because "fixing" them
+again would be a regression:
+
+* **§7 item 1 is unchanged and still the most important fact here.** With untrained
+  weights, `si_sdr ≥ 20` and `confidence ≥ 0.85` are unreachable, so STUDIO cannot
+  fire honestly. Nothing in the remediation changed that.
+* **§7 item 2 is obsolete** ("65 known bugs, 0 fixed"). 36 are fixed.
+* `ALIGN-1`, `MIDI-7` and `CPU-1` were **stale markers, not live defects** — the code
+  was already correct and in each case the *test* was wrong. `SHIM-1`'s reason string
+  also mislisted `use_fast_path`, which is a real mamba-ssm parameter.
 
 ---
 

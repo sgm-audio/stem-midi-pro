@@ -83,3 +83,13 @@ inference:
 
 # Export
 # [REMOVED: TensorRT-LLM export block — TensorRT-LLM requires CUDA; target is CPU-only]
+
+# MIDI export
+midi:
+  # Beat grid for the exported files: "auto" estimates the tempo from the audio
+  # (utils/tempo.py) and falls back to 120 BPM when there is no measurable
+  # pulse; "fixed" always writes 120 BPM; a number is read as BPM.
+  tempo: auto
+  # The expression head is untrained, so its values are not exported unless a
+  # caller asks for them explicitly.
+  include_expression: false

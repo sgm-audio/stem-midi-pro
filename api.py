@@ -49,7 +49,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from audio_io import AudioValidationError, open_and_validate
+from audio_io import AudioValidationError, check_finite, open_and_validate
 from utils.midi import build_midi_from_events
 from utils.template_engine import list_templates, render_template
 
@@ -695,6 +695,17 @@ def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
     return midi_pkg  # legacy flat shape
 
 
+def _include_expression() -> bool:
+    """Whether exported MIDI carries the expression head's values (H-4).
+
+    Off by default: the head is untrained (ARCH-11.4.4), so writing bend /
+    vibrato values into every export would invent phrasing the model never
+    learned. ``midi.include_expression: true`` opts in; each event still carries
+    ``expression.source``, so a consumer can see the values are unlearnt.
+    """
+    return bool(((model_config or {}).get("midi") or {}).get("include_expression", False))
+
+
 def _finite(value: float, default: float = 0.0) -> float:
     """Coerce a metric to a finite float (JSON has no NaN/Infinity)."""
     try:
@@ -714,7 +725,12 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for stem_name in ("guitar", "bass"):
             buf = io.BytesIO()
-            sf.write(buf, outputs["stems"][stem_name], sr, format="WAV")
+            # ZIP-1: without an explicit subtype libsndfile picks PCM_16, so
+            # every float32 stem is quantised to 1/32768 and any sample outside
+            # [-1, 1] is HARD-CLIPPED in the delivery layer itself (measured: a
+            # 3.0 peak decodes as exactly 1.0). The model's output is float and
+            # the report's amplitude claims refer to it, so ship FLOAT.
+            sf.write(buf, outputs["stems"][stem_name], sr, format="WAV", subtype="FLOAT")
             zip_file.writestr(f"{stem_name}_stem.wav", buf.getvalue())
 
         midi_pkg = outputs["midi"]
@@ -722,11 +738,25 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
         bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
             "guitar.mid",
-            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                guitar_midi,
+                "guitar",
+                hop_length=hop_length,
+                sample_rate=sr,
+                tempo_us=guitar_midi.get("tempo_us"),
+                include_expression=_include_expression(),
+            ),
         )
         zip_file.writestr(
             "bass.mid",
-            build_midi_from_events(bass_midi, "bass", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                bass_midi,
+                "bass",
+                hop_length=hop_length,
+                sample_rate=sr,
+                tempo_us=bass_midi.get("tempo_us"),
+                include_expression=_include_expression(),
+            ),
         )
 
         report = outputs["report"]
@@ -737,24 +767,39 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
                 getattr(report, "centroid_separation_db", getattr(report, "si_sdr", 0.0)),
             )
         )
+
+        # JSON-1: `json.dumps` defaults to allow_nan=True, so a NaN metric --
+        # which the pipeline really produces for silent, DC and non-finite input
+        # -- emitted a bare `NaN` token. That is not valid RFC 8259 and makes
+        # browsers' JSON.parse() reject the WHOLE download, not just the field.
+        # Every float goes through `_safe`, which maps a non-finite value to
+        # null, and the dump uses allow_nan=False so any survivor is a hard
+        # error rather than a silently-invalid paid artefact.
+        def _safe(value):
+            try:
+                fvalue = float(value)
+            except (TypeError, ValueError):
+                return None
+            return fvalue if math.isfinite(fvalue) else None
+
         report_json = {
-            # Every metric goes through _finite(): NaN/Infinity are not valid JSON,
-            # and a strict client rejects the WHOLE report over one bare NaN - which
-            # is common here, since silence and DC produce non-finite metrics.
-            "separation_proxy": _finite(separation_proxy),
+            # `_safe` (not the module's `_finite`) on purpose: `_finite`
+            # substitutes 0.0, which would report an unmeasurable metric as a
+            # real reading of zero. null says "we could not measure this",
+            # which is what a silent or non-finite render actually means.
+            "separation_proxy": _safe(separation_proxy),
             # Deprecated compatibility alias. This value is not SI-SDR and
             # must not be read as a reference-based dB certification. PR #13 renamed
-            # this metric to `centroid_separation_db`; main's rename to
-            # `separation_proxy` supersedes it (utils/quality_gates.py keeps
-            # `centroid_separation_db` as a deprecated *field* on ProcessingReport, so
-            # #13's Python consumers still read the number), and the delivered JSON
-            # deliberately does not carry a third spelling: tests/test_api_zip.py
-            # asserts the report equals the pipeline's report key-for-key, and every
-            # extra alias is a name a client could start depending on.
-            "si_sdr": _finite(separation_proxy),
+            # the metric to `centroid_separation_db`; main's `separation_proxy` supersedes
+            # it (utils/quality_gates.py keeps `centroid_separation_db` as a deprecated
+            # *field*, so #13's Python consumers still read the number). The delivered
+            # JSON deliberately carries no third spelling: tests/test_api_zip.py asserts
+            # the shipped report equals the pipeline's report key-for-key, and every extra
+            # alias is a name a client could start depending on.
+            "si_sdr": _safe(separation_proxy),
             "metric_semantics": "centroid_separation_proxy_not_si_sdr",
-            "phase_coherence": _finite(report.phase_coherence),
-            "avg_confidence": _finite(report.avg_confidence),
+            "phase_coherence": _safe(report.phase_coherence),
+            "avg_confidence": _safe(report.avg_confidence),
             "confidence_encoding": guitar_midi.get("summary", {}).get(
                 "confidence_encoding", "polyphonic_key_pressure"
             ),
@@ -762,15 +807,17 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             "low_confidence_notes": report.low_confidence_notes,
             "model_weights_loaded": getattr(report, "model_weights_loaded", None),
             "quality_tier": report.quality_tier.value,
+            "invalid": bool(getattr(report, "invalid", False)),
+            # M-7: which implementation produced this render. Always present so
+            # an integrator's parser never has to branch on its existence.
+            "backend": getattr(report, "backend", None),
         }
-        backend = getattr(report, "backend", None)
-        if backend:
-            report_json["backend"] = backend  # M-7: which implementation ran
         zip_file.writestr(
             "processing_report.json",
-            # allow_nan=False is the belt to _finite()'s braces: if a metric ever
-            # escapes sanitisation the build fails HERE instead of shipping bytes no
-            # strict JSON parser accepts (API-6.9 / TODO JSON-1).
+            # NaN/Infinity are not valid JSON (RFC 8259) and break browsers'
+            # JSON.parse(): every numeric is sanitised to null above and the
+            # dump itself refuses non-finite values, so a survivor is a hard
+            # error rather than a silently-invalid paid artefact.
             json.dumps(report_json, indent=2, allow_nan=False),
         )
 
@@ -838,6 +885,14 @@ async def _do_process(tmp_file_path: str, quantize: bool = False) -> io.BytesIO:
             sample_rate=info["sample_rate"],
             channels=info["channels"],
         )
+
+    # The header check above cannot see NaN/Inf samples, and a model that does
+    # not re-validate (a backend, a test double) would happily deliver a
+    # corrupt render (IO-3). Stream the samples once, O(1) memory.
+    try:
+        await asyncio.to_thread(check_finite, tmp_file_path)
+    except AudioValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     outputs = await asyncio.to_thread(model.process_audio_file, tmp_file_path, quantize)
     return create_response_zip(outputs)
