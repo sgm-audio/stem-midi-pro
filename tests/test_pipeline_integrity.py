@@ -305,14 +305,6 @@ def test_summary_and_alignment_counts_agree(pipeline_config):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "REPORT-1",
-    "main reads centroid_separation_db=sep_metrics[0, 0].item() and "
-    "phase_coherence=sep_metrics[0, 1] with "
-    "the comment 'Average over batch', so a batched call reports item 0's quality for the "
-    "whole batch. A 2-item batch where the second render is garbage is stamped studio. "
-    "Average (or return per-item reports).",
-)
 def test_batched_report_aggregates_over_the_batch(pipeline_config):
     guitar = torch.full((2, 1, SR), 0.1)
 
@@ -329,12 +321,16 @@ def test_batched_report_aggregates_over_the_batch(pipeline_config):
     inject(model, "separator", TwoItemSeparator())
     n = frame_count(SR, HOP)
     conf = torch.full((2, n), 0.9)
-    model.transcriber = lambda stem: (
-        torch.full((2, n, 1), -10.0),
-        torch.zeros(2, n, 128),
-        torch.full((2, n, 1), 0.7),
-        torch.zeros(2, n, 3),
-        conf,
+    inject(
+        model,
+        "transcriber",
+        lambda stem: (
+            torch.full((2, n, 1), -10.0),
+            torch.zeros(2, n, 128),
+            torch.full((2, n, 1), 0.7),
+            torch.zeros(2, n, 3),
+            conf,
+        ),
     )
     with torch.inference_mode():
         out = model(guitar)

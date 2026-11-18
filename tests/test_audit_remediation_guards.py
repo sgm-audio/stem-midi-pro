@@ -341,3 +341,48 @@ def test_fake_1_backend_metrics_are_a_function_of_the_signal():
     )
     # and it must be able to reach a passing tier, or studio/draft stay untestable
     assert float(m_loud[0, 0]) >= 20.0
+
+
+def test_report_1_the_batched_report_averages_over_the_batch():
+    """REPORT-1: `metrics[0, 0]` was read under an "Average over batch" comment."""
+    import pathlib
+
+    import yaml
+
+    from main import StemMidiModel
+    from models.backends.base import SeparateOut  # noqa: F401  (shape documentation)
+    from tests.doubles import inject
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    cfg = yaml.safe_load((root / "configs" / "model_config.yaml").read_text())
+    cfg["separator"]["d_model"] = 32
+    cfg["separator"]["n_layers"] = 1
+    cfg["transcriber"]["d_model"] = 32
+    cfg["transcriber"]["n_layers"] = 1
+
+    class TwoItemSeparator:
+        def __call__(self, audio):
+            metrics = torch.tensor([[25.0, 0.95], [1.0, 0.05]])
+            zeros = torch.zeros_like(audio)
+            return audio, zeros, zeros, None, metrics
+
+    model = StemMidiModel(cfg)
+    model.eval()
+    inject(model, "separator", TwoItemSeparator())
+    n_frames = 10
+    inject(
+        model,
+        "transcriber",
+        lambda stem: (
+            torch.full((2, n_frames, 1), -10.0),
+            torch.zeros(2, n_frames, 128),
+            torch.full((2, n_frames, 1), 0.7),
+            torch.zeros(2, n_frames, 3),
+            torch.full((2, n_frames), 0.9),
+        ),
+    )
+    with torch.inference_mode():
+        out = model(torch.full((2, 1, n_frames * 512), 0.1))
+    assert out["processing_report"].centroid_separation_db == pytest.approx(
+        13.0, abs=1e-3
+    ), "report is reporting item 0's 25.0 dB instead of the batch mean 13.0 dB"

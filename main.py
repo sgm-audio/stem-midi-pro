@@ -211,9 +211,13 @@ class StemMidiModel(nn.Module):
 
         # 3. Processing report for quality gating (batch element 0 — B=1 is the
         #    supported inference shape; M-12)
+        # REPORT-1: average over the batch. Reading row 0 under an "average over
+        # batch" comment stamped item 1's garbage render with item 0's numbers.
+        # `nanmean` keeps a NaN in one item from poisoning the whole report --
+        # the NaN is reported honestly by the per-item artifact flags instead.
         report = ProcessingReport(
-            centroid_separation_db=sep_metrics[0, 0].item(),
-            phase_coherence=sep_metrics[0, 1].item(),
+            centroid_separation_db=float(torch.nanmean(sep_metrics[:, 0].float()).item()),
+            phase_coherence=float(torch.nanmean(sep_metrics[:, 1].float()).item()),
             avg_confidence=avg_confidence,
             artifact_flags=self._detect_artifacts(guitar_stem, bass_stem),
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
