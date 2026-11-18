@@ -154,6 +154,16 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 2. **Draft** — `avg_confidence ≥ 0.70` without artifacts or untrained weights, but below the studio conditions: refine low-confidence notes in your DAW.
 3. **Complex** — invalid metrics, `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
 
+## MIDI export behaviour
+
+| Setting (model config) | Default | Effect |
+|---|---|---|
+| `midi.tempo` | `auto` | `auto` estimates the beat grid from the upload (`utils/tempo.py`; falls back to 120 BPM when there is no measurable pulse), `fixed` always writes 120 BPM, a number is read as BPM. The estimate never changes absolute note times — onset ticks are converted with the same tempo that is written into `set_tempo`. |
+| `midi.include_expression` | `false` | When `true`, exported files carry the expression head's bend/vibrato/slide as pitch-wheel + CC. The head is untrained, so each event tags `expression.source`; values are omitted by default rather than invented. |
+
+`/model-info` and the processing report stay unchanged; the detected tempo is reported per stem
+(`tempo_us`, `tempo_source`) and once in `summary.timing` (`source`, `bpm`, `confidence`).
+
 ## CORS
 
 Configured via the `CORS_ORIGINS` env var (comma-separated list):

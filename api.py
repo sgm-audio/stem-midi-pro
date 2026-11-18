@@ -49,7 +49,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from audio_io import AudioValidationError, open_and_validate
+from audio_io import AudioValidationError, check_finite, open_and_validate
 from utils.midi import build_midi_from_events
 from utils.template_engine import list_templates, render_template
 
@@ -832,6 +832,14 @@ async def _do_process(tmp_file_path: str, quantize: bool = False) -> io.BytesIO:
             sample_rate=info["sample_rate"],
             channels=info["channels"],
         )
+
+    # The header check above cannot see NaN/Inf samples, and a model that does
+    # not re-validate (a backend, a test double) would happily deliver a
+    # corrupt render (IO-3). Stream the samples once, O(1) memory.
+    try:
+        await asyncio.to_thread(check_finite, tmp_file_path)
+    except AudioValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     outputs = await asyncio.to_thread(model.process_audio_file, tmp_file_path, quantize)
     return create_response_zip(outputs)

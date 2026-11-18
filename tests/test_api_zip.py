@@ -402,16 +402,6 @@ def test_zip_midi_note_off_pairs_every_note_on(api_env, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "IO-2",
-    "a 0-frame WAV passes audio_io.open_and_validate (frames=0.0 is never compared against a "
-    "minimum — measured info: {'duration': 0.0, 'frames': 0}) and then dies inside torch with "
-    "`RuntimeError: Expected 2D or 3D (batch mode) tensor ... but got: [1, 1, 0]`, which the "
-    "endpoint's catch-all turns into HTTP 500 'Processing failed: Expected 2D or 3D…'. A "
-    "truncated/empty upload is a client error: reject it in validate_audio_file/open_and_validate "
-    "(frames == 0, or duration below one hop) so it never reaches the model and no torch "
-    "internals leak to the caller.",
-)
 def test_empty_upload_is_a_client_error_not_a_500(api_env, tmp_path):
     from audio_io import open_and_validate
 
@@ -443,16 +433,6 @@ def test_empty_upload_is_a_client_error_not_a_500(api_env, tmp_path):
         pytest.param(np.full(8820, np.inf), "Inf", id="inf"),
         pytest.param(np.full(8820, -np.inf), "-Inf", id="-inf"),
     ],
-)
-@known_bug(
-    "IO-3",
-    "non-finite samples sail through validation and out the other end as a *successful* "
-    "delivery: an all-NaN upload returns 200 with artifact_flags=['none'], quality_tier='complex' "
-    "and centroid_separation_db/phase_coherence/avg_confidence all NaN, and because the ZIP "
-    "encodes PCM_16 the "
-    "customer's 'stems' decode as a constant -1.0 full-scale block (uniq == [-1.0], rms 1.0) — "
-    "2 seconds of digital clipping billed as a result. validate_audio_file must assert "
-    "np.isfinite(data).all(), and _detect_artifacts must flag non-finite stems as 'corrupt'.",
 )
 def test_non_finite_upload_is_refused(api_env, tmp_path, array, label):
     api, _ = api_env

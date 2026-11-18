@@ -12,7 +12,7 @@ fallback (`models/_mamba_compat.py`), `configs/model_config.yaml`.
 Reproduce with:
 
 ```bash
-python3 -m pytest -q                                  # 391 passed, 4 skipped, 37 xfailed
+python3 -m pytest -q                                  # 400 passed, 4 skipped, 28 xfailed
 python3 scripts/verify_numerics.py                    # block-RMS ladder, masks, mixture consistency
 python3 scripts/verify_midi.py                        # clock, polyphony, durations, CC
 python3 scripts/verify_api.py                         # OOM mapping, untrained gate, JSON guard
@@ -61,6 +61,26 @@ Same rules: each row is a measurement made on this tree, 2 threads, CPU only, pu
 | H-5 | Polyphony structurally impossible | **fixed upstream** by PR #19 before this branch: `transcriber.pitch_threshold` decodes every pitch above threshold, multi-hot BCE targets train it | `test_chord_decoding_emits_all_pitches_above_threshold`: two notes at one onset frame |
 | M-2 | Doc/code contradictions (`NeMo ModelPT`, CUDA-graph latency, "50 MiB cap", Canadian-artist weighting) | **already swept upstream** (PR #15–#19); re-verified on this tree | `grep` for each claim → only the historical `[REMOVED]` rows in `SUMMARY.md` remain |
 
+
+## Round 3 — backlog defects closed (the `@known_bug` locks)
+
+The suite carries `@known_bug("ID", ...)` markers whose ids are also open entries in `TODO.md` §18.1.
+A strict xfail failing the moment the bug is fixed is what makes these safe to close; each id below
+lost its marker, gained a pass-today guard and had its TODO entry checked off.
+
+| ID | Defect (as measured before) | Fix | Guard / evidence |
+|----|-----------------------------|-----|------------------|
+| **IO-2** | a 0-frame WAV validated clean, then died inside torch → HTTP 500 with internals in the body | `audio_io.open_and_validate` rejects `frames <= 0` / non-positive duration with a 400-level message | `test_zero_frame_wav_is_rejected`, `test_empty_upload_is_a_client_error_not_a_500` |
+| **IO-3** | NaN/Inf samples sailed through validation: 200-level "success", NaN metrics, stems that decode as a constant −1.0 full-scale block | three layers: `load_native_mono` checks `np.isfinite`, new `audio_io.check_finite()` streams the upload in 1M-frame blocks inside `/process` (O(1) memory), and `MambaSeparator.forward` refuses non-finite input so a backend or notebook cannot bypass it | `test_non_finite_audio_is_rejected`, `test_non_finite_upload_is_refused[nan/inf/-inf]`, `test_non_finite_input_never_leaks_into_stems` |
+| **GATE-3** | `route_by_quality` never looked at what the render contained: 0 notes with confidence 0.95 and a 25 dB proxy graded **STUDIO** and answered `direct_download` on an empty MIDI | `ProcessingReport` carries `total_notes`; 0 adds an `empty_render` artifact flag (→ COMPLEX) and routing answers `fallback_options` with an honest "no notes detected" badge | `test_empty_render_is_never_offered_as_studio_or_draft`, `test_a_render_with_no_notes_is_never_routed_as_a_result` |
+
+Still-open `@known_bug` ids at this commit (**28 xfail markers**, each an open TODO.md §18.1 entry):
+`ART-1`, `BATCH-1`, `CONF-1`, `CPU-1`, `CPU-2`, `DOC-1`, `DOC-2`, `FAKE-1`, `GATE-2`, `IO-4`,
+`MIDI-4`, `MIDI-7`, `PERF-1`, `REPORT-1`, `REPRO-1`, `SEP-2`, `SHIM-1`, `TRANS-1`, `ZIP-1` and the
+`ALIGN-1`/`GATE-4`/`CPU-*` variants. None of them is a same-line change; each needs its own
+measured decision (e.g. `CONF-1` — the head scores *degraded* renders *highest*, so a fix means
+calibration, not a threshold).
+
 ## Still open (deliberately not claimed as fixed)
 
 | # | Item | Why it is still open |
@@ -75,7 +95,7 @@ Same rules: each row is a measurement made on this tree, 2 threads, CPU only, pu
 
 ## Test suite
 
-`pytest -q` → **391 passed, 4 skipped, 37 xfailed, 0 failed** (`main` alone: 345 passed, 37 xfailed).
+`pytest -q` → **400 passed, 4 skipped, 28 xfailed, 0 failed** (`main` alone: 345 passed, 37 xfailed).
 The 4 skipped tests are `mamba_ssm`-only. The one local failure is the sandbox RSS probe
 (`test_peak_rss_probe_runs_at_all`, it asserts a ceiling this container cannot meet); it passes in CI. `ruff check .` and `black --check .` are clean.
 

@@ -352,14 +352,8 @@ def test_validation_accepts_supported_shapes(make_wav, synth):
     assert sr2 == 44100 and info2["bit_depth"] == 24
 
 
-@known_bug(
-    "IO-2",
-    "audio_io.open_and_validate checks duration upper bound, sample rate and channels, but "
-    "never that the file has any frames: a 0-frame WAV passes, and the model then either "
-    "crashes (IO-1) or returns a successful-looking empty render. Reject durations below one "
-    "analysis window.",
-)
 def test_zero_frame_wav_is_rejected(tmp_path):
+    """Regression guard for IO-2: a zero-frame file is a 400, not a torch traceback."""
     import wave
 
     from audio_io import AudioValidationError, load_audio
@@ -374,14 +368,8 @@ def test_zero_frame_wav_is_rejected(tmp_path):
         load_audio(str(p))
 
 
-@known_bug(
-    "IO-3",
-    "non-finite samples are accepted by validation and sail through inference: a float WAV "
-    "with one NaN produces a 200-level 'success' with zero notes and NaN metrics (verified: "
-    "process_audio_file on a NaN file returns without error). audio_io.load_native_mono must "
-    "check np.isfinite and raise AudioValidationError, and the API must answer 400.",
-)
 def test_non_finite_audio_is_rejected(make_wav, synth):
+    """Regression guard for IO-3: non-finite samples are refused at the decoder."""
     from audio_io import AudioValidationError, load_audio
 
     nan_path = make_wav(synth.with_nan(synth.tone(seconds=0.5)), name="nan.wav", subtype="FLOAT")
@@ -393,14 +381,8 @@ def test_non_finite_audio_is_rejected(make_wav, synth):
         load_audio(inf_path)
 
 
-@known_bug(
-    "IO-3",
-    "model level: NaN/Inf samples propagate straight through STFT -> masks -> ISTFT, so the "
-    "caller receives NaN stems (verified) instead of a rejection. audio_io must reject "
-    "non-finite input before inference.",
-)
 def test_non_finite_input_never_leaks_into_stems(nonfinite_corpus, separator):
-    """NaN/Inf must be rejected or sanitised — never propagated into the render."""
+    """Regression guard for IO-3: NaN/Inf is rejected, never rendered."""
     for name, sig in nonfinite_corpus.items():
         x = torch.from_numpy(np.asarray(sig, dtype=np.float32))[None, None]
         try:

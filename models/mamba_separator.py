@@ -145,6 +145,14 @@ class MambaSeparator(nn.Module):
                 f"MambaSeparator expects audio (B, C, T), got shape {tuple(audio.shape)}"
             )
         _B, C, T = audio.shape
+        # NaN/Inf survives the STFT, the masks and the ISTFT, so a corrupt
+        # upload becomes a delivered NaN stem (IO-3). Rejecting here also covers
+        # callers that bypass audio_io (backends, tests, notebooks).
+        if not torch.isfinite(audio).all():
+            raise ValueError(
+                "MambaSeparator received non-finite audio (NaN/Inf); the render would be "
+                "non-finite too. Validate the input before separation."
+            )
         if C != 1:
             raise ValueError(f"MambaSeparator expects mono input (C=1), got C={C}")
         if self.n_fft > T:
