@@ -429,6 +429,33 @@ hypotheses that measurement killed:
 
 ---
 
+## 6.5 Remediation status (2026-11-17, branch `arena/2fcfcea6-stem-midi-pro`)
+
+Everything above is a snapshot of this audit at the time it was written. It has since
+been worked: **36 of the locked defects are closed**, and the suite went from
+`3 failed / 42 xfailed` to **`0 failed / 6 xfailed` (344 passed)**. The full
+per-defect record — what was wrong, what the fix does, and the measurements — is in
+`docs/reviews/2026-11-17-audit-remediation-plan.md`. Read that before quoting a
+finding from this document as still-live.
+
+The six that remain open are exactly the ones blocked on something outside this
+branch: `TRANS-1` and `CONF-1` need trained weights, `GATE-4` needs a reference-free
+metric validated on a corpus, `SEP-1` and `CPU-3` change model output, `EXPR-1` is a
+product decision.
+
+Three corrections to this document worth carrying forward, because "fixing" them
+again would be a regression:
+
+* **§7 item 1 is unchanged and still the most important fact here.** With untrained
+  weights, `si_sdr ≥ 20` and `confidence ≥ 0.85` are unreachable, so STUDIO cannot
+  fire honestly. Nothing in the remediation changed that.
+* **§7 item 2 is obsolete** ("65 known bugs, 0 fixed"). 36 are fixed.
+* `ALIGN-1`, `MIDI-7` and `CPU-1` were **stale markers, not live defects** — the code
+  was already correct and in each case the *test* was wrong. `SHIM-1`'s reason string
+  also mislisted `use_fast_path`, which is a real mamba-ssm parameter.
+
+---
+
 ## 7. Residual gaps (what a reader should not conclude)
 
 1. **Every model test runs on untrained weights.** No repo test can therefore say
