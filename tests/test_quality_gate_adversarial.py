@@ -62,6 +62,47 @@ def _tier(**kw):
 # ---------------------------------------------------------------------------
 
 
+def test_confidence_thresholds_come_from_the_config_not_from_defaults():
+    """Confidence thresholds decide the tier; the proxy is observability-only."""
+    from utils.quality_gates import ProcessingReport
+
+    strict = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "studio_confidence_threshold": 0.95}},
+    )
+    lenient = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "studio_confidence_threshold": 0.85}},
+    )
+    assert strict.quality_tier is not lenient.quality_tier
+
+    lowered = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
+    )
+    raised = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "min_centroid_separation_db": 25.0}},
+    )
+    assert lowered.quality_tier is raised.quality_tier
+
+
 def test_proxy_thresholds_do_not_control_the_quality_tier():
     """The centroid proxy is reported for observability, not used as a gate."""
     from utils.quality_gates import ProcessingReport, QualityTier

@@ -892,6 +892,11 @@ async def get_model_info():
     return {
         "model_name": cfg.get("name", "unknown"),
         "backend": backend,  # Which implementation / backend pair produced output.
+        # Report both the active Mamba implementation and the compatibility
+        # checkpoint flag; clients can distinguish random/native inference from
+        # a validated checkpoint or backend-owned pretrained weights.
+        "mamba_backend": getattr(model, "mamba_backend", None),
+        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
         "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
         "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),

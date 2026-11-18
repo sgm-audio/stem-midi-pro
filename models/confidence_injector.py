@@ -27,11 +27,12 @@ class ConfidenceInjector:
     def inject_midi_metadata(
         self, midi_events: list, confidence: torch.Tensor, stem_energy: torch.Tensor
     ) -> dict:
-        """Return enhanced events and note-level confidence summary.
+        """Return enhanced events and a note-level confidence summary.
 
-        ``stem_energy`` and ``confidence`` are expected on the STFT frame grid
-        indexed by each event's ``onset_frame``. Samples outside either vector
-        use the event's supplied confidence and zero energy.
+        Both confidence and energy are indexed on the STFT frame grid. A note
+        outside the model confidence grid receives zero confidence and zero
+        energy rather than inheriting caller-provided metadata that was never
+        produced by the active model.
         """
         confidence = confidence.detach().reshape(-1).float().cpu()
         stem_energy = stem_energy.detach().reshape(-1).float().cpu()
@@ -41,10 +42,7 @@ class ConfidenceInjector:
             if midi_events
             else torch.empty(0, dtype=torch.long)
         )
-        conf_scores = torch.tensor(
-            [float(event.get("confidence", 0.0)) for event in midi_events],
-            dtype=torch.float32,
-        )
+        conf_scores = torch.zeros(len(midi_events), dtype=torch.float32)
         energies = torch.zeros(len(midi_events), dtype=torch.float32)
         valid_conf = (onset_indices >= 0) & (onset_indices < len(confidence))
         valid_energy = (onset_indices >= 0) & (onset_indices < len(stem_energy))
@@ -74,19 +72,24 @@ class ConfidenceInjector:
                     **event,
                     "confidence": conf_score,
                     "confidence_value": confidence_value,
-                    # Deprecated JSON alias; never serialized as MIDI CC#127.
+                    # Deprecated JSON aliases; never serialized as MIDI CC#127.
                     "cc_127_value": confidence_value,
                     "confidence_cc_value": confidence_value,
                     "stem_energy": energy,
                     "alignment_score": alignment_score,
-                    "needs_review": alignment_score < self.min_confidence,
+                    # Review is a confidence decision; energy remains a
+                    # diagnostic alignment score and must not change the flag.
+                    "needs_review": conf_score < self.min_confidence,
                     "quantization_suggestion": "grid" if alignment_score > 0.85 else "human",
                 }
             )
 
-        # This is intentionally note-level. Counting every low-confidence
-        # frame would claim that notes existed where no note was emitted.
         note_confidences = conf_scores
+        low_confidence_count = (
+            int((note_confidences < self.min_confidence).sum().item())
+            if len(note_confidences) > 0
+            else 0
+        )
         return {
             "midi_events": enhanced_events,
             "summary": {
@@ -98,11 +101,8 @@ class ConfidenceInjector:
                 "avg_confidence": (
                     float(note_confidences.mean().item()) if len(note_confidences) > 0 else 0.0
                 ),
-                "low_confidence_count": (
-                    int((note_confidences < self.min_confidence).sum().item())
-                    if len(note_confidences) > 0
-                    else 0
-                ),
+                "low_confidence_count": low_confidence_count,
                 "alignment_warnings": sum(1 for e in enhanced_events if e["needs_review"]),
+                "total_notes": len(enhanced_events),
             },
         }

@@ -16,7 +16,10 @@ KNOWN_ARTIFACT_FLAGS = {
     "phase_cancellation",
     "non_finite",
     "silent_output",
+    # Provenance and input-level flags remain distinct from output artifacts.
     "untrained_weights",
+    "silence",
+    "dc_offset",
 }
 
 
@@ -45,6 +48,10 @@ class ProcessingReport:
     si_sdr: float | None = None  # deprecated input/output compatibility alias
     centroid_separation_db: float | None = None  # deprecated compatibility alias
     backend: str | None = None
+    # Whether TRAINED weights produced this report, or the repo's
+    # randomly-initialised defaults (HONESTY-1). None = unknown (a report built
+    # by hand, e.g. in a unit test).
+    weights_loaded: bool | None = None
     # True when any metric is NaN/Inf: the render is unusable regardless of
     # what the other numbers say (review §4).
     invalid: bool = field(default=False, init=False)
