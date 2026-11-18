@@ -12,7 +12,7 @@ fallback (`models/_mamba_compat.py`), `configs/model_config.yaml`.
 Reproduce with:
 
 ```bash
-python3 -m pytest -q                                  # 357 passed, 4 skipped, 40 xfailed
+python3 -m pytest -q                                  # 362 passed, 4 skipped, 37 xfailed
 python3 scripts/verify_numerics.py                    # block-RMS ladder, masks, mixture consistency
 python3 scripts/verify_midi.py                        # clock, polyphony, durations, CC
 python3 scripts/verify_api.py                         # OOM mapping, untrained gate, JSON guard
@@ -59,7 +59,7 @@ python3 scripts/verify_api.py                         # OOM mapping, untrained g
 
 ## Test suite
 
-`pytest -q` → **357 passed, 4 skipped, 40 xfailed, 0 failed** (`main` alone: 316 passed, 40 xfailed).
+`pytest -q` → **362 passed, 4 skipped, 37 xfailed, 0 failed** (`main` alone: 331 passed, 37 xfailed).
 are `mamba_ssm`-only checkpoint tests. `ruff check .` and `black --check .` are clean.
 
 New/rewritten coverage on this branch:
