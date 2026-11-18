@@ -207,7 +207,7 @@ def test_hard_clipped_input_is_flagged(separator, synth):
     stems = torch.from_numpy(x)[None, None].float()
     from main import StemMidiModel
 
-    flags = StemMidiModel._detect_artifacts(None, stems, stems * 0.5)
+    flags = StemMidiModel._detect_artifacts(stems, stems * 0.5)
     assert "clipping" in flags, f"a ±1.0 square wave was not flagged as clipped: {flags}"
 
 
@@ -225,7 +225,7 @@ def test_clean_loud_audio_is_not_flagged_as_artificial():
 
     tone = 0.5 * torch.sin(2 * math.pi * 220 * torch.arange(SR).float() / SR)
     tone = tone[None, None]
-    flags = StemMidiModel._detect_artifacts(None, tone, tone * 0.6)
+    flags = StemMidiModel._detect_artifacts(tone, tone * 0.6)
     assert flags == ["none"], f"clean, unclipped, low-noise material flagged {flags}"
 
 
@@ -234,8 +234,8 @@ def test_correlated_stems_are_not_phase_cancellation(synth):
     from main import StemMidiModel
 
     x = torch.from_numpy(CORPUS["pluck-line"](synth))[None, None].float() * 0.3
-    assert "phase_cancellation" not in StemMidiModel._detect_artifacts(None, x, x)  # identical
-    assert "phase_cancellation" in StemMidiModel._detect_artifacts(None, x, -x)  # anti-phase
+    assert "phase_cancellation" not in StemMidiModel._detect_artifacts(x, x)  # identical
+    assert "phase_cancellation" in StemMidiModel._detect_artifacts(x, -x)  # anti-phase
 
 
 def test_the_small_test_grid_is_runnable_by_the_real_separator(mock_config):
@@ -352,13 +352,6 @@ def test_validation_accepts_supported_shapes(make_wav, synth):
     assert sr2 == 44100 and info2["bit_depth"] == 24
 
 
-@known_bug(
-    "IO-2",
-    "audio_io.open_and_validate checks duration upper bound, sample rate and channels, but "
-    "never that the file has any frames: a 0-frame WAV passes, and the model then either "
-    "crashes (IO-1) or returns a successful-looking empty render. Reject durations below one "
-    "analysis window.",
-)
 def test_zero_frame_wav_is_rejected(tmp_path):
     import wave
 
@@ -374,13 +367,6 @@ def test_zero_frame_wav_is_rejected(tmp_path):
         load_audio(str(p))
 
 
-@known_bug(
-    "IO-3",
-    "non-finite samples are accepted by validation and sail through inference: a float WAV "
-    "with one NaN produces a 200-level 'success' with zero notes and NaN metrics (verified: "
-    "process_audio_file on a NaN file returns without error). audio_io.load_native_mono must "
-    "check np.isfinite and raise AudioValidationError, and the API must answer 400.",
-)
 def test_non_finite_audio_is_rejected(make_wav, synth):
     from audio_io import AudioValidationError, load_audio
 
@@ -393,12 +379,6 @@ def test_non_finite_audio_is_rejected(make_wav, synth):
         load_audio(inf_path)
 
 
-@known_bug(
-    "IO-3",
-    "model level: NaN/Inf samples propagate straight through STFT -> masks -> ISTFT, so the "
-    "caller receives NaN stems (verified) instead of a rejection. audio_io must reject "
-    "non-finite input before inference.",
-)
 def test_non_finite_input_never_leaks_into_stems(nonfinite_corpus, separator):
     """NaN/Inf must be rejected or sanitised — never propagated into the render."""
     for name, sig in nonfinite_corpus.items():

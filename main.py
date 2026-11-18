@@ -471,8 +471,15 @@ class StemMidiModel(nn.Module):
         """
         return StemMidiModel._stem_is_silent(guitar) and StemMidiModel._stem_is_silent(bass)
 
-    def _detect_artifacts(self, guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:
+    @staticmethod
+    def _detect_artifacts(guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:
         """Simple artifact detection for quality gating.
+
+        Deliberately a `staticmethod`: it depends only on the two stems, and the
+        test-suite calls it unbound (``StemMidiModel._detect_artifacts(None, g, b)``)
+        to check the gate as a pure function. Making it an instance method
+        silently broke that contract (review §4 follow-up: `self._stems_are_silent`
+        raised `AttributeError` on `None`).
 
         Finiteness and silence are checked FIRST (review §4): without them an
         all-NaN render raised no flag, and because `NaN >= x` is False the
@@ -490,7 +497,7 @@ class StemMidiModel(nn.Module):
 
         # Digital silence in both stems means nothing was separated (e.g. no
         # guitar in the mix). It must not reach STUDIO via the clamped proxy.
-        if self._stems_are_silent(guitar, bass):
+        if StemMidiModel._stems_are_silent(guitar, bass):
             return ["silent_output"]
 
         # Check for clipping
@@ -633,6 +640,9 @@ class StemMidiModel(nn.Module):
             "report": outputs["processing_report"],
             "routing": outputs["routing_decision"],
             "sample_rate": self.cfg["audio"]["sample_rate"],
+            # Frames are on this hop grid; the MIDI writer needs it to place
+            # events in time (AUDIT MIDI-5).
+            "hop_length": self.cfg["audio"]["hop_length"],
         }
 
     def process_audio_streaming(self, audio_path: str, chunk_seconds: float = 2.0) -> dict:

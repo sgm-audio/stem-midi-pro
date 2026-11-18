@@ -58,6 +58,13 @@ def open_and_validate(file_path: str, max_duration_seconds: int = MAX_DURATION_S
         "bit_depth": _infer_bit_depth(snd.subtype),
     }
 
+    # IO-2: a 0-frame WAV passes every other check and then dies inside torch
+    # (`Expected 2D or 3D ... but got: [1, 1, 0]`) as an HTTP 500 with internals
+    # in the body. Refuse it at the door so the caller can answer 400.
+    if info["frames"] <= 0:
+        snd.close()
+        raise AudioValidationError("Audio file contains no frames (empty file)")
+
     if info["duration"] > max_duration_seconds:
         snd.close()
         raise AudioValidationError(
@@ -70,6 +77,19 @@ def open_and_validate(file_path: str, max_duration_seconds: int = MAX_DURATION_S
             f"Sample rate {info['sample_rate']}Hz not supported. "
             f"Supported: {SUPPORTED_SAMPLE_RATES}"
         )
+
+    # IO-3: non-finite samples must be refused for *every* caller, not only
+    # those that go through `load_native_mono`. Reading the file here costs one
+    # pass and is the only place the API validates before inference; a NaN/Inf
+    # upload used to return 200 with artifact_flags=['none'] and deliver a
+    # constant -1.0 full-scale "stem" (PCM_16 encoding of NaN).
+    _data = snd.read(dtype="float32", always_2d=True)
+    if not np.isfinite(_data).all():
+        snd.close()
+        raise AudioValidationError(
+            "Audio contains non-finite samples (NaN/Inf); refusing to process"
+        )
+    snd.seek(0)
 
     try:
         yield snd, info
@@ -85,7 +105,17 @@ def load_native_mono(snd: sf.SoundFile) -> tuple[np.ndarray, int]:
     audio = snd.read(dtype="float32", always_2d=True)
     sr = snd.samplerate
     audio = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
-    return np.asarray(audio, dtype=np.float32), sr
+    audio = np.asarray(audio, dtype=np.float32)
+
+    # IO-3: a NaN/Inf upload used to sail through validation and be DELIVERED as
+    # a successful render (artifact_flags=['none'], metrics NaN) whose PCM_16
+    # encoding turned into a constant -1.0 full-scale "stem". Reject it before
+    # inference: there is no meaningful separation of a non-finite signal.
+    if not np.isfinite(audio).all():
+        raise AudioValidationError(
+            "Audio contains non-finite samples (NaN/Inf); refusing to process"
+        )
+    return audio, sr
 
 
 def load_audio(

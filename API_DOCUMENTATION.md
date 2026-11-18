@@ -77,7 +77,7 @@ Upload an audio file; receive a ZIP with stems, MIDI, and a processing report.
 |---|---|
 | `guitar_stem.wav` | Separated guitar stem |
 | `bass_stem.wav` | Separated bass stem |
-| `guitar.mid` | Guitar MIDI transcription (CC#127 = per-note confidence) |
+| `guitar.mid` | Guitar MIDI transcription (CC#16 = per-note confidence; override with `MIDI_CONFIDENCE_CC`) |
 | `bass.mid` | Bass MIDI transcription |
 | `processing_report.json` | Metrics (see schema below) |
 
@@ -143,11 +143,16 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 | `artifact_flags` | list[str] | e.g. `["clipping"]`, empty when clean |
 | `low_confidence_notes` | int | Notes below the confidence threshold |
 | `quality_tier` | string | `"studio"` / `"draft"` / `"complex"` |
+| `invalid` | bool | `true` when a metric was non-finite and the render is unusable; `quality_tier` is then always `"complex"` |
+| `backend` | string or null | Which implementation produced the render, e.g. `"mamba (pure-torch)"` or `"separator=demucs,transcriber=basic_pitch"` (M-7) |
+
+All `float` fields may be `null` rather than `NaN`/`Infinity`: the report is serialised
+with `allow_nan=False`, so it is always valid RFC 8259 and `JSON.parse` accepts it.
 
 ## Quality Tiers
 
 1. **Studio** — `avg_confidence ≥ 0.85` **and** `centroid_separation_db ≥ 20 dB`: direct download.
-2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW (CC#127 tags them).
+2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW (CC#16 tags them).
 3. **Complex** — `avg_confidence < 0.70` or artifact flags present: raw output plus review options.
 
 ## CORS

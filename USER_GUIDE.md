@@ -8,7 +8,7 @@ Stem+MIDI Pro separates a mixed recording into **guitar and bass stems** and tra
 
 1. **Stem separation** — produces `guitar_stem.wav` and `bass_stem.wav` from a mixed recording.
 2. **MIDI transcription** — produces `guitar.mid` and `bass.mid` with note onsets, pitches, velocities, and per-note durations (honoring `duration_frames` from the model output; falls back to a configurable default when absent).
-3. **Confidence metadata** — every MIDI note carries a CC#127 value (0–127) representing the model's confidence, so your DAW can highlight uncertain notes.
+3. **Confidence metadata** — every MIDI note carries a **CC#16** value (0–127) representing the model's confidence, so your DAW can highlight uncertain notes. (CC#16 is "General Purpose Controller 1"; CC#120–127 are reserved MIDI Channel Mode messages, so confidence is not written there. Set `MIDI_CONFIDENCE_CC=127` if your workflow requires the old controller.)
 4. **Quality report** — `processing_report.json` with separation metrics (SI-SDR estimate, phase coherence), average confidence, artifact flags, and an overall quality tier.
 
 **Not included (yet):** tempo detection, tuning detection, palm-mute / harmonics / slap-pop detection, a web-based MIDI editor, or real-time streaming. Refinement happens in your own DAW. Earlier versions of this guide described those features aspirationally; this version describes the software as it is.
@@ -85,7 +85,7 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 
 1. Import the WAV stems and the MIDI files at the same project tempo (MIDI note timing is absolute — aligned to the audio, not to a detected tempo grid).
 2. Assign guitar/bass virtual instruments.
-3. **Use CC#127 to find uncertain notes.** Each note's confidence is encoded as a CC#127 controller value: 96–127 high confidence, 64–95 medium, 0–63 low. Most DAWs (Reaper, Logic, Cubase, Ableton) let you view or filter by controller data — use that to jump straight to the notes that need attention.
+3. **Use CC#16 to find uncertain notes.** Each note's confidence is encoded as a **CC#16** controller value: 96–127 high confidence, 64–95 medium, 0–63 low. Most DAWs (Reaper, Logic, Cubase, Ableton) let you view or filter by controller data — use that to jump straight to the notes that need attention.
 4. Edit pitch/timing/velocity of the low-confidence notes by ear against the stems.
 
 There is no built-in MIDI editor — your DAW is the editor. MIDI expression data (bend, vibrato, slide) is produced by the model's expression head but is currently untrained, so treat it as advisory only.
@@ -112,7 +112,7 @@ Only process audio you own or have permission to use — your own recordings, li
 | Low confidence everywhere | Noisy/lo-fi source, dense mix | Use a cleaner recording; check the artifact flags |
 | Stems sound thin or phasey | Source stereo phase issues | Check the original mix; phase_coherence < 0.5 is a warning sign |
 | MIDI misses notes | Very fast passages, heavy distortion | Edit in DAW; consider splitting the song into sections |
-| Extra/ghost notes | Fret noise, string buzz, background sounds | Delete flagged low-CC#127 notes first |
+| Extra/ghost notes | Fret noise, string buzz, background sounds | Delete flagged low-CC#16 notes first |
 | `503 Model not loaded` | Server still starting | Wait for startup to finish, retry |
 
 ## Getting Help

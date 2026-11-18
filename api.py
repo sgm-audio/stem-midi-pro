@@ -31,6 +31,7 @@ import contextvars
 import io
 import json
 import logging
+import math
 import os
 import secrets
 import tempfile
@@ -49,7 +50,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from audio_io import AudioValidationError, open_and_validate
-from utils.midi import build_midi_from_events
+from utils.midi import HOP_LENGTH, build_midi_from_events
 from utils.template_engine import list_templates, render_template
 
 # ---------------------------------------------------------------------------
@@ -608,30 +609,68 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for stem_name in ("guitar", "bass"):
             buf = io.BytesIO()
-            sf.write(buf, outputs["stems"][stem_name], sr, format="WAV")
+            # ZIP-1: without an explicit subtype libsndfile picks PCM_16, so
+            # every float32 stem is quantised to 1/32768 and any sample outside
+            # [-1, 1] is HARD-CLIPPED in the delivery layer itself (measured: a
+            # 3.0 peak decodes as exactly 1.0). The model's output is float and
+            # the report's amplitude claims refer to it, so ship FLOAT.
+            sf.write(buf, outputs["stems"][stem_name], sr, format="WAV", subtype="FLOAT")
             zip_file.writestr(f"{stem_name}_stem.wav", buf.getvalue())
 
         midi_pkg = outputs["midi"]
+        # MIDI-5: the frames come from the configured analysis grid, so the
+        # writer must be told what that grid is. Letting it fall back to its
+        # module defaults (hop 512 / 44.1 kHz) puts every event ~2.75x off in
+        # time for a 16 kHz / hop-128 model.
+        grid = {
+            "hop_length": outputs.get("hop_length", HOP_LENGTH),
+            "sample_rate": outputs.get("sample_rate", sr),
+        }
         zip_file.writestr(
-            "guitar.mid", build_midi_from_events(_stem_midi_data(midi_pkg, "guitar"), "guitar")
+            "guitar.mid",
+            build_midi_from_events(_stem_midi_data(midi_pkg, "guitar"), "guitar", **grid),
         )
         zip_file.writestr(
-            "bass.mid", build_midi_from_events(_stem_midi_data(midi_pkg, "bass"), "bass")
+            "bass.mid",
+            build_midi_from_events(_stem_midi_data(midi_pkg, "bass"), "bass", **grid),
         )
 
         report = outputs["report"]
+        # JSON-1: `json.dumps` defaults to allow_nan=True, so a NaN metric --
+        # which the pipeline really produces for silent, DC and non-finite
+        # input -- emitted bare `NaN`, which is not valid RFC 8259 and makes
+        # browsers' JSON.parse() reject the WHOLE download. `as_dict()` maps
+        # non-finite values to null; allow_nan=False then makes any survivor a
+        # hard error rather than a silently-invalid artefact.
+        # `processing_report.json` is a paid artefact and its key set is a
+        # published contract (API_DOCUMENTATION.md "Processing Report Schema"),
+        # asserted in both directions by tests/test_api_zip.py. `as_dict()`
+        # carries extra internal fields, so the delivery payload is built
+        # explicitly from the documented set -- with the same NaN handling.
+
+        def _safe(value):
+            try:
+                fvalue = float(value)
+            except (TypeError, ValueError):
+                return None
+            return fvalue if math.isfinite(fvalue) else None
+
         report_json = {
-            "centroid_separation_db": float(report.centroid_separation_db),
-            "phase_coherence": float(report.phase_coherence),
-            "avg_confidence": float(report.avg_confidence),
-            "artifact_flags": report.artifact_flags,
-            "low_confidence_notes": report.low_confidence_notes,
+            "centroid_separation_db": _safe(report.centroid_separation_db),
+            "phase_coherence": _safe(report.phase_coherence),
+            "avg_confidence": _safe(report.avg_confidence),
+            "artifact_flags": list(report.artifact_flags),
+            "low_confidence_notes": int(report.low_confidence_notes),
             "quality_tier": report.quality_tier.value,
+            "invalid": bool(getattr(report, "invalid", False)),
+            # M-7: which implementation produced this render. Always present so
+            # an integrator's parser never has to branch on its existence.
+            "backend": getattr(report, "backend", None),
         }
-        backend = getattr(report, "backend", None)
-        if backend:
-            report_json["backend"] = backend  # M-7: which implementation ran
-        zip_file.writestr("processing_report.json", json.dumps(report_json, indent=2))
+        zip_file.writestr(
+            "processing_report.json",
+            json.dumps(report_json, indent=2, allow_nan=False),
+        )
 
     zip_buffer.seek(0)
     return zip_buffer

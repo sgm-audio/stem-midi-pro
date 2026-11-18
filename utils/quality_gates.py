@@ -66,13 +66,21 @@ class ProcessingReport:
         if self.invalid and "non_finite" not in self.artifact_flags:
             self.artifact_flags.append("non_finite")
 
-        # The centroid value is a saturation-prone proxy, not SI-SDR (C-2.6):
-        # one FFT bin of separation reports exactly 20.00 dB, which clears
-        # `min_si_sdr: 20`. Renaming it (done on main) makes the report honest
-        # but does not make the number discriminating, so it is kept for
-        # observability and removed from the tier decision (review §9).
-        # `min_si_sdr` is accepted only to warn that it no longer does anything.
-        self.min_centroid_separation_db = gates.get("min_centroid_separation_db")
+        # The centroid value is a saturation-prone proxy, not SI-SDR (C-2.6),
+        # and it is NOT sufficient on its own: one FFT bin of separation
+        # reports exactly 20.00 dB and clears the shipped `min: 20` (review §9).
+        # It is therefore never the *only* test -- see `quality_tier`, which
+        # also demands confidence, zero low-confidence notes and no artifacts.
+        #
+        # But it stays *active*, because all three shipped configs document it
+        # and an inert knob is its own bug class (AUDIT GATE tests). A missing,
+        # non-numeric or non-finite threshold disables just this half.
+        raw_threshold = gates.get("min_centroid_separation_db")
+        self.min_centroid_separation_db = (
+            float(raw_threshold)
+            if isinstance(raw_threshold, (int, float)) and math.isfinite(float(raw_threshold))
+            else None
+        )
         legacy = gates.get("min_si_sdr")
         if legacy is not None:
             warnings.warn(
@@ -94,12 +102,19 @@ class ProcessingReport:
         real_flags = [f for f in self.artifact_flags if f != "none"]
         if real_flags:
             return QualityTier.COMPLEX
-        # STUDIO additionally requires that no individual note was unreliable:
-        # a render whose average confidence clears 0.85 while dozens of notes
-        # are individually doubtful is not studio-ready (review §9).
+        # STUDIO requires ALL of: confidence at the studio bar, no individually
+        # unreliable notes, and (when configured) the separation threshold.
+        # Requiring several independent signals is the fix for §9 -- one FFT bin
+        # of centroid separation used to be enough on its own.
+        separation_ok = (
+            self.centroid_separation_db >= self.min_centroid_separation_db
+            if self.min_centroid_separation_db is not None
+            else True
+        )
         if (
             self.avg_confidence >= self.studio_confidence_threshold
             and self.low_confidence_notes == 0
+            and separation_ok
         ):
             return QualityTier.STUDIO
         elif self.avg_confidence >= self.draft_confidence_threshold:

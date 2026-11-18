@@ -114,6 +114,16 @@ class MambaSeparator(nn.Module):
                 f"Input length {T} is shorter than n_fft={self.n_fft}; "
                 "torch.stft cannot produce a frame. Pad or supply longer audio."
             )
+        # IO-3 defense in depth: `audio_io` rejects non-finite uploads, but the
+        # module is also used directly (training, tests, other callers), and a
+        # single NaN sample propagates through STFT -> masks -> ISTFT to every
+        # output sample. Refuse rather than return a NaN render that a PCM_16
+        # encoder would turn into full-scale -1.0 DC.
+        if not torch.isfinite(audio).all():
+            raise ValueError(
+                "MambaSeparator received non-finite input (NaN/Inf); refusing to "
+                "separate it — every output sample would be non-finite."
+            )
 
         # STFT: (B, C, T) → (B, F, T_frames)
         spec = torch.stft(

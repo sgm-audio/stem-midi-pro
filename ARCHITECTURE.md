@@ -406,7 +406,7 @@ The architecture supports Canadian artist data through:
 
 ## Future Enhancements [PLANNED]
 
-> TensorRT-LLM and web-based MIDI editor entries below are superseded: TensorRT-LLM is removed (CPU target) and refinement is DAW-based via CC#127 confidence, not a web editor.
+> TensorRT-LLM and web-based MIDI editor entries below are superseded: TensorRT-LLM is removed (CPU target) and refinement is DAW-based via CC#16 confidence, not a web editor.
 
 ### Short Term
 - TensorRT-LLM export with custom kernel registration

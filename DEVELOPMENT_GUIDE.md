@@ -52,7 +52,7 @@ Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.
 1. Audio input → validation → load (`soundfile`, mono, float32)
 2. `MambaSeparator` → guitar/bass stems
 3. `MambaTranscriber` → onset/pitch/velocity/expression/confidence logits
-4. `ConfidenceInjector` → MIDI events with CC#127 confidence
+4. `ConfidenceInjector` → MIDI events with CC#16 confidence (`MIDI_CONFIDENCE_CC` overrides)
 5. `utils/quality_gates.route_by_quality` → studio/draft/complex tier
 6. `api.py` → ZIP (stems + MIDI + `processing_report.json`)
 
