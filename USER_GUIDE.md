@@ -58,7 +58,7 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 {
   "separation_proxy": 21.3,
   "si_sdr": 21.3,
-  "metric_semantics": "centroid_separation_proxy_not_si_sdr",
+  "metric_semantics": "mask_crosstalk_not_si_sdr",
   "phase_coherence": 0.94,
   "avg_confidence": 0.80,
   "confidence_encoding": "polyphonic_key_pressure",

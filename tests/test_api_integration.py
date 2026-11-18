@@ -97,4 +97,4 @@ def test_process_returns_zip_with_five_entries(temp_audio_file, monkeypatch):
     assert report["avg_confidence"] == pytest.approx(0.9)
     assert report["separation_proxy"] == pytest.approx(22.0)
     assert report["si_sdr"] == pytest.approx(22.0)  # deprecated compatibility alias
-    assert report["metric_semantics"] == "centroid_separation_proxy_not_si_sdr"
+    assert report["metric_semantics"] == "mask_crosstalk_not_si_sdr"

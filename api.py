@@ -770,7 +770,7 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             # Deprecated compatibility alias. This value is not SI-SDR and
             # must not be read as a reference-based dB certification.
             "si_sdr": _safe(separation_proxy),
-            "metric_semantics": "centroid_separation_proxy_not_si_sdr",
+            "metric_semantics": "mask_crosstalk_not_si_sdr",
             "phase_coherence": _safe(report.phase_coherence),
             "avg_confidence": _safe(report.avg_confidence),
             "confidence_encoding": guitar_midi.get("summary", {}).get(

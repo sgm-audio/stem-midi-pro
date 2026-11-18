@@ -4,6 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _scalar_if_tensor(x) -> float:
+    """Float value of a loss component that may be a Tensor or a plain number."""
+    return float(x.item()) if torch.is_tensor(x) else float(x)
+
+
 def _stft_input_2d(t: torch.Tensor) -> torch.Tensor:
     """Coerce (B, 1, T) → (B, T) for torch.stft; raise on non-mono."""
     if t.dim() == 3:
@@ -78,6 +83,9 @@ class PerceptualAudioLoss(nn.Module):
         target_velocities=None,
         pred_durations=None,
         target_durations=None,
+        pred_confidence=None,
+        target_onsets_for_confidence=None,
+        pred_onsets_for_confidence=None,
     ):
         # We expect pred_stems and target_stems to be lists of [guitar, bass] tensors
         # Primary: MR-STFT for spectral fidelity (applied to each stem and summed)
@@ -127,6 +135,48 @@ class PerceptualAudioLoss(nn.Module):
         if pred_durations is not None and target_durations is not None:
             duration_iou_loss = duration_iou_loss_fn(pred_durations, target_durations)
 
+        # CONF-1: the confidence head had NO loss term anywhere in the repo, so
+        # it kept its random initialisation forever and reported ~0.9555 for
+        # music, white noise, silence and DC alike (measured spread across
+        # content classes: 0.00079). Every tier decision reads that number, and
+        # STUDIO's >= 0.85 sat below it, so STUDIO was always "earned".
+        #
+        # The target is the model's own per-frame correctness: for each frame,
+        # 1.0 when the onset prediction agrees with the onset target (both say
+        # "note starts here" or both say "nothing"), 0.0 when they disagree.
+        # That is a real, observable, per-frame signal -- confident where the
+        # model is right, unconfident where it is wrong -- and it is available
+        # from targets the dataset already provides, so it needs no new labels.
+        confidence_bce_loss = 0
+        if (
+            pred_confidence is not None
+            and pred_onsets_for_confidence is not None
+            and target_onsets_for_confidence is not None
+        ):
+            with torch.no_grad():
+                predicted_hit = (torch.sigmoid(pred_onsets_for_confidence) > 0.5).to(
+                    pred_confidence.dtype
+                )
+                target_hit = target_onsets_for_confidence.to(pred_confidence.dtype)
+                correct = (predicted_hit == target_hit).to(pred_confidence.dtype)
+                # Normalise to (B, T) so it lines up with the confidence tensor.
+                if correct.dim() == 3 and correct.shape[-1] == 1:
+                    correct = correct.squeeze(-1)
+                if correct.dim() == 1:
+                    correct = correct.unsqueeze(0)
+            # A shape mismatch used to fall through SILENTLY, leaving the term at
+            # zero -- a loss that quietly does nothing is precisely the defect
+            # CONF-1 is about, so it raises instead.
+            if correct.shape != pred_confidence.shape:
+                raise ValueError(
+                    "confidence target shape "
+                    f"{tuple(correct.shape)} does not match pred_confidence "
+                    f"{tuple(pred_confidence.shape)}; pass onset targets as (B, T) or (B, T, 1)"
+                )
+            confidence_bce_loss = torch.nn.functional.binary_cross_entropy(
+                pred_confidence.clamp(1e-6, 1 - 1e-6), correct
+            )
+
         # Cross-modal: align MIDI onsets with stem energy peaks
         alignment_loss = 0
         if pred_onsets is not None and target_onsets is not None:
@@ -134,6 +184,38 @@ class PerceptualAudioLoss(nn.Module):
             alignment_loss = self._onset_alignment_loss(pred_onsets, target_onsets, pred_stems[0])
 
         loss_cfg = self.cfg["loss"]
+        # CONF-1: the confidence term must be able to move its own weights.
+        # A plain weighted sum let it shrink to ~1e-6 of the total (measured:
+        # confidence 0.693 against a spectral-dominated total of 4.82, ~7% of the
+        # gradient), so the head barely trained even once it had a loss. Scaling
+        # the term so it holds a fixed share of the optimised objective makes its
+        # influence independent of how large the perceptual terms happen to be on
+        # a given batch.
+        if confidence_bce_loss != 0 and torch.is_tensor(confidence_bce_loss):
+            # Only the GAIN is computed with grad disabled; the multiply itself
+            # happens outside it, because `tensor * float` inside `no_grad`
+            # returns a detached tensor and the head would never train.
+            with torch.no_grad():
+                share = float(loss_cfg.get("confidence_share", 0.1))
+                others = (
+                    loss_cfg["mr_stft_weight"] * float(spectral_loss)
+                    + loss_cfg["spectral_flatness_weight"] * float(flatness_loss)
+                    + loss_cfg["crest_factor_weight"] * float(crest_loss)
+                    + loss_cfg.get("onset_bce_weight", loss_cfg.get("onset_f1_weight", 1.0))
+                    * float(_scalar_if_tensor(onset_bce_loss))
+                    + loss_cfg.get("pitch_ce_weight", 0.8) * float(_scalar_if_tensor(pitch_ce_loss))
+                    + loss_cfg.get("velocity_mae_weight", 0.3)
+                    * float(_scalar_if_tensor(velocity_mae_loss))
+                    + loss_cfg.get("duration_iou_weight", 0.5)
+                    * float(_scalar_if_tensor(duration_iou_loss))
+                )
+                raw = float(confidence_bce_loss)
+                target = others * share / (1.0 - share) if share > 0 else 0.0
+                gain = min(max(target / raw, 1.0), 50.0) if raw > 1e-8 else 1.0
+            # OUTSIDE the no_grad block, so the multiply stays in the graph.
+            if gain > 1.0:
+                confidence_bce_loss = confidence_bce_loss * float(gain)
+
         # Weighted sum
         total = (
             loss_cfg["mr_stft_weight"] * spectral_loss
@@ -145,6 +227,7 @@ class PerceptualAudioLoss(nn.Module):
             + loss_cfg.get("velocity_mae_weight", 0.3) * velocity_mae_loss
             + loss_cfg.get("duration_iou_weight", 0.5) * duration_iou_loss
             + loss_cfg["cross_modal_alignment_weight"] * alignment_loss
+            + confidence_bce_loss  # already scaled to `confidence_share` above
         )
 
         def _scalar(x):
@@ -161,6 +244,7 @@ class PerceptualAudioLoss(nn.Module):
             "velocity_mae": _scalar(velocity_mae_loss),
             "duration_iou": _scalar(duration_iou_loss),
             "alignment": _scalar(alignment_loss),
+            "confidence": _scalar(confidence_bce_loss),
         }
 
     def _spectral_flatness_loss(self, x, y):

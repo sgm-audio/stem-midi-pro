@@ -254,7 +254,7 @@ def test_api_zip_uses_independent_midi_and_configured_sample_rate(monkeypatch):
     assert [m.note for m in guitar_mid.tracks[0] if m.type == "note_on"] == [72]
     assert [m.note for m in bass_mid.tracks[0] if m.type == "note_on"] == [36]
     assert report_json["separation_proxy"] == pytest.approx(22.0)
-    assert report_json["metric_semantics"] == "centroid_separation_proxy_not_si_sdr"
+    assert report_json["metric_semantics"] == "mask_crosstalk_not_si_sdr"
     assert report_json["model_weights_loaded"] is True
 
 

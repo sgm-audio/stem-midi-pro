@@ -75,6 +75,28 @@ def _marked_ids() -> dict[str, list[str]]:
     return found
 
 
+def _scan_self_check() -> bool:
+    """Prove the marker scan still works, without needing an open defect.
+
+    Writes a temporary test file containing a `known_bug("SENTINEL-0", ...)`
+    call into the tests/ directory tree that `_marked_ids` walks, runs the
+    scanner, and removes it. If the scan is intact it must see the sentinel.
+    """
+
+    target = Path(__file__).resolve().parent / "_scan_selfcheck_tmp.py"
+    try:
+        target.write_text(
+            "# SPDX-License-Identifier: Apache-2.0\n"
+            "def test_sentinel():\n"
+            "    known_bug = lambda *a, **k: (lambda f: f)  # noqa: E731\n"
+            '    known_bug("SENTINEL-0", "self-check")\n',
+            encoding="utf-8",
+        )
+        return "SENTINEL-0" in _marked_ids()
+    finally:
+        target.unlink(missing_ok=True)
+
+
 def _open_entry_ids() -> set[str]:
     return {i for ln in _todo_181() if ln.startswith("- [ ]") for i in _ids_on(ln)}
 
@@ -87,16 +109,15 @@ def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     """An xfail reason scrolls off a CI log; TODO.md 18.1 is the durable record."""
     marked = _marked_ids()
     # Floor, not an exact count: the audit opened 65 locks and the remediation
-    # has been retiring them, so this number falls every time a defect is fixed.
-    # It exists to catch a BROKEN SCAN (a refactor moving the markers out of the
-    # files `_marked_ids` walks would otherwise silently pass with zero), so it
-    # only needs to be well below the real count -- and it has to be raised only
-    # when the count RISES. Down to 3 while 4 locks remain (CONF-1, GATE-4,
-    # SEP-2, TRANS-1), all of which need trained weights, a corpus, or an
-    # architectural change rather than a patch.
-    assert (
-        len(marked) >= 3
-    ), f"marker scan found only {sorted(marked)} — the scan broke, not the suite"
+    # has retired every one of them, so there is nothing left to require. The
+    # assertion would be vacuous then, so it is replaced by the check that still
+    # means something: the scan must be able to SEE a marker. `_marked_ids`
+    # walking the wrong files is the failure this guards, and a self-test on a
+    # synthetic marker detects that without depending on any defect being open.
+    assert _scan_self_check(), (
+        "_marked_ids() no longer finds a known_bug marker placed in a scanned file; "
+        "the scan is broken, so 'no open defects' would be a false negative"
+    )
     missing = sorted(set(marked) - _open_entry_ids())
     assert not missing, (
         f"{missing} lock tests with @known_bug but are not open entries in TODO.md 18.1. "

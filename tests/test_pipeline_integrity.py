@@ -26,7 +26,7 @@ import math
 import pytest
 
 from tests.doubles import StubReport, StubSeparator, StubTranscriber, frame_count, inject
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 torch = require("torch", "pipeline integrity tests", module_level=True)
 np = require("numpy", "pipeline integrity tests", module_level=True)
@@ -443,41 +443,6 @@ def test_onset_refractory_caps_note_density(pipeline_config):
     )
 
 
-@known_bug(
-    "TRANS-1",
-    "residual after PR #14 (H-6 added rising-edge peak-picking + onset_refractory_frames, which "
-    "fixed the 345-notes-per-second flood): there is still NO content test in _logits_to_midi — "
-    "no stem-energy gate and no 'no-note' class in the pitch head — so an above-threshold onset "
-    "field is turned into notes even when the audio is digital silence, and the only thing "
-    "bounding density is the refractory window (measured: the saturated field still yields "
-    "1 event per refractory+1 frames, and setting onset_refractory_frames: 0 in the config "
-    "restores 86 notes/s with no error or warning). Silence currently renders 0 notes only "
-    "because the untrained head happens to stay below 0.5 (measured avg_confidence 0.650 with "
-    "0 notes), which is luck, not a guarantee. Gate on frame energy vs the file's max (e.g. "
-    "require frame RMS > 1e-3 x max) and add a no-note logit.",
-)
-def test_a_saturated_onset_field_on_silence_is_rejected_for_lack_of_content(pipeline_config):
-    """Content, not spacing, must decide whether there is a note to emit."""
-    from main import StemMidiModel
-
-    n = frame_count(SR, HOP)
-    model = StemMidiModel.__new__(StemMidiModel)
-    model.cfg = {"transcriber": {"onset_threshold": 0.0}}
-    onset = torch.full((1, n, 1), 0.5)
-    pitch = torch.zeros(1, n, 128)
-    pitch[0, :, 60] = 1.0
-    events = model._logits_to_midi(
-        onset, pitch, torch.full((1, n, 1), 0.7), torch.full((1, n), 0.9)
-    )
-    # `silence` here is the caller's contract: the separator handed this stem a
-    # waveform with no energy, so there is nothing to transcribe. The head layout
-    # gives no way to say that, hence this fails today.
-    assert events == [], (
-        f"{len(events)} notes emitted from an onset field the pipeline cannot have "
-        "measured anything about; expected a stem-energy gate / no-note class to suppress them"
-    )
-
-
 def test_zero_onsets_never_produce_notes(pipeline_config):
     from main import StemMidiModel
 
@@ -651,3 +616,82 @@ def test_expression_head_output_reaches_the_midi_when_opted_in(pipeline_config):
     assert (
         "pitchwheel" in types
     ), f"no pitch-bend in the SMF with include_expression=True: {sorted(types)}"
+
+
+# ---------------------------------------------------------------------------
+# TRANS-1: content, not spacing, decides whether there is a note
+# ---------------------------------------------------------------------------
+
+
+def _saturated_decode(frame_energy=None, refractory=0, floor_db=-60.0):
+    from main import StemMidiModel
+
+    n = 200
+    model = StemMidiModel.__new__(StemMidiModel)
+    model.cfg = {
+        "transcriber": {
+            "onset_threshold": 0.0,
+            "onset_refractory_frames": refractory,
+            "energy_floor_db": floor_db,
+        }
+    }
+    onset = torch.full((1, n, 1), 0.5)
+    pitch = torch.zeros(1, n, 128)
+    pitch[0, :, 60] = 1.0
+    velocity = torch.full((1, n, 1), 0.7)
+    confidence = torch.full((1, n), 0.9)
+    return model._logits_to_midi(onset, pitch, velocity, confidence, frame_energy=frame_energy)
+
+
+def test_a_saturated_onset_field_on_silence_is_rejected_for_lack_of_content():
+    """TRANS-1: with no energy in the frame there is nothing to transcribe.
+
+    The head has no 'no-note' class, so this has to be a pipeline decision. A
+    fully saturated onset field with zero stem energy used to yield 200 notes
+    (one per frame when the refractory window is off).
+    """
+    assert _saturated_decode(frame_energy=torch.zeros(1, 200)) == []
+    # And the control: without an energy signal the same logits still decode, so
+    # the assertion above is caused by the gate and not by broken fixtures.
+    assert len(_saturated_decode(frame_energy=None)) == 200
+
+
+def test_the_energy_gate_removes_only_frames_that_carry_no_energy():
+    """A real take loses the silent gap and nothing else."""
+    energy = torch.full((1, 200), 0.1)
+    energy[0, 50:60] = 0.0
+    events = _saturated_decode(frame_energy=energy)
+    frames = {int(e["onset_frame"]) for e in events}
+    assert len(events) == 190, f"expected 190 notes, got {len(events)}"
+    assert not frames & set(range(50, 60)), "notes survived inside the silent gap"
+
+
+def test_the_energy_gate_is_level_independent():
+    """A quiet but real recording must not be gated away.
+
+    The floor is relative to the stem's own peak frame, so scaling the whole
+    take down by six orders of magnitude changes nothing: an absolute floor
+    would delete quiet music, which is the mistake this avoids.
+    """
+    loud = torch.full((1, 200), 0.5)
+    quiet = loud * 1e-6
+    assert len(_saturated_decode(frame_energy=loud)) == len(_saturated_decode(frame_energy=quiet))
+    assert len(_saturated_decode(frame_energy=quiet)) == 200
+
+
+def test_frames_far_below_peak_are_dropped():
+    """A tail 70 dB below the stem's peak carries no note."""
+    energy = torch.full((1, 200), 0.1)
+    energy[0, 150:] = 1e-8  # 70 dB down
+    events = _saturated_decode(frame_energy=energy)
+    frames = {int(e["onset_frame"]) for e in events}
+    assert len(events) == 150, f"expected 150 notes, got {len(events)}"
+    assert not frames & set(range(150, 200))
+
+
+def test_the_energy_floor_is_configurable():
+    """A stricter floor removes more; the knob is honoured."""
+    energy = torch.full((1, 200), 0.1)
+    energy[0, 150:] = 1e-4  # 30 dB down
+    assert len(_saturated_decode(frame_energy=energy, floor_db=-60.0)) == 200
+    assert len(_saturated_decode(frame_energy=energy, floor_db=-20.0)) == 150

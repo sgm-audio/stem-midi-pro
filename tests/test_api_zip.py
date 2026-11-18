@@ -265,7 +265,7 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
     assert json.loads(zf.read("processing_report.json")) == {
         "separation_proxy": 6.5,
         "si_sdr": 6.5,
-        "metric_semantics": "centroid_separation_proxy_not_si_sdr",
+        "metric_semantics": "mask_crosstalk_not_si_sdr",
         "phase_coherence": 0.42,
         "avg_confidence": 0.55,
         "confidence_encoding": "polyphonic_key_pressure",

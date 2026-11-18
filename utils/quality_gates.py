@@ -68,6 +68,11 @@ class ProcessingReport:
     invalid: bool = field(default=False, init=False)
 
     def __post_init__(self):
+        # Provenance matters for CONF-1's corroboration rule: only a crosstalk
+        # reading (0..1) says anything about whether the stems were separated,
+        # and a legacy centroid value inherited from an older call site must not
+        # be mistaken for one. Recorded here, where the fallback happens.
+        self._proxy_is_crosstalk = self.separation_proxy is not None
         if self.separation_proxy is None:
             self.separation_proxy = float(
                 self.centroid_separation_db
@@ -120,6 +125,24 @@ class ProcessingReport:
             "min_separation_proxy",
             gates.get("min_centroid_separation_db", gates.get("min_si_sdr", 20.0)),
         )
+        # GATE-4: the reported separation number is now MASK CROSSTALK, where
+        # LOWER IS BETTER (0.0 = every stem's energy is in bins it dominates,
+        # 0.667 = a flat one-third mask that separates nothing). It therefore
+        # needs its own ceiling rather than the old higher-is-better floor.
+        #
+        # Default 0.60 sits below the analytic no-separation value (0.667) and
+        # above the untrained model's measured 0.47: a separator that does worse
+        # than a flat mask is refused, while an untrained-but-not-degenerate one
+        # is not punished for a threshold calibrated on trained weights we do not
+        # ship. `None` disables the gate.
+        self.max_separation_crosstalk = gates.get("max_separation_crosstalk", 0.60)
+        if self.max_separation_crosstalk is not None:
+            if not 0.0 < float(self.max_separation_crosstalk) <= 1.0:
+                raise ValueError(
+                    "quality_gates.max_separation_crosstalk must be in (0, 1] or null; "
+                    f"got {self.max_separation_crosstalk!r}"
+                )
+            self.max_separation_crosstalk = float(self.max_separation_crosstalk)
         self.min_centroid_separation_db = gates.get("min_centroid_separation_db")
         self.min_si_sdr = self.min_separation_proxy
         legacy = gates.get("min_si_sdr")
@@ -132,6 +155,20 @@ class ProcessingReport:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+    def _crosstalk_ceiling_for_corroboration(self) -> float:
+        """The crosstalk value a render must beat to be corroborated.
+
+        A render whose separation is worse than a flat one-third mask (0.667)
+        has no corroboration available, so the ceiling is the configured
+        `max_separation_crosstalk`. When the gate is disabled (`null`) there is
+        no independent evidence at all, and nothing may be corroborated: the
+        ceiling becomes 0.0, which no real render achieves, so STUDIO falls back
+        to requiring the DRAFT bar and can never be self-certified.
+        """
+        if self.max_separation_crosstalk is None:
+            return 0.0
+        return float(self.max_separation_crosstalk)
 
     @property
     def separation_proxy_db(self) -> float:
@@ -158,12 +195,62 @@ class ProcessingReport:
         # empty MIDI falls through to COMPLEX (fallback + refund options).
         if self.note_count is not None and self.note_count <= 0:
             return QualityTier.COMPLEX
-        # STUDIO additionally requires that no individual note was unreliable:
-        # a render whose average confidence clears 0.85 while dozens of notes
-        # are individually doubtful is not studio-ready (review §9).
+        # GATE-4: a separation so poor that it is worse than handing every stem
+        # the same flat mask means the stems are not usable as stems. Checked
+        # before the confidence tiers because a confident transcription of a
+        # non-separation is still not a separation.
+        if (
+            self.max_separation_crosstalk is not None
+            and self.separation_proxy is not None
+            and math.isfinite(float(self.separation_proxy))
+            # Only meaningful for the crosstalk metric; the legacy centroid
+            # proxy uses the opposite (higher-is-better) orientation and would
+            # be misread here.
+            and float(self.separation_proxy) <= 1.0
+            and float(self.separation_proxy) > self.max_separation_crosstalk
+        ):
+            return QualityTier.COMPLEX
+        # CONF-1: STUDIO is not a claim about BELIEVING the render, it is a
+        # claim about the render being right -- so it must be corroborated by
+        # something other than the confidence head.
+        #
+        # The head had no loss term anywhere in the repo, so it kept its random
+        # initialisation and reported ~0.9555 for music, white noise, silence
+        # and DC alike (measured spread across content classes: 0.00079) while
+        # STUDIO's bar was 0.85. A single unsupervised number clearing its own
+        # threshold is self-certification; it cannot distinguish "the model is
+        # confident because it is right" from "the head outputs 0.95 for
+        # everything".
+        #
+        # `corroborated` is the independent evidence, and it is the separation
+        # gate (GATE-4 crosstalk): a render cannot be studio quality unless the
+        # stems were actually separated. Confidence is still REQUIRED, so this
+        # only ever removes unearned badges -- it never raises a tier.
+        #
+        # Only a CROSSTALK value (0..1) can corroborate anything. A report that
+        # carries the legacy centroid proxy (>= 20 dB is a typical reading) has
+        # no independent evidence attached to it, so it cannot corroborate --
+        # and it must not be silently punished either: an absent measurement is
+        # not a bad measurement. That distinction matters because `route_by_quality`
+        # is a public helper and older callers construct reports with
+        # `centroid_separation_db` directly (see tests/test_quality_gates.py).
+        proxy = self.separation_proxy
+        is_crosstalk = getattr(self, "_proxy_is_crosstalk", False) and (
+            proxy is not None and math.isfinite(float(proxy)) and 0.0 <= float(proxy) <= 1.0
+        )
+        if is_crosstalk:
+            corroborated = float(proxy) <= self._crosstalk_ceiling_for_corroboration()
+        else:
+            # The report carries a legacy centroid reading (or was built by an
+            # older call site that never set `separation_proxy`). That is not
+            # evidence of separation, but it is also not evidence AGAINST it, so
+            # the render keeps the pre-CONF-1 behaviour rather than being
+            # downgraded for a field it never had.
+            corroborated = True
         if (
             self.avg_confidence >= self.studio_confidence_threshold
             and self.low_confidence_notes == 0
+            and corroborated
         ):
             return QualityTier.STUDIO
         if self.avg_confidence >= self.draft_confidence_threshold:
@@ -197,6 +284,7 @@ class ProcessingReport:
             # is this branch's stricter carry-through, which also rejects a
             # negative count. Kept as an alias rather than dropped so existing
             # reports and guards keep working.
+            "max_separation_crosstalk": self.max_separation_crosstalk,
             "note_count": None if self.note_count is None else int(self.note_count),
             "total_notes": None if self.total_notes is None else int(self.total_notes),
             "quality_tier": self.quality_tier.value,

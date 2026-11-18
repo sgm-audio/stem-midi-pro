@@ -425,12 +425,27 @@ class StemMidiModel(nn.Module):
         if tr.get("events"):
             events = tr["events"][0]  # B=1 in production paths
         elif tr["onset_logits"] is not None:
+            # TRANS-1: content, not spacing, decides whether there is a note.
+            #
+            # The onset head has no "no-note" class and peak-picking only asks
+            # "is the activation above threshold?", so an above-threshold frame
+            # on a stem with no energy still became a note. Silence rendered 0
+            # notes only because the untrained head happened to sit under 0.5 --
+            # a property of the initialisation, not a decision the pipeline made.
+            #
+            # `energy` is the per-frame stem energy on the SAME grid the onset
+            # frames index (`_match_frame_grid` guarantees that), so a frame can
+            # be refused when nothing was there to measure. The floor is relative
+            # to the stem's own loudest frame, so it is level-independent: a quiet
+            # but real recording is not gated away, while a frame 60 dB below the
+            # stem's peak carries no note.
             events = self._logits_to_midi(
                 tr["onset_logits"],
                 tr["pitch_logits"],
                 tr["velocity"],
                 confidence,
                 tr.get("expression"),
+                frame_energy=energy,
             )
         enhanced = self.confidence_injector.inject_midi_metadata(events or [], conf_flat, energy)
         return enhanced, confidence
@@ -592,7 +607,9 @@ class StemMidiModel(nn.Module):
     # Decoding
     # ------------------------------------------------------------------
 
-    def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence, expression=None):
+    def _logits_to_midi(
+        self, onset_logits, pitch_logits, velocity, confidence, expression=None, frame_energy=None
+    ):
         """Convert network outputs to a FLAT MIDI event list.
 
         Onset peak-picking (H-6): sigmoid probability is thresholded and an
@@ -680,12 +697,31 @@ class StemMidiModel(nn.Module):
 
         # Rising-edge selection: keep a candidate only when at least
         # `refractory` below-threshold frames separate it from the previous one.
+        # TRANS-1: a frame with no energy in the stem cannot carry a note,
+        # however loud the onset probability is. Threshold is relative to this
+        # stem's own peak frame (`transcriber.energy_floor_db`, default -60 dB),
+        # so it is level-independent and cannot gate away a quiet real take.
+        energy_ok = None
+        if frame_energy is not None and candidates.shape[0]:
+            flat_energy = frame_energy.reshape(-1)
+            n_frames = int(onset_prob.shape[1])
+            floor_db = float(tcfg.get("energy_floor_db", -60.0))
+            peak = flat_energy.max() if flat_energy.numel() else flat_energy.new_tensor(0.0)
+            if float(peak) > 0.0:
+                threshold = float(peak) * (10.0 ** (floor_db / 10.0))
+                energy_ok = (flat_energy > threshold).tolist()
+                energy_ok = energy_ok[:n_frames]
+            else:
+                energy_ok = [False] * n_frames
+
         frames_by_batch: dict[int, list[int]] = {}
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():
             previous = last_above.get(b)
             last_above[b] = t
             if previous is not None and (t - previous - 1) < refractory:
+                continue
+            if energy_ok is not None and 0 <= t < len(energy_ok) and not energy_ok[t]:
                 continue
             frames_by_batch.setdefault(b, []).append(t)
 
