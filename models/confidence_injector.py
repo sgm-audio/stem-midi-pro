@@ -77,14 +77,7 @@ class ConfidenceInjector:
                     "confidence": conf_score,
                     "stem_energy": energy,
                     "alignment_score": alignment_score,
-                    # The review flag is a CONFIDENCE decision (ARCH-11.6.2:
-                    # "low-confidence notes are flagged for human review").
-                    # It is NOT scaled by stem energy: `alignment_score` is
-                    # conf * sigmoid(energy*10), so the old test flagged every
-                    # quiet passage regardless of model confidence and flipped
-                    # the same events on a gain change alone. Energy stays in
-                    # `alignment_score` as a diagnostic.
-                    "needs_review": conf_score < self.min_confidence,
+                    "needs_review": alignment_score < self.min_confidence,
                     # DAW-friendly metadata
                     "confidence_cc_value": cc_value,
                     "cc_127_value": cc_value,  # legacy alias (pre-H-5 name)
@@ -92,17 +85,13 @@ class ConfidenceInjector:
                 }
             )
 
-        # Count NOTES, not frames: `confidence < min_confidence` counts STFT
-        # frames below threshold, which for a 1 s clip reported ~64 "low
-        # confidence notes" when two notes were emitted. Notes are what the
-        # reviewer has to listen to (Architecture 11.6.2).
-        low_confidence_notes = sum(1 for e in enhanced_events if e["needs_review"])
         return {
             "midi_events": enhanced_events,
             "summary": {
                 "avg_confidence": torch.mean(confidence).item() if len(confidence) > 0 else 0.0,
-                "low_confidence_count": low_confidence_notes,
-                "alignment_warnings": low_confidence_notes,
-                "total_notes": len(enhanced_events),
+                "low_confidence_count": (
+                    (confidence < self.min_confidence).sum().item() if len(confidence) > 0 else 0
+                ),
+                "alignment_warnings": sum(1 for e in enhanced_events if e["needs_review"]),
             },
         }

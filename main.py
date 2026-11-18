@@ -27,7 +27,6 @@ torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", os.cpu_count() or 1)
 torch.set_float32_matmul_precision("high")  # allows TF32/AVX-512 matmul where available
 
 # Import our custom components (after torch thread config above — intentional E402)
-from audio_io import AudioValidationError  # noqa: E402
 from models._mamba_compat import MAMBA_BACKEND  # noqa: E402
 from models.confidence_injector import ConfidenceInjector  # noqa: E402
 from models.losses import PerceptualAudioLoss  # noqa: E402
@@ -41,16 +40,6 @@ logger = logging.getLogger(__name__)
 # longer needs O(L·d_inner·N) memory, but STFT-domain buffers and stems still
 # scale with length. Override via cfg["audio"]["max_input_seconds"].
 DEFAULT_MAX_INPUT_SECONDS = 600
-
-# Input-level artifact thresholds (see _detect_artifacts).
-_SILENCE_LEVEL = 1e-6  # peak abs sample: digital silence
-_CLIP_LEVEL = 0.999  # peak abs sample: full-scale (a clipped signal pins here)
-_DC_OFFSET_LEVEL = 1e-3  # |mean| : audible DC offset / missing high-pass
-
-
-def _is_silent(stem: torch.Tensor, level: float = _SILENCE_LEVEL) -> bool:
-    """True when a stem carries no signal above the digital-silence floor."""
-    return bool(stem.numel() == 0 or stem.abs().max().item() <= level)
 
 
 class StemMidiModel(nn.Module):
@@ -98,21 +87,6 @@ class StemMidiModel(nn.Module):
             min_confidence=self.cfg["quality_gates"]["min_confidence"],
         )
         self.loss_fn = PerceptualAudioLoss(self.cfg)
-        # Provenance (H-2 / HONESTY-1): this repo ships no trained weights, so
-        # a freshly constructed model runs on randomly-initialised defaults.
-        # `load_from_checkpoint` flips this to True. Without it, a report from
-        # an untrained model is indistinguishable from a trained one.
-        self.weights_loaded = False
-
-    @property
-    def mamba_backend(self) -> str:
-        """Which Mamba implementation is actually running (H-1).
-
-        ``pure-torch`` is the portable fallback (selective-scan in plain
-        torch); ``mamba-ssm`` is the CUDA-optimised package. They are not
-        numerically identical, so the answer belongs in provenance.
-        """
-        return MAMBA_BACKEND
 
     # ------------------------------------------------------------------
     # Component wrappers (unify the Mamba-module and pluggable-backend paths)
@@ -204,24 +178,6 @@ class StemMidiModel(nn.Module):
     ) -> dict:
         """Implementation of forward(); see forward() for the public contract."""
         _B, _C, _T = audio.shape
-        # Validate before any compute: NaN/Inf or a sub-window clip must fail
-        # as a client error (ValueError -> HTTP 400), not as a 500 from inside
-        # the separator or as `"si_sdr": nan` in a report (BUG-AUDIO-4/5).
-        self._validate_audio(audio, "<forward input>")
-
-        # Digital silence is a valid upload (a muted channel) but not a valid
-        # model input: the untrained Mamba stack divides by the zero frame RMS
-        # and emits NaN logits, which _ensure_finite turns into a RuntimeError
-        # (HTTP 500). Answer honestly instead: no stems, no notes, "silence".
-        if not self.training and target_guitar is None and _is_silent(audio):
-            midi_metadata, report, routing = self._silent_result(audio)
-            return {
-                "guitar_stem": torch.zeros_like(audio),
-                "bass_stem": torch.zeros_like(audio),
-                "midi_metadata": midi_metadata,
-                "processing_report": report,
-                "routing_decision": routing,
-            }
 
         # 1. Separation (no state cache — real SSM state passing is C-2.5 / ARCH-11.8.1)
         guitar_stem, bass_stem, sep_metrics = self._separate(audio)
@@ -250,9 +206,6 @@ class StemMidiModel(nn.Module):
                     guitar_meta["summary"]["alignment_warnings"]
                     + bass_meta["summary"]["alignment_warnings"]
                 ),
-                "total_notes": (
-                    guitar_meta["summary"]["total_notes"] + bass_meta["summary"]["total_notes"]
-                ),
             },
         }
 
@@ -262,11 +215,10 @@ class StemMidiModel(nn.Module):
             centroid_separation_db=sep_metrics[0, 0].item(),
             phase_coherence=sep_metrics[0, 1].item(),
             avg_confidence=avg_confidence,
-            artifact_flags=self._detect_artifacts(guitar_stem, bass_stem, source=audio),
+            artifact_flags=self._detect_artifacts(guitar_stem, bass_stem),
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             config=self.cfg,
             backend=self.backend_name,
-            weights_loaded=self.weights_loaded,
         )
 
         routing = route_by_quality(report)
@@ -302,8 +254,23 @@ class StemMidiModel(nn.Module):
         return outputs
 
     def _enhance(self, tr: dict, stem: torch.Tensor) -> tuple[dict, torch.Tensor]:
-        """Convert a transcription dict into injector-enhanced MIDI metadata."""
+        """Convert a transcription dict into injector-enhanced MIDI metadata.
+
+        A silent stem is short-circuited to zero events. The onset head fires
+        on whatever numerical noise survives separating digital silence, so
+        transcribing silence produced 8-128 plausible-looking note-ons that a
+        DAW imports as music (review §4). This lives here, not at the call
+        sites, because it is the single choke point for *both* stems -- the
+        bass part previously slipped past a guitar-only guard.
+        """
         confidence = tr["confidence"]
+        if self._stem_is_silent(stem):
+            empty = self.confidence_injector.inject_midi_metadata(
+                [],
+                confidence.reshape(-1),
+                self._frame_energy(stem).reshape(-1),
+            )
+            return empty, confidence
         events = None
         if tr.get("events"):
             events = tr["events"][0]  # B=1 in production paths
@@ -311,13 +278,6 @@ class StemMidiModel(nn.Module):
             events = self._logits_to_midi(
                 tr["onset_logits"], tr["pitch_logits"], tr["velocity"], confidence
             )
-
-        # A silent stem cannot contain notes. Downstream (and in the worst case
-        # a randomly-initialised head) the onset head still fires on the noise
-        # floor, so silence produced a full page of confident MIDI. Gate on the
-        # stem itself, not on the head's opinion of it.
-        if not events or _is_silent(stem):
-            events = []
         enhanced = self.confidence_injector.inject_midi_metadata(
             events or [],
             confidence.reshape(-1),
@@ -495,35 +455,46 @@ class StemMidiModel(nn.Module):
             )
         return events
 
-    def _detect_artifacts(
-        self, guitar: torch.Tensor, bass: torch.Tensor, source: torch.Tensor | None = None
-    ) -> list[str]:
-        """Artifact detection for quality gating.
+    @staticmethod
+    def _stem_is_silent(stem: torch.Tensor) -> bool:
+        """True when one stem is digital silence or non-finite (review §4)."""
+        if not torch.isfinite(stem).all():
+            return True
+        return bool(torch.max(stem.abs()) < 1e-6)
 
-        ``source`` is the ORIGINAL input waveform. Measuring only the separated
-        stems misses input-level damage: a hard-clipped DI is scaled down by the
-        separator masks (peak 1.0 in, 0.4 out), so the stem-level clipping test
-        never fired; silence separated into silence, so "silence" was reported
-        as a clean take. Both are properties of what the user uploaded.
+    @staticmethod
+    def _stems_are_silent(guitar: torch.Tensor, bass: torch.Tensor) -> bool:
+        """True when both stems are unusable (silent or non-finite).
+
+        Shared by `_detect_artifacts` and by the MIDI suppression path so the
+        report flag and the emitted events can never disagree (review §4).
+        """
+        return StemMidiModel._stem_is_silent(guitar) and StemMidiModel._stem_is_silent(bass)
+
+    def _detect_artifacts(self, guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:
+        """Simple artifact detection for quality gating.
+
+        Finiteness and silence are checked FIRST (review §4): without them an
+        all-NaN render raised no flag, and because `NaN >= x` is False the
+        gate fell through to DRAFT. An all-silent render also raised no flag
+        and scored the maximum separation proxy.
         """
         flags = []
 
-        if source is not None:
-            src = source.reshape(-1)
-            if src.numel():
-                peak = src.abs().max().item()
-                if peak <= _SILENCE_LEVEL:
-                    flags.append("silence")
-                elif peak >= _CLIP_LEVEL:
-                    flags.append("clipping")
-                if abs(src.mean().item()) > _DC_OFFSET_LEVEL:
-                    flags.append("dc_offset")
-                if not torch.isfinite(src).all():
-                    flags.append("non_finite")
+        if not (torch.isfinite(guitar).all() and torch.isfinite(bass).all()):
+            return (
+                ["non_finite", "silent_output"]
+                if not (guitar.abs().max() > 0 or bass.abs().max() > 0)
+                else ["non_finite"]
+            )
 
-        # Check for clipping (stems: catches separator-introduced overloads)
-        stem_clipped = guitar.abs().max() > 0.99 or bass.abs().max() > 0.99
-        if stem_clipped and "clipping" not in flags:
+        # Digital silence in both stems means nothing was separated (e.g. no
+        # guitar in the mix). It must not reach STUDIO via the clamped proxy.
+        if self._stems_are_silent(guitar, bass):
+            return ["silent_output"]
+
+        # Check for clipping
+        if guitar.abs().max() > 0.99 or bass.abs().max() > 0.99:
             flags.append("clipping")
 
         # Check for excessive noise (simplified)
@@ -569,164 +540,6 @@ class StemMidiModel(nn.Module):
     # File-level inference
     # ------------------------------------------------------------------
 
-    def _silent_result(self, audio_t: torch.Tensor) -> tuple[dict, ProcessingReport, dict]:
-        """Empty, flagged delivery for a silent input.
-
-        Zero stems, zero notes, ``artifact_flags`` containing ``silence``. Used
-        by every inference path so a muted channel gets an honest 200 instead
-        of a NaN-driven 500.
-        """
-        hop = int(self.cfg["audio"]["hop_length"])
-        frames = max(1, int(audio_t.shape[-1]) // hop)
-        zeros = torch.zeros(frames)
-        guitar_meta = self.confidence_injector.inject_midi_metadata([], zeros, zeros)
-        bass_meta = self.confidence_injector.inject_midi_metadata([], zeros, zeros)
-        midi_metadata = {
-            "guitar": guitar_meta,
-            "bass": bass_meta,
-            "summary": {
-                "avg_confidence": 0.0,
-                "low_confidence_count": 0,
-                "alignment_warnings": 0,
-                "total_notes": 0,
-            },
-        }
-        silence = torch.zeros_like(audio_t)
-        report = ProcessingReport(
-            centroid_separation_db=0.0,
-            phase_coherence=0.0,
-            avg_confidence=0.0,
-            artifact_flags=self._detect_artifacts(silence, silence, source=audio_t),
-            low_confidence_notes=0,
-            config=self.cfg,
-            backend=self.backend_name,
-            weights_loaded=self.weights_loaded,
-        )
-        return midi_metadata, report, route_by_quality(report)
-
-    def _finalize(
-        self,
-        guitar: torch.Tensor,
-        bass: torch.Tensor,
-        metrics: torch.Tensor,
-        source: torch.Tensor | None,
-    ) -> tuple[dict, ProcessingReport, dict]:
-        """Transcribe both stems once and build MIDI metadata + report + routing.
-
-        Shared by the file path (whole file or chunked) and the streaming path,
-        so both report the same thing and neither can drift from the other.
-        """
-        guitar_tr = self._transcribe(guitar)
-        bass_tr = self._transcribe(bass)
-        self._ensure_finite(guitar_tr, "guitar")
-        self._ensure_finite(bass_tr, "bass")
-
-        guitar_meta, guitar_conf = self._enhance(guitar_tr, guitar)
-        bass_meta, bass_conf = self._enhance(bass_tr, bass)
-        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
-
-        midi_metadata = {
-            "guitar": guitar_meta,
-            "bass": bass_meta,
-            "summary": {
-                "avg_confidence": avg_confidence,
-                "low_confidence_count": (
-                    guitar_meta["summary"]["low_confidence_count"]
-                    + bass_meta["summary"]["low_confidence_count"]
-                ),
-                "alignment_warnings": (
-                    guitar_meta["summary"]["alignment_warnings"]
-                    + bass_meta["summary"]["alignment_warnings"]
-                ),
-                "total_notes": (
-                    guitar_meta["summary"]["total_notes"] + bass_meta["summary"]["total_notes"]
-                ),
-            },
-        }
-
-        m = metrics.detach().float()
-        if m.dim() == 2:  # (B, 2) from _separate; (2,) from _separate_chunked
-            m = m[0]
-        report = ProcessingReport(
-            centroid_separation_db=m[0].item(),
-            phase_coherence=m[1].item(),
-            avg_confidence=avg_confidence,
-            artifact_flags=self._detect_artifacts(guitar, bass, source=source),
-            low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
-            config=self.cfg,
-            backend=self.backend_name,
-            weights_loaded=self.weights_loaded,
-        )
-        return midi_metadata, report, route_by_quality(report)
-
-    def _separate_chunked(
-        self, audio_t: torch.Tensor, chunk_seconds: float
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Overlapping-chunk separation with complementary crossfades (H-4).
-
-        Returns (guitar, bass, mean per-chunk metrics (2,), n_chunks). Chunks
-        are separated independently - SSM state does not carry between them
-        (C-2.5) - but the crossfade hides the reset discontinuity.
-
-        Both the file path and the streaming path use this: a whole-file
-        ``process_audio_file`` call used to hand the separator the entire
-        waveform, so peak memory grew with file length (PERF-1: 2346 MB for a
-        60 s upload, 23 MB per extra second).
-        """
-        sr = int(self.cfg["audio"]["sample_rate"])
-        total_len = audio_t.shape[-1]
-        chunk_len = max(1, int(chunk_seconds * sr))
-        overlap_ratio = float(self.cfg["audio"].get("overlap_ratio", 0.5))
-        overlap_len = int(chunk_len * overlap_ratio)
-        hop_len = chunk_len - overlap_len
-        if hop_len <= 0:
-            raise ValueError(
-                f"overlap_ratio {overlap_ratio} leaves no hop "
-                f"(chunk {chunk_len}, overlap {overlap_len}); reduce overlap_ratio."
-            )
-
-        out_guitar = torch.zeros(1, 1, total_len)
-        out_bass = torch.zeros(1, 1, total_len)
-        weight_sum = torch.zeros(1, 1, total_len)
-        metrics_acc: list[torch.Tensor] = []
-        n_chunks = 0
-
-        pos = 0
-        while pos < total_len:
-            end = min(pos + chunk_len, total_len)
-            chunk = audio_t[:, :, pos:end]
-            valid_len = end - pos
-            if valid_len < chunk_len:
-                chunk = F.pad(chunk, (0, chunk_len - valid_len))
-
-            guitar, bass, sep_metrics = self._separate(chunk)
-
-            # Complementary linear crossfades over the shared overlap, then
-            # normalise by the accumulated weight so any sum is exactly 1.
-            w = torch.ones(1, 1, valid_len)
-            if pos > 0 and overlap_len > 0:
-                fi = min(overlap_len, valid_len)
-                w[:, :, :fi] *= torch.arange(1, fi + 1, dtype=torch.float32) / overlap_len
-            if end < total_len and overlap_len > 0:
-                fo = min(overlap_len, valid_len)
-                ramp = torch.arange(fo - 1, -1, -1, dtype=torch.float32) / overlap_len
-                w[:, :, valid_len - fo :] *= ramp
-
-            out_guitar[:, :, pos:end] += guitar[:, :, :valid_len] * w
-            out_bass[:, :, pos:end] += bass[:, :, :valid_len] * w
-            weight_sum[:, :, pos:end] += w
-
-            metrics_acc.append(sep_metrics.detach().float().mean(dim=0))
-            pos += hop_len
-            n_chunks += 1
-
-        return (
-            out_guitar / weight_sum.clamp(min=1e-8),
-            out_bass / weight_sum.clamp(min=1e-8),
-            torch.stack(metrics_acc).mean(dim=0),
-            n_chunks,
-        )
-
     def _load_audio(self, path: str) -> tuple[np.ndarray, int]:
         """Load audio via soundfile with a librosa fallback (M-8).
 
@@ -764,48 +577,14 @@ class StemMidiModel(nn.Module):
         )
         duration = len(audio) / sr if sr > 0 else float("inf")
         if duration > max_seconds:
-            raise AudioValidationError(
+            raise ValueError(
                 f"Input duration {duration:.1f}s exceeds max_input_seconds="
                 f"{max_seconds:g}s (memory guard, see C-1/C-6). Split the file or "
                 "raise the limit explicitly in the config."
             )
         if not np.isfinite(audio).all():
-            raise AudioValidationError(
-                f"Audio {path!r} contains NaN/Inf samples; refusing to process."
-            )
+            raise ValueError(f"Audio {path!r} contains NaN/Inf samples; refusing to process.")
         return audio, sr
-
-    def _validate_audio(self, audio_t: torch.Tensor, path: str = "<input>") -> None:
-        """Reject audio the model cannot process, before any inference runs.
-
-        Two inputs used to fail *silently*:
-
-        * NaN/Inf samples survived the load, poisoned the STFT, and either
-          produced ``"si_sdr": nan`` in a report that ``json.dumps`` refuses
-          to serialise (``200`` with a corrupt body) or a 500 from deep inside
-          the separator.
-        * Clips shorter than one STFT window wrap through pad/crop and produce
-          a frame grid that does not correspond to any audio, yielding notes
-          at nonsense ticks instead of an error.
-
-        Both raise ``AudioValidationError`` (a ``ValueError``), which the API
-        maps to 400 - the upload is invalid, not the server.
-        """
-        n_fft = int(self.cfg["audio"]["n_fft"])
-        if audio_t.numel() == 0:
-            raise AudioValidationError(f"Audio {path!r} is empty (0 samples).")
-        if not torch.isfinite(audio_t).all():
-            raise AudioValidationError(
-                f"Audio {path!r} contains NaN/Inf samples; refusing to process. "
-                "Check the file for corrupt frames or a broken decoder."
-            )
-        if audio_t.shape[-1] < n_fft:
-            ms = 1000.0 * audio_t.shape[-1] / int(self.cfg["audio"]["sample_rate"])
-            n_fft_ms = 1000.0 * n_fft / int(self.cfg["audio"]["sample_rate"])
-            raise AudioValidationError(
-                f"Audio {path!r} is too short: {audio_t.shape[-1]} samples ({ms:.1f} ms), "
-                f"shorter than one STFT window (n_fft={n_fft}, {n_fft_ms:.1f} ms)."
-            )
 
     def _resample_to_target(self, audio: np.ndarray, sr: int) -> np.ndarray:
         """Anti-aliased resample via librosa/soxr (H-7).
@@ -837,43 +616,23 @@ class StemMidiModel(nn.Module):
         audio, sr = self._load_audio(audio_path)
         audio = self._resample_to_target(audio, sr)
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)  # (1, 1, T)
-        self._validate_audio(audio_t, audio_path)
-        sr = int(self.cfg["audio"]["sample_rate"])
 
-        # Long uploads are separated in overlapping chunks (PERF-1): the model
-        # is a fixed-receptive-field spectral net, so a whole file in one pass
-        # only bought memory pressure, not context.
-        chunk_seconds = float(self.cfg["audio"].get("chunk_duration_sec", 2.0))
-        chunk_len = max(1, int(chunk_seconds * sr))
-
-        self.eval()
+        # Run inference
         with torch.inference_mode():
-            if _is_silent(audio_t):
-                midi_metadata, report, routing = self._silent_result(audio_t)
-                guitar = torch.zeros(1, 1, int(audio_t.shape[-1]))
-                bass = torch.zeros(1, 1, int(audio_t.shape[-1]))
-                n_chunks = 1
-            else:
-                if audio_t.shape[-1] > chunk_len:
-                    guitar, bass, metrics, n_chunks = self._separate_chunked(audio_t, chunk_seconds)
-                else:
-                    guitar, bass, metrics = self._separate(audio_t)
-                    n_chunks = 1
-                midi_metadata, report, routing = self._finalize(guitar, bass, metrics, audio_t)
+            outputs = self.forward(audio_t)
 
         # Format for user delivery (H-8: per-stem MIDI from per-stem stems)
         return {
             "stems": {
-                "guitar": guitar.squeeze().cpu().numpy(),
-                "bass": bass.squeeze().cpu().numpy(),
+                "guitar": outputs["guitar_stem"].squeeze().cpu().numpy(),
+                "bass": outputs["bass_stem"].squeeze().cpu().numpy(),
             },
-            "midi": midi_metadata,
-            "midi_guitar": midi_metadata["guitar"],
-            "midi_bass": midi_metadata["bass"],
-            "report": report,
-            "routing": routing,
-            "sample_rate": sr,
-            "chunks_processed": n_chunks,
+            "midi": outputs["midi_metadata"],
+            "midi_guitar": outputs["midi_metadata"]["guitar"],
+            "midi_bass": outputs["midi_metadata"]["bass"],
+            "report": outputs["processing_report"],
+            "routing": outputs["routing_decision"],
+            "sample_rate": self.cfg["audio"]["sample_rate"],
         }
 
     def process_audio_streaming(self, audio_path: str, chunk_seconds: float = 2.0) -> dict:
@@ -902,37 +661,103 @@ class StemMidiModel(nn.Module):
         Returns:
             Same format as process_audio_file (aggregated outputs)
         """
-
         audio, sr = self._load_audio(audio_path)
         audio = self._resample_to_target(audio, sr)
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
-        self._validate_audio(audio_t, audio_path)
         sr = int(self.cfg["audio"]["sample_rate"])
+
+        total_len = audio_t.shape[-1]
+        chunk_len = max(1, int(chunk_seconds * sr))
+        overlap_len = int(chunk_len * self.cfg["audio"].get("overlap_ratio", 0.5))
+        hop_len = chunk_len - overlap_len
+        if hop_len <= 0:
+            raise ValueError(
+                f"overlap_ratio {self.cfg['audio'].get('overlap_ratio')} leaves no hop "
+                f"(chunk {chunk_len}, overlap {overlap_len}); reduce overlap_ratio."
+            )
+
+        out_guitar = torch.zeros(1, 1, total_len)
+        out_bass = torch.zeros(1, 1, total_len)
+        weight_sum = torch.zeros(1, 1, total_len)
+        metrics_acc: list[torch.Tensor] = []
+        n_chunks = 0
 
         self.eval()
         with torch.inference_mode():
-            if _is_silent(audio_t):
-                midi_metadata, report, routing = self._silent_result(audio_t)
-                zero = np.zeros(int(audio_t.shape[-1]), dtype=np.float32)
-                return {
-                    "stems": {"guitar": zero, "bass": zero.copy()},
-                    "midi": midi_metadata,
-                    "midi_guitar": midi_metadata["guitar"],
-                    "midi_bass": midi_metadata["bass"],
-                    "report": report,
-                    "routing": routing,
-                    "sample_rate": sr,
-                    "chunks_processed": 0,
-                }
-            full_guitar, full_bass, final_metrics, n_chunks = self._separate_chunked(
-                audio_t, chunk_seconds
-            )
-            # Transcription runs ONCE on the recombined stems (C-2), so
-            # pitch/velocity/confidence are real model outputs on the full
-            # timeline and the report metrics are the real per-chunk mean.
-            midi_metadata, report, routing = self._finalize(
-                full_guitar, full_bass, final_metrics, audio_t
-            )
+            pos = 0
+            while pos < total_len:
+                end = min(pos + chunk_len, total_len)
+                chunk = audio_t[:, :, pos:end]
+                valid_len = end - pos
+
+                if valid_len < chunk_len:
+                    chunk = F.pad(chunk, (0, chunk_len - valid_len))
+
+                guitar, bass, sep_metrics = self._separate(chunk)
+
+                # Overlap-add weights (H-4): complementary linear crossfades
+                # over the shared overlap region; normalized by accumulated
+                # weights so any overlap/edge combination sums to 1.
+                w = torch.ones(1, 1, valid_len)
+                if pos > 0 and overlap_len > 0:
+                    fi = min(overlap_len, valid_len)
+                    w[:, :, :fi] *= torch.arange(1, fi + 1, dtype=torch.float32) / overlap_len
+                if end < total_len and overlap_len > 0:
+                    fo = min(overlap_len, valid_len)
+                    ramp = torch.arange(fo - 1, -1, -1, dtype=torch.float32) / overlap_len
+                    w[:, :, valid_len - fo :] *= ramp
+
+                out_guitar[:, :, pos:end] += guitar[:, :, :valid_len] * w
+                out_bass[:, :, pos:end] += bass[:, :, :valid_len] * w
+                weight_sum[:, :, pos:end] += w
+
+                metrics_acc.append(sep_metrics.detach().float().mean(dim=0))
+                pos += hop_len
+                n_chunks += 1
+
+        full_guitar = out_guitar / weight_sum.clamp(min=1e-8)
+        full_bass = out_bass / weight_sum.clamp(min=1e-8)
+
+        final_metrics = torch.stack(metrics_acc).mean(dim=0)  # (2,) real per-chunk mean
+
+        # Transcribe the recombined stems once — real logits on the full
+        # timeline (C-2), no per-chunk frame-grid drift.
+        guitar_tr = self._transcribe(full_guitar)
+        bass_tr = self._transcribe(full_bass)
+        self._ensure_finite(guitar_tr, "guitar")
+        self._ensure_finite(bass_tr, "bass")
+        guitar_meta, guitar_conf = self._enhance(guitar_tr, full_guitar)
+        bass_meta, bass_conf = self._enhance(bass_tr, full_bass)
+
+        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
+
+        midi_metadata = {
+            "guitar": guitar_meta,
+            "bass": bass_meta,
+            "summary": {
+                "avg_confidence": avg_confidence,
+                "low_confidence_count": (
+                    guitar_meta["summary"]["low_confidence_count"]
+                    + bass_meta["summary"]["low_confidence_count"]
+                ),
+                "alignment_warnings": (
+                    guitar_meta["summary"]["alignment_warnings"]
+                    + bass_meta["summary"]["alignment_warnings"]
+                ),
+            },
+        }
+
+        report = ProcessingReport(
+            centroid_separation_db=final_metrics[0].item(),
+            phase_coherence=final_metrics[1].item(),
+            avg_confidence=avg_confidence,
+            artifact_flags=self._detect_artifacts(full_guitar, full_bass),
+            low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            config=self.cfg,
+            backend=self.backend_name,
+        )
+
+        routing = route_by_quality(report)
 
         return {
             "stems": {
@@ -940,8 +765,6 @@ class StemMidiModel(nn.Module):
                 "bass": full_bass.squeeze().cpu().numpy(),
             },
             "midi": midi_metadata,
-            "midi_guitar": midi_metadata["guitar"],
-            "midi_bass": midi_metadata["bass"],
             "report": report,
             "routing": routing,
             "sample_rate": sr,
@@ -970,8 +793,6 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
     model.load_state_dict(state_dict)
-    # Provenance (H-2): from here on, reports may claim trained weights.
-    model.weights_loaded = True
     return model
 
 
