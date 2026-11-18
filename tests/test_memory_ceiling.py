@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 np = require("numpy", "memory ceiling tests")
 yaml = require("yaml", "config-vs-code checks")
@@ -434,18 +434,6 @@ def test_streaming_render_length_matches_the_input(pipeline_config, make_wav, sy
     )
 
 
-@known_bug(
-    "PERF-1",
-    "tests/test_perf_smoke.py is the only memory/latency gate and it proves nothing about the "
-    "CPU target: it builds `mock_config` (d_model 64, 2 layers — 12x fewer parameters per layer "
-    "than the shipped 768x12), forwards 1 s (44 100 samples, ~1/180 of a song), asserts "
-    "rss < 2500 MB and elapsed < 30 s, and its psutil branch reads *current* RSS after the "
-    "forward while its `resource` fallback reads the process peak — so the same test measures "
-    "two different quantities depending on whether psutil happens to be installed. Neither "
-    "branch can see the O(L·d_inner·d_state) scan cost, and the pure-torch fallback's "
-    "`for t in range(L)` loop (models/_mamba_compat.py:97) is never timed at realistic L.",
-)
-@pytest.mark.slow
 def test_perf_smoke_uses_the_shipped_shape_and_measures_a_peak():
     src = (ROOT / "tests" / "test_perf_smoke.py").read_text(encoding="utf-8")
     cfg = _shipped()
@@ -454,8 +442,18 @@ def test_perf_smoke_uses_the_shipped_shape_and_measures_a_peak():
         "documented fraction of it) so the RSS/latency budget means something"
     )
     assert "peak" in src.lower(), "RSS is sampled once after the forward; measure the peak"
-    assert "352800" in src or "8 * " in src, (
-        "the perf gate forwards 44100 samples (1 s); a 4-8 GB CPU target must be checked at "
-        "least at 8 s, where the monolithic forward is already 8x larger"
+    # The gate must forward enough audio to exercise the chunked path. Check the
+    # module's own declared constant rather than grepping for a literal: a
+    # hard-coded "8 * sr" is exactly the kind of thing this test should not pin.
+    from tests.test_perf_smoke import PERF_BUDGET_MB, PERF_BUDGET_SECONDS, PERF_SECONDS
+
+    assert PERF_SECONDS >= 8, (
+        f"the perf gate forwards {PERF_SECONDS}s; a 4-8 GB CPU target must be checked "
+        "at least at 8 s, where the monolithic forward is already 8x larger"
     )
+    assert (
+        "configs" in src and "model_config.yaml" in src
+    ), "the perf gate must build the shipped architecture, not a toy config"
+    assert PERF_BUDGET_MB <= 4096, "the RSS budget must not drift above the advertised 4 GB"
+    assert PERF_BUDGET_SECONDS > 0
     assert cfg["separator"]["d_model"] >= 64, "sanity: shipped model is the big one"
