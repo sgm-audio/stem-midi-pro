@@ -32,6 +32,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+# `import torch` alone does NOT bind torch.utils.checkpoint: the submodule only
+# appears on the parent package once something imports it. MambaBackbone.forward
+# (CFG-4) calls torch.utils.checkpoint.checkpoint(...) under
+# training.gradient_checkpointing, so importing it here is what makes the
+# documented CPU memory mitigation reachable at all.
+import torch.utils.checkpoint  # must follow `import torch`
+
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - depends on environment

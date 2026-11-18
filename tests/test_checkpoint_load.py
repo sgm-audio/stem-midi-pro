@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for checkpoint loading (main.load_from_checkpoint + api lifespan wiring)."""
+"""Tests for checkpoint loading (main.load_from_checkpoint + api lifespan wiring).
+
+T-8.1.3 honesty fix: these two tests used to open with
+``pytest.importorskip("mamba_ssm")``. mamba_ssm is not a dependency of this
+project (models/_mamba_compat.py falls back to pure PyTorch — DEP-4.1.3), so on
+every CPU box the suite skipped the ONLY tests covering checkpoint loading, and
+reported green. That skip is what hid the key-mismatch bug locked by
+``test_load_from_checkpoint_accepts_model_state_dict_key`` below (now an
+explicit strict-xfail so it turns into a hard failure the moment the loader is
+fixed, and so the bug is visible in the run summary instead of in a skip line).
+"""
 
 from __future__ import annotations
 
@@ -9,10 +19,29 @@ import pytest
 import torch
 import yaml
 
+from tests.honesty import known_bug
 
+#: real model path on CPU: must never skip for a missing optional dep
+pytestmark = pytest.mark.real_mamba
+
+
+@known_bug(
+    "CKPT-1",
+    "load_from_checkpoint reads only ckpt['state_dict'], so checkpoints written by "
+    "scripts/export_fine_tuned.py / verify_cpu_export.py / fine_tune_demucs.py under "
+    "'model_state_dict' fail to load; accept both keys (the skipped-by-gate test that "
+    "used to lock this contract never ran on CPU).",
+)
 def test_load_from_checkpoint_accepts_model_state_dict_key(tmp_path):
-    """train.py-style checkpoints use model_state_dict key."""
-    pytest.importorskip("mamba_ssm")
+    """Exported checkpoints use the "model_state_dict" key — the loader must read it.
+
+    scripts/export_fine_tuned.py:105, scripts/verify_cpu_export.py:121 and
+    scripts/fine_tune_demucs.py:196 all SAVE {"model_state_dict": ...}, and
+    scripts/runpod_deploy.py:131 reads ckpt["model_state_dict"], but
+    main.load_from_checkpoint only pops "state_dict" and then feeds the wrapper
+    dict to load_state_dict → RuntimeError. So every artifact the repo's own
+    export scripts produce fails to load through the documented entry point.
+    """
     from main import StemMidiModel, load_from_checkpoint
 
     cfg = {
@@ -76,7 +105,6 @@ def test_load_from_checkpoint_accepts_model_state_dict_key(tmp_path):
 
 def test_load_from_checkpoint_accepts_bare_state_dict(tmp_path):
     """Bare state_dict (no wrapper key) must also load."""
-    pytest.importorskip("mamba_ssm")
     from main import StemMidiModel, load_from_checkpoint
 
     cfg = {
