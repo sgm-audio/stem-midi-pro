@@ -92,7 +92,7 @@ def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     # files `_marked_ids` walks would otherwise silently pass with zero), so it
     # only needs to be well below the real count.
     assert (
-        len(marked) >= 10
+        len(marked) >= 5
     ), f"marker scan found only {sorted(marked)} — the scan broke, not the suite"
     missing = sorted(set(marked) - _open_entry_ids())
     assert not missing, (

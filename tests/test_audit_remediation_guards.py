@@ -386,3 +386,31 @@ def test_report_1_the_batched_report_averages_over_the_batch():
     assert out["processing_report"].centroid_separation_db == pytest.approx(
         13.0, abs=1e-3
     ), "report is reporting item 0's 25.0 dB instead of the batch mean 13.0 dB"
+
+
+def test_midi_7_a_mid_file_tempo_change_moves_later_notes(tmp_path):
+    """MIDI-7: a `set_tempo` after tick 0 must shift everything after it."""
+    import mido
+
+    from utils.midi_targets import midi_to_targets
+
+    mid = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))  # 120 BPM
+    track.append(mido.Message("note_on", note=60, velocity=100, time=240))  # 0.25 s
+    track.append(mido.Message("note_off", note=60, velocity=0, time=240))
+    track.append(mido.MetaMessage("set_tempo", tempo=1_000_000, time=0))  # 60 BPM
+    track.append(mido.Message("note_on", note=62, velocity=100, time=960))  # 2.50 s
+    track.append(mido.Message("note_off", note=62, velocity=0, time=240))
+    path = tmp_path / "map.mid"
+    mid.save(str(path))
+
+    onset, _pitch, _vel = midi_to_targets(str(path), 300, hop_length=512, sample_rate=44100)
+    frames = [i for i in range(300) if onset[0, i, 0] > 0]
+    assert len(frames) == 2, frames
+    assert abs(frames[0] - 22) <= 1, f"first note at frame {frames[0]}"
+    assert abs(frames[1] - 215) <= 1, (
+        f"second note at frame {frames[1]}; 2.500 s is frame 215 and frame 129 is "
+        "where it lands if the 60 BPM change is ignored"
+    )
