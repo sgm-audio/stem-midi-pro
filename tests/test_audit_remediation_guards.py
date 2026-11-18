@@ -414,3 +414,43 @@ def test_midi_7_a_mid_file_tempo_change_moves_later_notes(tmp_path):
         f"second note at frame {frames[1]}; 2.500 s is frame 215 and frame 129 is "
         "where it lands if the 60 BPM change is ignored"
     )
+
+
+def test_batch_1_two_recordings_never_become_one_midi_file(pipeline_config):
+    """BATCH-1: `_logits_to_midi` flattened every item into one event list.
+
+    The events carry raw per-item frame indices, so a B=2 call returned a single
+    MIDI in which two songs' notes were interleaved and unattributable.
+    """
+    from main import StemMidiModel
+
+    model = StemMidiModel(pipeline_config)
+    model.eval()
+    n = 50
+    onset = torch.full((2, n, 1), -10.0)
+    onset[0, 5, 0] = 10.0
+    onset[1, 5, 0] = 10.0
+    pitch = torch.zeros(2, n, 128)
+    pitch[0, 5, 64] = 10.0
+    pitch[1, 5, 40] = 10.0
+
+    with pytest.raises(ValueError, match="batch size 2"):
+        model._logits_to_midi(onset, pitch, torch.full((2, n, 1), 0.7), torch.full((2, n), 0.9))
+
+
+def test_batch_1_single_item_transcription_is_unaffected(pipeline_config):
+    """The BATCH-1 guard must not touch the supported B=1 path."""
+    from main import StemMidiModel
+
+    model = StemMidiModel(pipeline_config)
+    model.eval()
+    n = 50
+    onset = torch.full((1, n, 1), -10.0)
+    onset[0, 5, 0] = 10.0
+    pitch = torch.zeros(1, n, 128)
+    pitch[0, 5, 64] = 10.0
+    events = model._logits_to_midi(
+        onset, pitch, torch.full((1, n, 1), 0.7), torch.full((1, n), 0.9)
+    )
+    assert [e["note"] for e in events] == [64]
+    assert [e["onset_frame"] for e in events] == [5]

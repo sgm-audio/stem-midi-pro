@@ -439,6 +439,25 @@ class StemMidiModel(nn.Module):
         pitches = torch.argmax(pitch_logits, dim=-1)
         vel_values = (velocity * 127).long().squeeze(-1)
 
+        # BATCH-1: this function returns ONE flat list whose events carry the raw
+        # per-item `onset_frame`. For B>1 that merges separate recordings into a
+        # single unattributable MIDI file -- two songs' notes interleaved, with no
+        # way to tell which note came from which -- and it did so silently.
+        #
+        # The guard sits here, not on `forward`, for two reasons:
+        #  * this loop is the only place the merging happens;
+        #  * it fires only when the batch actually produces events. A B>1 call
+        #    that produces no onsets (e.g. a fixture probing the batched quality
+        #    report) has nothing to merge, so refusing it would break a
+        #    legitimate use without protecting anything.
+        n_batch = int(candidates[:, 0].max().item()) + 1 if candidates.shape[0] else 0
+        if n_batch > 1:
+            raise ValueError(
+                f"_logits_to_midi converts one recording at a time; got batch size "
+                f"{n_batch}. Batched inference would merge every item's notes into a "
+                "single MIDI file. Call the model once per recording."
+            )
+
         events = []
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():

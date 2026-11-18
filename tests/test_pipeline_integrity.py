@@ -341,13 +341,6 @@ def test_batched_report_aggregates_over_the_batch(pipeline_config):
     )
 
 
-@known_bug(
-    "BATCH-1",
-    "_logits_to_midi flattens every batch item's events into one list with raw per-item "
-    "frame indices (its docstring admits it), so a B=2 call returns one merged MIDI where "
-    "two songs' notes are interleaved and unattributable. Either reject B>1 for inference "
-    "or key events per batch item.",
-)
 def test_batched_inference_does_not_merge_songs_into_one_midi(pipeline_config):
     guitar = torch.full((2, 1, SR), 0.1)
     n = frame_count(SR, HOP)
