@@ -88,7 +88,7 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 3. **Use CC#127 to find uncertain notes.** Each note's confidence is encoded as a CC#127 controller value: 96–127 high confidence, 64–95 medium, 0–63 low. Most DAWs (Reaper, Logic, Cubase, Ableton) let you view or filter by controller data — use that to jump straight to the notes that need attention.
 4. Edit pitch/timing/velocity of the low-confidence notes by ear against the stems.
 
-There is no built-in MIDI editor — your DAW is the editor. MIDI expression data (bend, vibrato, slide) is produced by the model's expression head but is currently untrained, so treat it as advisory only.
+There is no built-in MIDI editor — your DAW is the editor. MIDI expression data (bend, vibrato, slide) is produced by the model's expression head but is currently untrained, so treat it as advisory only. It appears in each note's metadata as `expression` (with `source` naming the untrained head) and is written into the `.mid` file only when expression export is explicitly enabled.
 
 ## Tips for Best Results
 

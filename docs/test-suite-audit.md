@@ -11,16 +11,18 @@ late**, chords serialised into arpeggios), a `bass.mid` that was a copy of
 `guitar.mid`, silence transcribed as ~87 notes/second, and a pipeline needing
 **~14 GB** for the ten-minute upload its own API advertises.
 
-**Status: 20 defects found, 19 resolved, 1 open.** Resolution is split by *where*
+**Status: 20 defects found, all 20 resolved.** Resolution is split by *where*
 it landed, because `main` moved under this branch: an independent review pass
 (merged as PRs #11/#14) fixed the MIDI writer, tempo tracking, sample-rate
 conversion, the streaming path and the backend wiring — rows marked
 **upstream** in §3.1. The rest — input validation, silence/clipping/DC handling,
 chunked file processing, review-gate semantics and weights provenance — landed
 in this branch (**here**). Every defect is guarded by a test that failed on the
-old code; no `xfail` markers remain. The open item is expression output
-(BUG-MIDI-9, §7), which needs a product decision about the MIDI mapping rather
-than a bug fix. Everything below is the original audit, with resolution status
+old code. The last one — expression output (BUG-MIDI-9 / EXPR-1) — was resolved
+by porting PR #13's expression work: the head's channels are now carried per
+note and labelled as untrained, and the writer emits pitch-bend/CC1 on explicit
+opt-in (`include_expression=True`), because writing an untrained head's output by
+default would fabricate expression. Everything below is the original audit, with resolution status
 recorded in §3.1 and §6.
 
 ---
@@ -234,7 +236,7 @@ only sorted). "Verified by" names the test that failed before the change.
 | BUG-MIDI-6 | upstream (H-8) | `main.py`: both stems transcribed; `midi_metadata["guitar"]`/`["bass"]` are distinct dicts | `test_bass_midi_contains_no_guitar_range_notes`, `test_guitar_and_bass_midi_are_different_files` |
 | BUG-MIDI-7 | upstream (H-6) | Rising-edge peak-picking with `transcriber.onset_refractory_frames` (default 4 ≈ 46 ms) | `test_note_density_is_musical` |
 | BUG-MIDI-8 | upstream (C-2) | Streaming recombines the stems, then transcribes once on the full timeline | `test_streaming_notes_are_not_all_pitch_zero` |
-| BUG-MIDI-9 | **open** | Expression heads still not written to MIDI (a mapping decision, not a bug) | — |
+| BUG-MIDI-9 | **here** (ported from PR #13) | `_transcribe` carries the expression head; `_logits_to_midi` names its channels (`bend`, `vibrato`) and labels each event `source: expression_head (untrained)`; `build_midi_from_events(include_expression=True)` writes pitch-bend + CC1, off by default | `test_expression_head_output_reaches_the_midi_when_opted_in`, `scripts/verify_midi.py` |
 | BUG-GATE-1/3 | **here** | `needs_review = confidence < min_confidence`; alignment kept for diagnostics only | `test_review_flag_is_independent_of_output_gain`, `test_summary_counts_agree_with_events` |
 | BUG-GATE-4 | **here** | `low_confidence_count` counts notes, not frames | `test_low_confidence_count_counts_notes_not_frames` |
 | BUG-GATE-2 | **here** | `summary["total_notes"]` added to both stem payloads and the overall summary | `test_summary_exposes_total_note_count` |

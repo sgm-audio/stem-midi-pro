@@ -136,14 +136,17 @@ class StemMidiModel(nn.Module):
                 "pitch_logits": out.get("pitch_logits"),
                 "velocity": out.get("velocity"),
                 "confidence": out.get("confidence"),
+                "expression": out.get("expression"),
                 "events": out.get("events"),
             }
-        onset, pitch, velocity, _expression, confidence = self.transcriber(stem)
+        onset, pitch, velocity, expression, confidence = self.transcriber(stem)
         return {
             "onset_logits": onset,
             "pitch_logits": pitch,
             "velocity": velocity,
             "confidence": confidence,
+            # EXPR-1: the head's output used to be discarded here (`_expression`).
+            "expression": expression,
             "events": None,
         }
 
@@ -325,7 +328,11 @@ class StemMidiModel(nn.Module):
             events = tr["events"][0]  # B=1 in production paths
         elif tr["onset_logits"] is not None:
             events = self._logits_to_midi(
-                tr["onset_logits"], tr["pitch_logits"], tr["velocity"], confidence
+                tr["onset_logits"],
+                tr["pitch_logits"],
+                tr["velocity"],
+                confidence,
+                tr.get("expression"),
             )
         enhanced = self.confidence_injector.inject_midi_metadata(
             events or [],
@@ -452,7 +459,7 @@ class StemMidiModel(nn.Module):
     # Decoding
     # ------------------------------------------------------------------
 
-    def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence):
+    def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence, expression=None):
         """Convert network outputs to a FLAT MIDI event list.
 
         Onset peak-picking (H-6): sigmoid probability is thresholded and an
@@ -494,15 +501,39 @@ class StemMidiModel(nn.Module):
             last_above[b] = t
             if not accepted:
                 continue
-            events.append(
-                {
-                    "note": pitches[b, t].item(),
-                    "onset_frame": t,
-                    "velocity": vel_values[b, t].item(),
-                    "confidence": confidence[b, t].item(),
-                }
-            )
+            event = {
+                "note": pitches[b, t].item(),
+                "onset_frame": t,
+                "velocity": vel_values[b, t].item(),
+                "confidence": confidence[b, t].item(),
+            }
+            if expression is not None and expression.dim() == 3:
+                event["expression"] = self._expression_at(expression, b, t)
+            events.append(event)
         return events
+
+    def _expression_at(self, expression: torch.Tensor, batch: int, frame: int) -> dict:
+        """Name the expression head's channels for one note (EXPR-1).
+
+        The head emits an unnamed E-vector; the config declares the order
+        (``transcriber.expression_heads``, e.g. ["bend", "vibrato", "slide"]).
+        Only channels the writer understands are surfaced: ``bend`` (-1..1) and
+        ``vibrato`` (0..1, magnitude). Everything else stays in ``vector`` so a
+        consumer can still use it.
+
+        Every event is labelled ``source`` because the head is UNTRAINED
+        (ARCH-11.4.4): these values are not predictions anyone should trust
+        without opt-in, and the MIDI writer will not emit them unless asked.
+        """
+        heads = list((self.cfg.get("transcriber") or {}).get("expression_heads") or [])
+        vector = [float(v) for v in expression[batch, frame]]
+        named: dict = {"vector": vector, "source": "expression_head (untrained; ARCH-11.4.4)"}
+        for name, value in zip(heads, vector, strict=False):
+            if name == "bend":
+                named["bend"] = max(-1.0, min(1.0, value))
+            elif name == "vibrato":
+                named["vibrato"] = max(0.0, min(1.0, abs(value)))
+        return named
 
     @staticmethod
     def _stem_is_silent(stem: torch.Tensor) -> bool:
