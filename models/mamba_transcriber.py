@@ -23,10 +23,14 @@ class MambaTranscriber(nn.Module):
     Outputs: onset_logits (B, T, 1), pitch_logits (B, T, V=128),
              velocity (B, T, 1), expression (B, T, E), confidence (B, T)
 
-    Decoder honesty: the downstream ``_logits_to_midi`` decoder takes a single
-    argmax pitch per onset frame — chords/polyphony are NOT modeled by this
-    head layout. True polyphonic decoding requires per-pitch event heads
-    (see TODO ARCH-11.5.x). The expression head exists but is untrained
+    Decoder honesty: the pitch head emits (B, T, V=128) logits which the
+    downstream ``_logits_to_midi`` decoder reads PER-PITCH (sigmoid over
+    ``transcriber.pitch_threshold``) — polyphonic frames emit chords, and a
+    frame trained only on single labels still yields the argmax pitch via
+    the fallback. Whether the MODEL actually predicts chords depends on the
+    training data: multi-hot pitch targets (any frame labeling >1 note)
+    train through ``pitch_bce_loss_fn``; single-pitch targets keep the
+    128-way cross-entropy. The expression head exists but is untrained
     (ARCH-11.4.4); its output is not encoded into MIDI by the orchestrator.
     """
 

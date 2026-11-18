@@ -50,6 +50,12 @@ def _tick_to_seconds(tick: int, changes: Sequence[tuple[int, int]], ticks_per_be
     return seconds
 
 
+# Public names for the tempo helpers (EXPR-1 follow-up: the verification script
+# and external callers used the private spellings).
+build_tempo_map = _build_tempo_map
+tick_to_seconds = _tick_to_seconds
+
+
 def midi_to_targets(
     midi_paths: str | Sequence[str],
     n_frames: int,

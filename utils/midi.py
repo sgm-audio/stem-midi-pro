@@ -99,6 +99,7 @@ def build_midi_from_events(
     default_duration_beats: float | None = None,
     hop_length: int = HOP_LENGTH,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
+    include_expression: bool = False,
 ) -> bytes:
     """Convert MIDI event metadata to SMF bytes.
 
@@ -222,9 +223,13 @@ def build_midi_from_events(
             )
         )
 
-        for expression_message in _expression_messages(ev, channel):
-            sequence += 1
-            scheduled.append((onset_tick, 3, sequence, expression_message))
+        # Expression is off by default: the head is untrained (ARCH-11.4.4), so
+        # writing it into every export would fabricate phrasing the model never
+        # learned. Callers that want it ask for it.
+        if include_expression:
+            for expression_message in _expression_messages(ev, channel):
+                sequence += 1
+                scheduled.append((onset_tick, 3, sequence, expression_message))
 
         sequence += 1
         note_off_entry[key] = len(scheduled)
