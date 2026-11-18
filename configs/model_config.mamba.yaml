@@ -32,6 +32,9 @@ transcriber:
   velocity_bins: 128
   expression_heads: ["bend", "vibrato", "slide"]
   onset_threshold: 0.5
+  # Chord-aware decoding: every pitch whose sigmoid exceeds this fires
+  # its own note_on at an accepted onset frame; null = legacy single-argmax.
+  pitch_threshold: 0.5
 
 training:
   precision: "fp32"

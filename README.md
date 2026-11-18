@@ -23,7 +23,7 @@ Third-party attributions are in [NOTICE](NOTICE).
 ## What It Does
 
 - **Stem separation** — splits a mixed recording into guitar and bass WAV stems using a Mamba-SSM separator (`models/mamba_separator.py`).
-- **MIDI transcription** — converts each stem to MIDI with onset, pitch, velocity, and per-note confidence (`models/mamba_transcriber.py`). Single-pitch-per-onset (no chords yet); the expression head (bend/vibrato/slide) exists but is untrained and is NOT encoded into MIDI.
+- **MIDI transcription** — converts each stem to MIDI with onset, pitch, velocity, and per-note confidence (`models/mamba_transcriber.py`). **Chord-aware**: every pitch whose sigmoid probability exceeds `transcriber.pitch_threshold` (default 0.5) at a detected onset emits its own note_on; set `pitch_threshold: null` for legacy single-argmax decoding. Whether the model predicts chords depends on training data — multi-hot pitch targets (chords) train via multi-label BCE, single-pitch targets via cross-entropy. The expression head (bend/vibrato/slide) exists but is untrained and is NOT encoded into MIDI.
 - **Confidence metadata** — each MIDI note carries its confidence as a MIDI CC so your DAW can flag uncertain notes (`models/confidence_injector.py`). Default **CC#16**; CC#120-127 are Channel Mode messages per the MIDI spec, so legacy CC#127 is opt-in via `MIDI_CONFIDENCE_CC=127`.
 - **Quality gates** — routes each result into a `studio` / `draft` / `complex` tier with a transparent processing report (`utils/quality_gates.py`).
 

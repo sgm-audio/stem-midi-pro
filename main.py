@@ -48,7 +48,8 @@ class StemMidiModel(nn.Module):
 
     Input:  audio (B, C=1, T); optional training targets
             target_guitar / target_bass (B, C, T),
-            target_onsets (B, T, 1), target_pitch (B, T) or one-hot (B, T, V),
+            target_onsets (B, T, 1), target_pitch (B, T) / one-hot (B, T, V) /
+            multi-hot (B, T, V) for chords,
             target_velocity (B, T, 1) normalized [0, 1]
     Output: Dict with guitar_stem, bass_stem, midi_metadata
             ({"guitar": …, "bass": …, "summary": …}), processing_report,
@@ -306,12 +307,21 @@ class StemMidiModel(nn.Module):
     def _prepare_pitch_target(
         target_pitch: torch.Tensor | None, pitch_logits: torch.Tensor
     ) -> torch.Tensor | None:
-        """Coerce pitch targets to (B, T) class indices for ``pitch_ce_loss_fn``.
+        """Coerce pitch targets for the pitch loss (CHORD-AWARE).
 
-        Accepts one-hot (B, T, V) / collated (B, 1, T, V) tensors (frames with
-        an all-zero row become ``ignore_index`` = -100, so frames without a
-        labeled pitch are excluded from the loss) and already-class-index
-        (B, T) tensors. Out-of-range values are ignored, not clamped (M-1).
+        Returns one of two formats, chosen per batch:
+
+        - **(B, T) class indices** for ``pitch_ce_loss_fn`` — when every
+          labeled frame carries exactly one pitch (one-hot rows collapse to
+          argmax; all-zero rows become ``ignore_index`` = -100; class-index
+          tensors pass through). Out-of-range values are ignored, not
+          clamped (M-1).
+        - **(B, T, V) multi-hot float** for ``pitch_bce_loss_fn`` — when ANY
+          frame labels more than one pitch (a chord). The previous behavior
+          argmax-collapsed such rows, silently destroying all but one note
+          of every chord in the training data even though
+          ``utils.midi_targets.midi_to_targets`` writes one-hot entries per
+          note_on (i.e. real chord frames arrive multi-hot).
         """
         if target_pitch is None:
             return None
@@ -321,7 +331,16 @@ class StemMidiModel(nn.Module):
         if t.dim() == 4 and t.shape[1] == 1:
             t = t.squeeze(1)
         if t.dim() == 3 and t.shape[-1] == vocab:
-            valid = t.sum(dim=-1) > 0
+            row_sum = t.sum(dim=-1)
+            if (row_sum > 1).any():
+                # Polyphonic (chord) labels present: keep the multi-hot grid.
+                t = (t > 0).float()
+                if t.shape[1] > n_pred:
+                    t = t[:, :n_pred]
+                elif t.shape[1] < n_pred:
+                    t = F.pad(t, (0, 0, 0, n_pred - t.shape[1]), value=0.0)
+                return t
+            valid = row_sum > 0
             t = t.argmax(dim=-1).masked_fill(~valid, -100)
         elif t.dim() > 2:
             t = t.reshape(t.shape[0], -1)
@@ -402,8 +421,15 @@ class StemMidiModel(nn.Module):
         argmax pitch mid-burst (e.g. 45,45,52,45) leaks a spurious extra
         note. Velocity/confidence are sampled at the crossing frame.
 
-        Single argmax pitch per onset frame — chords/polyphony are not
-        modeled by this head layout (see MambaTranscriber docstring).
+        Pitch decoding is CHORD-AWARE: every pitch whose sigmoid probability
+        exceeds ``transcriber.pitch_threshold`` (default 0.5) at the accepted
+        onset frame emits its own note_on, so polyphonic frames produce
+        chords. If no pitch crosses the threshold at a fired onset, the
+        argmax pitch is emitted as a fallback — a fired onset always yields
+        at least one note (important for single-label-trained models whose
+        runner-up logits stay low). ``pitch_threshold: null`` forces legacy
+        single-argmax decoding.
+
         Assumes B=1 for inference; batch >1 still returns all batches' events
         with onset frames as-is. ``onset_refractory_frames: 0`` disables the
         suppression entirely (every above-threshold frame fires — the
@@ -416,6 +442,16 @@ class StemMidiModel(nn.Module):
         )  # (N, 2): [batch_idx, frame], sorted by batch then frame
         pitches = torch.argmax(pitch_logits, dim=-1)
         vel_values = (velocity * 127).long().squeeze(-1)
+
+        pitch_threshold = self.cfg["transcriber"].get("pitch_threshold", 0.5)
+        chord_probs = None
+        if pitch_threshold is not None:
+            if not 0.0 < float(pitch_threshold) < 1.0:
+                raise ValueError(
+                    f"transcriber.pitch_threshold must be in (0, 1) or null; "
+                    f"got {pitch_threshold!r}"
+                )
+            chord_probs = torch.sigmoid(pitch_logits)  # (B, T, V)
 
         events = []
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
@@ -430,14 +466,25 @@ class StemMidiModel(nn.Module):
             last_above[b] = t
             if not accepted:
                 continue
-            events.append(
-                {
-                    "note": pitches[b, t].item(),
-                    "onset_frame": t,
-                    "velocity": vel_values[b, t].item(),
-                    "confidence": confidence[b, t].item(),
-                }
-            )
+
+            if chord_probs is not None:
+                frame_notes = (chord_probs[b, t] > pitch_threshold).nonzero().flatten().tolist()
+            else:
+                frame_notes = []
+            if not frame_notes:
+                # No pitch crossed the threshold (or multi-label decoding is
+                # disabled): fall back to the argmax pitch so a fired onset
+                # never produces an empty event set.
+                frame_notes = [int(pitches[b, t].item())]
+            for note in frame_notes:
+                events.append(
+                    {
+                        "note": int(note),
+                        "onset_frame": t,
+                        "velocity": vel_values[b, t].item(),
+                        "confidence": confidence[b, t].item(),
+                    }
+                )
         return events
 
     def _detect_artifacts(self, guitar: torch.Tensor, bass: torch.Tensor) -> list[str]:

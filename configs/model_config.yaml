@@ -44,6 +44,9 @@ transcriber:
   pitch_vocab_size: 128        # MIDI pitches 0-127
   expression_heads: ["bend", "vibrato", "slide"]
   onset_threshold: 0.5
+  # Chord-aware decoding: every pitch whose sigmoid exceeds this fires
+  # its own note_on at an accepted onset frame; null = legacy single-argmax.
+  pitch_threshold: 0.5
 
 # Training
 training:
