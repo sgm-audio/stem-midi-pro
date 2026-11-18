@@ -7,6 +7,13 @@ cover: `main.py`, `api.py`, `audio_io.py`, `utils/{midi,midi_targets,quality_gat
 `configs/*.yaml`, `data/datasets.py`, `losses.py`, `train.py`, `scripts/*`, `demo.py`.
 **Date:** 2026-11-17 · **Branch:** `arena/265e3d3e-stem-midi-pro` · **Author:** Arena agent (skeptical test-engineer brief)
 
+> **Current-branch reconciliation note (PR #15):** This document is a historical audit
+> baseline, not a current capability claim. The merged branch retains its strict honesty
+> layer and known-bug inventory, but its MIDI output contract intentionally supersedes
+> the audit's legacy CC#16 discussion: confidence is canonical in JSON and serialized
+> as Polyphonic Key Pressure; CC#127 is not emitted. Current test totals and evidence
+> are recorded in `VERIFICATION_MATRIX.md`.
+
 ---
 
 ## 0. Verdict

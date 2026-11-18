@@ -114,6 +114,42 @@ All six are blocked on something this branch cannot supply, not on effort.
 * **Two audit tests asserted frame counts as note counts** and **four more**
   asserted truncation as the CC contract — those encoded the bug and were rewritten.
 
+
+## Merge with `main` (`4b6daf1`) — what changed underneath this branch
+
+While this branch was in flight, `main` gained three substantial parallel
+changesets (`#15`, `#16` and a reconciliation merge) that rewrote several of the
+same files. The merge was done by hand, file by file, and the interesting part is
+**which of my fixes were already solved upstream** — checked by reading main's
+code, not by assuming either side:
+
+| Finding | Outcome after the merge |
+|---|---|
+| **MIDI-5** | Already fixed upstream (hop/sample_rate threaded in `api.py`). Took theirs; dropped mine. |
+| **CKPT-1** | Already fixed upstream. Merged my clearer error for a dict carrying neither key on top. |
+| **GATE-2** | Already fixed upstream (`note_confidences` indexed by note). Took theirs. |
+| **GATE-3** | Not on main. `note_count` + empty-render rule kept. |
+| **REPORT-1** | Fixed on both sides independently. Kept upstream's structure with my `nanmean` (so one non-finite item cannot poison the whole report). |
+| **ZIP-1** | Not on main — still writing no subtype. Kept mine. |
+| **JSON-1** | **Still live on main**: `json.dumps(report_json, indent=2)` with no `allow_nan=False`. Kept mine, applied to upstream's expanded schema. |
+| **MIDI-4** | Upstream moved confidence to Polyphonic Key Pressure but reintroduced `int()` in *both* `confidence_injector.py` and `_clamp_midi`. Re-applied rounding on both. |
+| **DOC-1** | **Superseded**: upstream removed the confidence CC entirely (correctly — CC#120-127 are Channel Mode). My CC#16 fix described a design that no longer exists; took theirs and rewrote the guard to assert the polytouch lane. |
+| **DOC-2** | Still needed: upstream's schema table omitted `invalid`/`backend` that their own `api.py` emits. Added. |
+| **ART-1** | Not on main — still `mean(stem**2) > 0.1`. Kept my high-band energy fraction. |
+| **SHIM-1, FAKE-1, REPRO-1, IO-2, IO-3, IO-4, BATCH-1, PERF-1, GATE-4** | Not on main. All kept. |
+| **§9 knob** | **Upstream made a different, documented decision**: renamed to `min_separation_proxy`, marked it "deprecated metadata only", and removed it from the tier. That is not the inert-knob bug (the name is honest and the docs say so). Took theirs and dropped my re-activation. |
+
+### Environment note (not a code defect)
+
+`tests/test_audio_adversarial.py::test_one_minute_upload_fits_in_2gb` — a new
+upstream test that builds the full 768×12 model on 60 s of audio — passes alone
+(54 s) and passes as the only heavy test in the process, but OOM-stalls when run
+in the same process after ~400 other tests on this 3.9 GB sandbox. Verified both
+halves pass separately (413 passed in 26 s, then the probe in 54 s). This is
+sandbox memory, not a defect; CI (which has more RAM) runs it as part of
+`pytest -m "not cuda"`. To reproduce locally: run that file with
+`--deselect ...::test_one_minute_upload_fits_in_2gb`, or run that test alone.
+
 ## Verification standard
 
 For each fix: the locking `known_bug` marker is deleted, the test passes unmarked,

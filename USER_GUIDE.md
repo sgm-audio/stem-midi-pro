@@ -2,14 +2,15 @@
 
 ## Introduction
 
-Stem+MIDI Pro separates a mixed recording into **guitar and bass stems** and transcribes them into **editable MIDI files**, with per-note confidence scores so you can see exactly what the AI is sure about. It runs locally on ordinary hardware — a bare-metal Intel i5 with 4–8 GB RAM is enough. No internet connection is needed once the software is installed.
+Stem+MIDI Pro separates a mixed recording into **guitar and bass stems** and transcribes them into **editable MIDI drafts**, with per-note confidence scores. Native-Mamba file/API inference requires a validated project checkpoint; the explicit CPU profile may instead use its separately installed Demucs + Basic Pitch pretrained weights. No trained project weights are included in this repository. CPU execution is supported, but the stated Intel i5 performance target has not been independently benchmarked here.
 
 ## What It Actually Does Today
 
-1. **Stem separation** — produces `guitar_stem.wav` and `bass_stem.wav` from a mixed recording.
-2. **MIDI transcription** — produces `guitar.mid` and `bass.mid` with note onsets, pitches, velocities, and per-note durations (honoring `duration_frames` from the model output; falls back to a configurable default when absent).
-3. **Confidence metadata** — every MIDI note carries a **CC#16** value (0–127) representing the model's confidence, so your DAW can highlight uncertain notes. (CC#16 is "General Purpose Controller 1"; CC#120–127 are reserved MIDI Channel Mode messages, so confidence is not written there. Set `MIDI_CONFIDENCE_CC=127` if your workflow requires the old controller.)
-4. **Quality report** — `processing_report.json` with separation metrics (SI-SDR estimate, phase coherence), average confidence, artifact flags, and an overall quality tier.
+1. **Stem separation** — produces independent `guitar_stem.wav` and `bass_stem.wav` files (plus a residual internally) using the configured backend.
+2. **MIDI transcription** — produces independent `guitar.mid` and `bass.mid` files with absolute audio-frame timing, pitches, velocities, duration-aware note-offs, same-onset chords, and overlapping notes.
+3. **Expression mapping** — expression fields, when supplied by a backend, map to pitch-wheel (bend), CC1 (vibrato), and CC74 (slide). Mapping is implemented; expression quality still depends on a trained checkpoint.
+4. **Confidence metadata** — JSON note fields are canonical. MIDI also carries Polyphonic Key Pressure (0–127), a standard note-specific message whose interpretation varies by DAW. CC#127 is not emitted; `cc_127_value` is only a deprecated JSON alias.
+5. **Quality report** — `processing_report.json` exposes a named centroid-separation proxy (not SI-SDR), phase coherence, note-level confidence counts, artifact flags, model-weight status, and a heuristic routing tier.
 
 **Not included (yet):** tempo detection, tuning detection, palm-mute / harmonics / slap-pop detection, a web-based MIDI editor, or real-time streaming. Refinement happens in your own DAW. Earlier versions of this guide described those features aspirationally; this version describes the software as it is.
 
@@ -18,10 +19,13 @@ Stem+MIDI Pro separates a mixed recording into **guitar and bass stems** and tra
 Processing is done via the API or CLI (see [SETUP.md](SETUP.md), [API_DOCUMENTATION.md](API_DOCUMENTATION.md)):
 
 ```bash
-# CLI
-python main.py --audio mysong.wav --config configs/model_config.yaml
+# CLI — trained checkpoint required
+python main.py --audio mysong.wav \
+  --config configs/model_config.yaml \
+  --checkpoint /path/to/trained_checkpoint.pt
 
-# or via the API
+# or via the API — set this before starting uvicorn
+export MODEL_CHECKPOINT_PATH=/path/to/trained_checkpoint.pt
 curl -X POST http://localhost:8000/process -F "file=@mysong.wav" -o output.zip
 ```
 
@@ -35,12 +39,7 @@ You get a package containing:
 
 On the reference bare-metal i5:
 
-- **~30–60 seconds of processing per 1 minute of audio**
-- 1-minute song: ~30–60 s
-- 3-minute song: ~1.5–3 minutes
-- 10-minute song (maximum): ~5–10 minutes
-
-Longer files are fine — they just take proportionally longer. One file processes at a time.
+No target-hardware timing result is certified in this repository. The current test environment is Python 3.11 rather than the Python 3.13 target, and a meaningful benchmark requires validated model weights, real audio, and the reference i5. One API file is processed at a time by design.
 
 ## Input Requirements
 
@@ -57,38 +56,46 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 
 ```json
 {
-  "centroid_separation_db": 21.3,
+  "separation_proxy": 21.3,
+  "si_sdr": 21.3,
+  "metric_semantics": "centroid_separation_proxy_not_si_sdr",
   "phase_coherence": 0.94,
-  "avg_confidence": 0.89,
-  "artifact_flags": [],
-  "low_confidence_notes": 12,
-  "quality_tier": "studio"
+  "avg_confidence": 0.80,
+  "confidence_encoding": "polyphonic_key_pressure",
+  "artifact_flags": ["none"],
+  "low_confidence_notes": 1,
+  "model_weights_loaded": true,
+  "quality_tier": "draft"
 }
 ```
 
-- **centroid_separation_db** — how spectrally distinct the two stems are, in dB; higher is better, ≥ 20 is the "studio" bar. (It is a heuristic, NOT true SI-SDR — real SI-SDR needs ground truth; renamed from `si_sdr` per C-2.6.)
-- **phase_coherence** — how phase-aligned the two stems are; closer to 1.0 is better.
-- **avg_confidence** — average transcription confidence (0–1).
-- **artifact_flags** — detected problems such as clipping.
-- **low_confidence_notes** — count of MIDI notes below the confidence threshold.
-- **quality_tier** — overall routing decision.
+- **separation_proxy** — a centroid-separation heuristic used for conservative routing; it is not SI-SDR and has no certified dB interpretation. `si_sdr` is a deprecated compatibility alias only.
+- **metric_semantics** — explicit warning for consumers that the proxy is not reference-based SI-SDR.
+- **phase_coherence** — model-reported phase score; closer to 1.0 is not independent audio-quality certification.
+- **avg_confidence** — average confidence over emitted guitar and bass notes (0–1).
+- **confidence_encoding** — MIDI Polyphonic Key Pressure; JSON remains canonical when a DAW ignores poly pressure.
+- **artifact_flags** — detected problems such as clipping or `untrained_weights`.
+- **low_confidence_notes** — count of emitted MIDI notes below the configured confidence threshold, not all low-confidence frames.
+- **model_weights_loaded** — whether a validated checkpoint was loaded.
+- **quality_tier** — heuristic routing decision; `studio` does not certify audio quality.
 
 ### Quality Tiers
 
-**🟢 Studio** — confidence ≥ 85% and SI-SDR ≥ 20 dB. Ready to use as-is.
+**🟢 Studio gate** — confidence ≥ 85%, no low-confidence notes, and no artifact or invalid flags. The reported centroid proxy is observability only; this is a heuristic route, not SI-SDR certification or a promise that the unedited output is correct. A report from untrained weights cannot reach this tier.
 
-**🟡 Draft** — confidence 70–85%. Good starting point; expect to clean up some notes in your DAW.
+**🟡 Draft** — confidence ≥ 70% without blocking artifacts, but below the Studio conditions. Review and refine notes in your DAW.
 
-**🔴 Complex** — confidence < 70% or artifacts detected. The raw output is still delivered, but treat it as a sketch: dense mixes, heavy distortion, or very fast playing often land here.
+**🔴 Complex** — invalid metrics, confidence < 70%, artifacts, or untrained weights. Raw output may be delivered for inspection, but treat it as a sketch.
 
 ## Working with the MIDI in Your DAW
 
-1. Import the WAV stems and the MIDI files at the same project tempo (MIDI note timing is absolute — aligned to the audio, not to a detected tempo grid).
+1. Import the WAV stems and the MIDI files. Note timing is absolute and aligned to the audio-frame grid; no tempo detection is performed.
 2. Assign guitar/bass virtual instruments.
-3. **Use CC#16 to find uncertain notes.** Each note's confidence is encoded as a **CC#16** controller value: 96–127 high confidence, 64–95 medium, 0–63 low. Most DAWs (Reaper, Logic, Cubase, Ableton) let you view or filter by controller data — use that to jump straight to the notes that need attention.
-4. Edit pitch/timing/velocity of the low-confidence notes by ear against the stems.
+3. Use the JSON event metadata as the canonical confidence overlay. MIDI files also contain Polyphonic Key Pressure values: 96–127 high, 64–95 medium, 0–63 low. Some DAWs expose poly pressure as per-note aftertouch; others ignore it. Do not look for CC#127 — it is not emitted.
+4. Edit pitch/timing/velocity of low-confidence notes by ear against the stems. Same-onset and overlapping notes are represented as independent MIDI note events.
+5. If expression data is present, pitch-wheel is bend, CC1 is vibrato, and CC74 is the slide/brightness proxy. Mapping does not imply that the checkpoint learned useful expression.
 
-There is no built-in MIDI editor — your DAW is the editor. MIDI expression data (bend, vibrato, slide) is produced by the model's expression head but is currently untrained, so treat it as advisory only.
+There is no built-in MIDI editor — your DAW is the editor. MIDI import support for poly pressure, pitch bend, and CC lanes varies, so verify the rendered instrument in the target DAW.
 
 ## Tips for Best Results
 
@@ -112,8 +119,8 @@ Only process audio you own or have permission to use — your own recordings, li
 | Low confidence everywhere | Noisy/lo-fi source, dense mix | Use a cleaner recording; check the artifact flags |
 | Stems sound thin or phasey | Source stereo phase issues | Check the original mix; phase_coherence < 0.5 is a warning sign |
 | MIDI misses notes | Very fast passages, heavy distortion | Edit in DAW; consider splitting the song into sections |
-| Extra/ghost notes | Fret noise, string buzz, background sounds | Delete flagged low-CC#16 notes first |
-| `503 Model not loaded` | Server still starting | Wait for startup to finish, retry |
+| Extra/ghost notes | Fret noise, string buzz, background sounds | Review low-confidence JSON/poly-pressure notes first |
+| `503 Model not loaded` | Server still starting or required weights are missing | Set `MODEL_CHECKPOINT_PATH` for native Mamba, or use the explicit pretrained CPU profile, wait for `/ready`, then retry |
 
 ## Getting Help
 

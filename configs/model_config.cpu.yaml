@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-# Stem+MIDI Pro v1.0 — CPU-tuned config (bare-metal i5, 4-8 GB DDR4)
-# Default backends: pretrained Demucs + Basic Pitch (no mamba_ssm required)
+# Stem+MIDI Pro v1.0 — CPU-oriented config (bare-metal i5 target)
+# Selects Demucs + Basic Pitch. Install their optional packages and provide
+# a separately evaluated checkpoint/model cache; this repository ships neither.
 name: "stem_midi_pro_v1_cpu"
 restore_from_path: null
 
 backends:
   separator: demucs
   transcriber: basic_pitch
+  weights_source: pretrained_dependencies
   device: cpu
   demucs_model: htdemucs
   demucs_shifts: 1
@@ -55,4 +57,4 @@ quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
-  min_centroid_separation_db: 20.0  # renamed from min_si_sdr (C-2.6)
+  min_separation_proxy: 20.0  # deprecated metadata only; proxy is not a tier gate or SI-SDR

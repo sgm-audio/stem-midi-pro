@@ -49,6 +49,10 @@ class DemucsSeparatorBackend:
             split=bool(backends.get("demucs_split", True)),
             progress=bool(backends.get("demucs_progress", False)),
         )
+        # Separator construction loads/initializes Demucs' pretrained model;
+        # this is a safe non-random backend weight source, distinct from a
+        # project Mamba checkpoint.
+        self.weights_loaded = True
         log.info(
             "DemucsSeparatorBackend ready model=%s device=%s sr_model=%s",
             model_name,

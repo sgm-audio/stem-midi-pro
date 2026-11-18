@@ -24,6 +24,23 @@ import pytest
 from tests.doubles import frame_count
 from tests.honesty import require
 
+
+def _detect(guitar, bass, source=None):
+    """Call the artifact detector without building a model.
+
+    `_detect_artifacts` is an instance method upstream (it reads `_input_flags`
+    and `_weights_loaded`), but its stem logic is class-qualified, so a bare
+    object carrying `_weights_loaded` is enough.
+    """
+    from types import SimpleNamespace
+
+    from main import StemMidiModel
+
+    return StemMidiModel._detect_artifacts(
+        SimpleNamespace(_weights_loaded=True), guitar, bass, source
+    )
+
+
 torch = require("torch", "audio edge-case tests", module_level=True)
 np = require("numpy", "audio edge-case tests", module_level=True)
 
@@ -205,28 +222,25 @@ def test_mel_basis_is_non_degenerate_and_ordered(transcriber):
 def test_hard_clipped_input_is_flagged(separator, synth):
     x = CORPUS["hard-clipped-square"](synth)
     stems = torch.from_numpy(x)[None, None].float()
-    from main import StemMidiModel
 
-    flags = StemMidiModel._detect_artifacts(stems, stems * 0.5)
+    flags = _detect(stems, stems * 0.5)
     assert "clipping" in flags, f"a ±1.0 square wave was not flagged as clipped: {flags}"
 
 
 def test_clean_loud_audio_is_not_flagged_as_artificial():
-    from main import StemMidiModel
 
     tone = 0.5 * torch.sin(2 * math.pi * 220 * torch.arange(SR).float() / SR)
     tone = tone[None, None]
-    flags = StemMidiModel._detect_artifacts(tone, tone * 0.6)
+    flags = _detect(tone, tone * 0.6)
     assert flags == ["none"], f"clean, unclipped, low-noise material flagged {flags}"
 
 
 def test_correlated_stems_are_not_phase_cancellation(synth):
     """Positive correlation is normal (shared fundamentals); only ~-1 is cancellation."""
-    from main import StemMidiModel
 
     x = torch.from_numpy(CORPUS["pluck-line"](synth))[None, None].float() * 0.3
-    assert "phase_cancellation" not in StemMidiModel._detect_artifacts(x, x)  # identical
-    assert "phase_cancellation" in StemMidiModel._detect_artifacts(x, -x)  # anti-phase
+    assert "phase_cancellation" not in _detect(x, x)  # identical
+    assert "phase_cancellation" in _detect(x, -x)  # anti-phase
 
 
 def test_the_small_test_grid_is_runnable_by_the_real_separator(mock_config):

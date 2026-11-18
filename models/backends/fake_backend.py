@@ -13,6 +13,7 @@ class FakeSeparatorBackend:
 
     def __init__(self, cfg: dict | None = None):
         self.cfg = cfg or {}
+        self.weights_loaded = False
 
     def separate(self, audio: torch.Tensor) -> SeparateOut:
         B, _C, _T = audio.shape
@@ -58,9 +59,13 @@ class FakeTranscriberBackend:
         tr_cfg = (cfg or {}).get("transcriber") or {}
         self.hop = int(audio_cfg.get("hop_length", 512))
         self.n_pitch = int(tr_cfg.get("pitch_vocab_size", 128))
+        self._instrument = "guitar"
+        self.weights_loaded = False
 
     def set_instrument(self, name: str) -> None:
-        pass
+        if name not in {"guitar", "bass"}:
+            raise ValueError(f"Unsupported fake instrument {name!r}")
+        self._instrument = name
 
     def transcribe(self, stem: torch.Tensor) -> TranscribeOut:
         B, _, T = stem.shape
@@ -72,7 +77,7 @@ class FakeTranscriberBackend:
         conf = torch.zeros(B, n_frames, device=stem.device)
 
         frame = min(10, n_frames - 1)
-        note = 60
+        note = 60 if self._instrument == "guitar" else 36
         events = []
         for b in range(B):
             onset[b, frame, 0] = 10.0

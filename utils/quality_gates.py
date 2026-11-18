@@ -16,6 +16,10 @@ KNOWN_ARTIFACT_FLAGS = {
     "phase_cancellation",
     "non_finite",
     "silent_output",
+    # Provenance and input-level flags remain distinct from output artifacts.
+    "untrained_weights",
+    "silence",
+    "dc_offset",
 }
 
 
@@ -27,40 +31,67 @@ class QualityTier(Enum):
 
 @dataclass
 class ProcessingReport:
-    # Renamed from `si_sdr` per C-2.6: this value is the spectral-centroid
-    # separation HEURISTIC from MambaSeparator (how spectrally distinct the
-    # stems are, in dB) — NOT true SI-SDR, which requires ground truth and is
-    # only computed during training (ARCH-11.3.2).
-    centroid_separation_db: float
-    phase_coherence: float
-    avg_confidence: float
-    artifact_flags: list[str]
-    low_confidence_notes: int
+    """Processing metrics and the conservative routing decision.
+
+    ``separation_proxy`` is intentionally named as a proxy. ``si_sdr`` and
+    ``centroid_separation_db`` are deprecated compatibility aliases and are
+    never presented as true reference-based SI-SDR measurements.
+    """
+
+    separation_proxy: float | None = None
+    phase_coherence: float = 0.0
+    avg_confidence: float = 0.0
+    artifact_flags: list[str] | None = None
+    low_confidence_notes: int = 0
     config: dict[str, Any] | None = None
-    # Which Mamba implementation / backend stack produced this result (M-7):
-    # "mamba (pure-torch)" vs "mamba (mamba-ssm)" vs a backend pair like
-    # "separator=demucs,transcriber=basic_pitch".
+    model_weights_loaded: bool | None = None
+    si_sdr: float | None = None  # deprecated input/output compatibility alias
+    centroid_separation_db: float | None = None  # deprecated compatibility alias
     backend: str | None = None
+    # Whether TRAINED weights produced this report, or the repo's
+    # randomly-initialised defaults (HONESTY-1). None = unknown (a report built
+    # by hand, e.g. in a unit test).
+    weights_loaded: bool | None = None
     # How many note events the render actually contains (GATE-3). `None` means
     # "caller did not supply it" -- reports built by older call sites (and test
-    # doubles) keep working, and the empty-render rule then simply does not
-    # apply. Supplying it is what lets the gate refuse to sell an empty MIDI.
+    # doubles) keep working, and the empty-render rule then does not apply.
+    # Supplying it is what lets the gate refuse to sell an empty MIDI.
     note_count: int | None = None
     # True when any metric is NaN/Inf: the render is unusable regardless of
     # what the other numbers say (review §4).
     invalid: bool = field(default=False, init=False)
 
     def __post_init__(self):
+        if self.separation_proxy is None:
+            self.separation_proxy = float(
+                self.centroid_separation_db
+                if self.centroid_separation_db is not None
+                else (self.si_sdr or 0.0)
+            )
+        proxy = float(self.separation_proxy)
+        self.separation_proxy = proxy
+        # Compatibility aliases for older callers. Routing never uses proxy.
+        self.si_sdr = proxy
+        self.centroid_separation_db = proxy
+
+        if self.artifact_flags is None:
+            self.artifact_flags = ["none"]
+        else:
+            self.artifact_flags = list(self.artifact_flags)
+        if self.model_weights_loaded is False and "untrained_weights" not in self.artifact_flags:
+            self.artifact_flags.append("untrained_weights")
+
         gates = (self.config or {}).get("quality_gates", {})
         self.studio_confidence_threshold = gates.get("studio_confidence_threshold", 0.85)
         self.draft_confidence_threshold = gates.get("draft_confidence_threshold", 0.70)
+
         # A NaN/Inf anywhere means the model blew up. This must be checked
         # BEFORE any threshold comparison: `NaN >= x` is always False, so a
         # blown-up render used to skip the STUDIO branch and land on DRAFT via
         # confidence alone ("refine in our editor") instead of being reported
         # as a failure (review §4).
         self.invalid = not all(
-            isinstance(v, (int, float)) and math.isfinite(float(v))
+            isinstance(v, int | float) and math.isfinite(float(v))
             for v in (self.centroid_separation_db, self.phase_coherence, self.avg_confidence)
         )
         # Normalise flags so an unknown flag can never silently bypass the
@@ -71,21 +102,18 @@ class ProcessingReport:
         if self.invalid and "non_finite" not in self.artifact_flags:
             self.artifact_flags.append("non_finite")
 
-        # The centroid value is a saturation-prone proxy, not SI-SDR (C-2.6),
-        # and it is NOT sufficient on its own: one FFT bin of separation
-        # reports exactly 20.00 dB and clears the shipped `min: 20` (review §9).
-        # It is therefore never the *only* test -- see `quality_tier`, which
-        # also demands confidence, zero low-confidence notes and no artifacts.
-        #
-        # But it stays *active*, because all three shipped configs document it
-        # and an inert knob is its own bug class (AUDIT GATE tests). A missing,
-        # non-numeric or non-finite threshold disables just this half.
-        raw_threshold = gates.get("min_centroid_separation_db")
-        self.min_centroid_separation_db = (
-            float(raw_threshold)
-            if isinstance(raw_threshold, (int, float)) and math.isfinite(float(raw_threshold))
-            else None
+        # The centroid value is a saturation-prone proxy, not SI-SDR (C-2.6):
+        # one FFT bin of separation reports exactly 20.00 dB, which clears
+        # `min_si_sdr: 20`. Renaming it (done on main) makes the report honest
+        # but does not make the number discriminating, so it is kept for
+        # observability and removed from the tier decision (review §9).
+        # The threshold attributes remain as compatibility metadata only.
+        self.min_separation_proxy = gates.get(
+            "min_separation_proxy",
+            gates.get("min_centroid_separation_db", gates.get("min_si_sdr", 20.0)),
         )
+        self.min_centroid_separation_db = gates.get("min_centroid_separation_db")
+        self.min_si_sdr = self.min_separation_proxy
         legacy = gates.get("min_si_sdr")
         if legacy is not None:
             warnings.warn(
@@ -108,31 +136,22 @@ class ProcessingReport:
         if real_flags:
             return QualityTier.COMPLEX
         # GATE-3: a render with no notes is not a deliverable, however good its
-        # numbers look. `draft` is a promise that there is something to edit and
-        # `studio`/direct_download is a promise that there is something to use,
-        # so an empty MIDI must fall through to COMPLEX (fallback + refund
-        # options) rather than being sold.
+        # numbers look. `draft` promises there is something to edit and
+        # `studio`/direct_download promises there is something to use, so an
+        # empty MIDI falls through to COMPLEX (fallback + refund options).
         if self.note_count is not None and self.note_count <= 0:
             return QualityTier.COMPLEX
-        # STUDIO requires ALL of: confidence at the studio bar, no individually
-        # unreliable notes, and (when configured) the separation threshold.
-        # Requiring several independent signals is the fix for §9 -- one FFT bin
-        # of centroid separation used to be enough on its own.
-        separation_ok = (
-            self.centroid_separation_db >= self.min_centroid_separation_db
-            if self.min_centroid_separation_db is not None
-            else True
-        )
+        # STUDIO additionally requires that no individual note was unreliable:
+        # a render whose average confidence clears 0.85 while dozens of notes
+        # are individually doubtful is not studio-ready (review §9).
         if (
             self.avg_confidence >= self.studio_confidence_threshold
             and self.low_confidence_notes == 0
-            and separation_ok
         ):
             return QualityTier.STUDIO
-        elif self.avg_confidence >= self.draft_confidence_threshold:
+        if self.avg_confidence >= self.draft_confidence_threshold:
             return QualityTier.DRAFT
-        else:
-            return QualityTier.COMPLEX
+        return QualityTier.COMPLEX
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe view (no NaN/Inf) for `processing_report.json` (review §12).
@@ -164,37 +183,45 @@ class ProcessingReport:
 
 
 def route_by_quality(report: ProcessingReport) -> dict[str, Any]:
-    """
-    Returns user-facing routing decision + UI prompts.
+    """Return honest user-facing routing metadata.
+
+    There is no built-in editor, human-review service, payment flow, or refund
+    system in this repository. Routing therefore points the user to their DAW
+    instead of advertising nonexistent services.
     """
     if report.quality_tier == QualityTier.STUDIO:
         return {
             "action": "direct_download",
-            "badge": "✨ Studio Quality",
-            "message": "Your stems and MIDI are ready for professional use.",
+            "badge": "Heuristic quality gate passed",
+            "message": (
+                "Your stems and MIDI passed the configured heuristic gate. "
+                "Verify them against the source before final use."
+            ),
             "editor_launch": False,
         }
-    elif report.quality_tier == QualityTier.DRAFT:
+    if report.quality_tier == QualityTier.DRAFT:
         return {
-            "action": "editor_launch",
-            "badge": "✏️ Draft Quality",
+            "action": "manual_review",
+            "badge": "Draft quality",
             "message": (
-                f"MIDI confidence: {report.avg_confidence:.0%}. Refine in our editor before export."
+                f"MIDI confidence: {report.avg_confidence:.0%}. "
+                "Review and refine the output in your DAW."
             ),
-            "editor_launch": True,
+            "editor_launch": False,
+            "review_in_daw": True,
             "editor_presets": {
                 "highlight_low_confidence": True,
                 "default_quantization": "human" if report.avg_confidence < 0.80 else "grid",
             },
         }
-    else:  # COMPLEX
-        return {
-            "action": "fallback_options",
-            "badge": "⚠️ Complex Material",
-            "message": "Heavy processing detected. Choose your path:",
-            "options": [
-                {"id": "raw", "label": "Download raw output (free)", "confidence_overlay": True},
-                {"id": "human", "label": "Human-reviewed refinement (+$4.99, 24h)", "upsell": True},
-                {"id": "cancel", "label": "Cancel with full credit refund", "refund": True},
-            ],
-        }
+    return {
+        "action": "manual_review",
+        "badge": "Complex material",
+        "message": "Artifacts or low confidence were detected; review the raw output in your DAW.",
+        "review_in_daw": True,
+        "options": [
+            {"id": "raw", "label": "Download raw output", "confidence_overlay": True},
+            {"id": "human", "label": "Review and edit in your DAW"},
+            {"id": "cancel", "label": "Discard this output"},
+        ],
+    }

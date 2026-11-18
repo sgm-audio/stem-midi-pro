@@ -263,17 +263,21 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
     api, _ = api_env
     zf = _zip(_post(api, tmp_path, _wav_bytes()))
     assert json.loads(zf.read("processing_report.json")) == {
-        "centroid_separation_db": 6.5,
+        "separation_proxy": 6.5,
+        "si_sdr": 6.5,
+        "metric_semantics": "centroid_separation_proxy_not_si_sdr",
         "phase_coherence": 0.42,
         "avg_confidence": 0.55,
+        "confidence_encoding": "polyphonic_key_pressure",
         "artifact_flags": ["none"],
         "low_confidence_notes": 0,
+        "model_weights_loaded": None,
         "quality_tier": "complex",
         # delivered since JSON-1/DOC-2: the render is finite, and the backend
         # key is always present so a parser never branches on its existence.
         "invalid": False,
         "backend": None,
-    }, "the ZIP report disagrees with the pipeline's QualityReport"
+    }, "the ZIP report disagrees with the pipeline's ProcessingReport"
 
 
 @pytest.mark.parametrize(
@@ -477,30 +481,6 @@ def _report_json_from_zip(api_env, tmp_path):
     api, _ = api_env
     zf = _zip(_post(api, tmp_path, _wav_bytes(seconds=0.2)))
     return json.loads(zf.read("processing_report.json"))
-
-
-def test_the_documented_confidence_controller_is_the_one_the_writer_emits():
-    """A documented MIDI controller is an API promise: it must be the one we emit."""
-    from utils.midi import DEFAULT_CONFIDENCE_CC, resolve_confidence_cc
-
-    assert DEFAULT_CONFIDENCE_CC == resolve_confidence_cc() == 16
-    offenders = []
-    for name in _DOC_FILES:
-        text = (ROOT / name).read_text(encoding="utf-8")
-        mentions_127 = [
-            ln.strip()
-            for ln in text.split("\n")
-            if re.search(r"CC\s*#?127", ln) and re.search(r"confidence", ln, re.I)
-        ]
-        if not mentions_127:
-            continue
-        if re.search(r"CC\s*#?16|MIDI_CONFIDENCE_CC", text):
-            continue  # the file explains the default and the opt-in
-        offenders.append(f"{name}: {mentions_127[0][:110]}")
-    assert not offenders, (
-        "docs promise CC#127 for confidence without mentioning that the writer emits CC#16:\n"
-        + "\n".join(offenders)
-    )
 
 
 def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path, monkeypatch):

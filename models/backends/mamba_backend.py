@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Mamba-SSM backends.
+"""Mamba backends using the native module and its CPU fallback.
 
-These wrap the built-in Mamba modules. They do NOT require the
-``mamba_ssm`` CUDA package: on CPU targets the modules run the pure-PyTorch
-fallback in ``models/_mamba_compat.py`` (see ``MAMBA_BACKEND``)."""
+These wrappers do not require the optional ``mamba_ssm`` CUDA package on the
+CPU target; the pure-PyTorch fallback in ``models/_mamba_compat.py`` is used
+when it is unavailable. Native Mamba weights still require a project
+checkpoint before file/API inference.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ class MambaSeparatorBackend(nn.Module):
         from models.mamba_separator import MambaSeparator
 
         self.module = MambaSeparator(cfg)
+        self.weights_loaded = False
 
     def separate(self, audio: torch.Tensor) -> SeparateOut:
         guitar, bass, residual, _cache, metrics = self.module(audio)
@@ -43,6 +46,7 @@ class MambaTranscriberBackend(nn.Module):
         from models.mamba_transcriber import MambaTranscriber
 
         self.module = MambaTranscriber(cfg)
+        self.weights_loaded = False
 
     def set_instrument(self, name: str) -> None:
         pass

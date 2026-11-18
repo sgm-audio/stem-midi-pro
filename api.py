@@ -50,7 +50,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from audio_io import AudioValidationError, open_and_validate
-from utils.midi import HOP_LENGTH, build_midi_from_events
+from utils.midi import build_midi_from_events
 from utils.template_engine import list_templates, render_template
 
 # ---------------------------------------------------------------------------
@@ -276,14 +276,37 @@ def load_model():
 
     _import_model()  # lazy: keeps `import api` torch-free
 
-    checkpoint_path = os.getenv("MODEL_CHECKPOINT_PATH")
-    if checkpoint_path and os.path.exists(checkpoint_path):
+    checkpoint_path = os.getenv("MODEL_CHECKPOINT_PATH") or model_config.get("restore_from_path")
+    if checkpoint_path:
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                f"Configured model checkpoint does not exist: {checkpoint_path}. "
+                "Set MODEL_CHECKPOINT_PATH to a trained .pt file."
+            )
         log_event("info", "loading_checkpoint", checkpoint=checkpoint_path)
-
         m = load_from_checkpoint(checkpoint_path, config_path)
-    else:
-        m = StemMidiModel(model_config)
+        m.eval()
+        return m
 
+    # Demucs + Basic Pitch can be safe without a project state_dict because
+    # their constructors provide their own pretrained weights. Require an
+    # explicit config declaration and verify both backend attestations; never
+    # infer safety merely from a backend name.
+    backends = model_config.get("backends") or {}
+    if backends.get("weights_source") != "pretrained_dependencies":
+        raise RuntimeError(
+            "No trained checkpoint is configured. Set MODEL_CHECKPOINT_PATH "
+            "for the Mamba path, or explicitly configure the tested pretrained "
+            "backend pair with weights_source: pretrained_dependencies. The API "
+            "will remain not ready rather than serving random model weights."
+        )
+    log_event("info", "loading_pretrained_backends", backends=backends)
+    m = StemMidiModel(model_config)
+    if not getattr(m, "weights_loaded", False):
+        raise RuntimeError(
+            "Configured pretrained backends did not attest to loaded weights. "
+            "Install the selected dependencies or provide MODEL_CHECKPOINT_PATH."
+        )
     m.eval()
     return m
 
@@ -323,6 +346,8 @@ async def lifespan(app: FastAPI):
     global model, _model_ready, _processing_sem
     _configure_logging()
     _processing_sem = asyncio.Semaphore(1)
+    model = None
+    _model_ready = False
 
     log_event("info", "model_loading")
     try:
@@ -604,7 +629,9 @@ def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
 def create_response_zip(outputs: dict) -> io.BytesIO:
     """Create a ZIP in memory: stems (wav) + MIDI + processing report."""
     zip_buffer = io.BytesIO()
-    sr = (model_config or {}).get("audio", {}).get("sample_rate", 44100)
+    audio_cfg = (model_config or {}).get("audio", {})
+    sr = int(outputs.get("sample_rate", audio_cfg.get("sample_rate", 44100)))
+    hop_length = int(audio_cfg.get("hop_length", 512))
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for stem_name in ("guitar", "bass"):
@@ -618,36 +645,33 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             zip_file.writestr(f"{stem_name}_stem.wav", buf.getvalue())
 
         midi_pkg = outputs["midi"]
-        # MIDI-5: the frames come from the configured analysis grid, so the
-        # writer must be told what that grid is. Letting it fall back to its
-        # module defaults (hop 512 / 44.1 kHz) puts every event ~2.75x off in
-        # time for a 16 kHz / hop-128 model.
-        grid = {
-            "hop_length": outputs.get("hop_length", HOP_LENGTH),
-            "sample_rate": outputs.get("sample_rate", sr),
-        }
+        guitar_midi = _stem_midi_data(midi_pkg, "guitar")
+        bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
             "guitar.mid",
-            build_midi_from_events(_stem_midi_data(midi_pkg, "guitar"), "guitar", **grid),
+            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
         )
         zip_file.writestr(
             "bass.mid",
-            build_midi_from_events(_stem_midi_data(midi_pkg, "bass"), "bass", **grid),
+            build_midi_from_events(bass_midi, "bass", hop_length=hop_length, sample_rate=sr),
         )
 
         report = outputs["report"]
-        # JSON-1: `json.dumps` defaults to allow_nan=True, so a NaN metric --
-        # which the pipeline really produces for silent, DC and non-finite
-        # input -- emitted bare `NaN`, which is not valid RFC 8259 and makes
-        # browsers' JSON.parse() reject the WHOLE download. `as_dict()` maps
-        # non-finite values to null; allow_nan=False then makes any survivor a
-        # hard error rather than a silently-invalid artefact.
-        # `processing_report.json` is a paid artefact and its key set is a
-        # published contract (API_DOCUMENTATION.md "Processing Report Schema"),
-        # asserted in both directions by tests/test_api_zip.py. `as_dict()`
-        # carries extra internal fields, so the delivery payload is built
-        # explicitly from the documented set -- with the same NaN handling.
+        separation_proxy = float(
+            getattr(
+                report,
+                "separation_proxy",
+                getattr(report, "centroid_separation_db", getattr(report, "si_sdr", 0.0)),
+            )
+        )
 
+        # JSON-1: `json.dumps` defaults to allow_nan=True, so a NaN metric --
+        # which the pipeline really produces for silent, DC and non-finite input
+        # -- emitted a bare `NaN` token. That is not valid RFC 8259 and makes
+        # browsers' JSON.parse() reject the WHOLE download, not just the field.
+        # Every float goes through `_safe`, which maps a non-finite value to
+        # null, and the dump uses allow_nan=False so any survivor is a hard
+        # error rather than a silently-invalid paid artefact.
         def _safe(value):
             try:
                 fvalue = float(value)
@@ -656,11 +680,19 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             return fvalue if math.isfinite(fvalue) else None
 
         report_json = {
-            "centroid_separation_db": _safe(report.centroid_separation_db),
+            "separation_proxy": _safe(separation_proxy),
+            # Deprecated compatibility alias. This value is not SI-SDR and
+            # must not be read as a reference-based dB certification.
+            "si_sdr": _safe(separation_proxy),
+            "metric_semantics": "centroid_separation_proxy_not_si_sdr",
             "phase_coherence": _safe(report.phase_coherence),
             "avg_confidence": _safe(report.avg_confidence),
-            "artifact_flags": list(report.artifact_flags),
-            "low_confidence_notes": int(report.low_confidence_notes),
+            "confidence_encoding": guitar_midi.get("summary", {}).get(
+                "confidence_encoding", "polyphonic_key_pressure"
+            ),
+            "artifact_flags": report.artifact_flags,
+            "low_confidence_notes": report.low_confidence_notes,
+            "model_weights_loaded": getattr(report, "model_weights_loaded", None),
             "quality_tier": report.quality_tier.value,
             "invalid": bool(getattr(report, "invalid", False)),
             # M-7: which implementation produced this render. Always present so
@@ -884,7 +916,14 @@ async def get_model_info():
     backend = getattr(model, "backend_name", None)
     return {
         "model_name": cfg.get("name", "unknown"),
-        "backend": backend,  # M-7: which Mamba implementation / backend pair
+        "backend": backend,  # Which implementation / backend pair produced output.
+        # Report both the active Mamba implementation and the compatibility
+        # checkpoint flag; clients can distinguish random/native inference from
+        # a validated checkpoint or backend-owned pretrained weights.
+        "mamba_backend": getattr(model, "mamba_backend", None),
+        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
+        "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
+        "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),
         "separator_config": cfg.get("separator", {}),
         "transcriber_config": cfg.get("transcriber", {}),

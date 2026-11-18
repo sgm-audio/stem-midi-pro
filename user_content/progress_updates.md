@@ -3,8 +3,9 @@
      filename, avg_confidence, low_confidence_notes (from processing_report.json keys).
      Per-stage live progress (current_stage, total_stages) is NOT available yet —
      the pipeline reports only at completion. -->
-This runs on CPU: expect roughly 30–60 seconds of processing per minute of audio
-(a 3-minute song typically takes 1.5–3 minutes).
+This runs on CPU. No reference-hardware timing guarantee is published until a
+trained-checkpoint benchmark is recorded; processing time depends on backend,
+checkpoint, input length, and hardware.
 
 When done you'll get:
 • Confidence: {{avg_confidence}}

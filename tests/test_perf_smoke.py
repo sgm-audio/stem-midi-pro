@@ -120,6 +120,10 @@ def test_chunked_processing_stays_inside_the_budget():
     with open(root / "configs" / "model_config.yaml") as fh:
         cfg = yaml.safe_load(fh)
     cfg["audio"]["chunk_duration_sec"] = 2.0
+    # Upstream refuses to run `process_audio_file` on random weights unless this
+    # is set. That guard is correct for production; this is a memory gate, so it
+    # opts in explicitly rather than the check being weakened.
+    cfg["allow_untrained_inference"] = True
 
     sr = int(cfg["audio"]["sample_rate"])
     seconds = 6

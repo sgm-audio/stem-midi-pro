@@ -30,7 +30,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint
+import torch.utils.checkpoint  # must follow `import torch`
 
 # `import torch` alone does NOT bind torch.utils.checkpoint: the submodule only
 # appears on the parent package once something imports it. MambaBackbone.forward

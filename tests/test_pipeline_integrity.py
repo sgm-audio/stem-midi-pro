@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 
 import pytest
 
@@ -177,13 +178,13 @@ def test_api_zip_uses_per_stem_midi(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_model_confidence_reaches_the_confidence_controller_unchanged(pipeline_config):
-    """Per-frame confidence must arrive in the SMF as a CC byte with no re-scaling.
+def test_model_confidence_reaches_poly_pressure_unchanged(pipeline_config):
+    """Per-frame confidence must reach Polyphonic Key Pressure without re-scaling.
 
-    Pass-today regression lock: it is the only test in the suite that follows a
-    confidence value from the transcriber output to the MIDI bytes. It fails if
-    anyone swaps the mapping (``round`` vs ``int``), clamps it, or lets the
-    alignment score leak into the CC — all of which are silent to a dict-key test.
+    Pass-today regression lock: it follows a confidence value from transcriber
+    output through the MIDI metadata and into the SMF. It fails if anyone swaps
+    the mapping (``round`` vs ``int``), clamps it, or lets alignment leak into
+    the note-specific pressure value.
     """
     confs = [0.25, 0.5, 0.75, 1.0]
     frames = [4, 20, 40, 60]
@@ -218,9 +219,10 @@ def test_model_confidence_reaches_the_confidence_controller_unchanged(pipeline_c
         f"the confidence CC changed on the way into the SMF (CC#16): events say {got_cc}, "
         f"the file carries {parsed['cc_values']}"
     )
+    expected_note_confidence = sum(event["confidence"] for event in events) / len(events)
     assert (
-        abs(out["processing_report"].avg_confidence - float(conf.mean())) < 1e-6
-    ), "report.avg_confidence must be the transcriber's mean confidence, not a constant"
+        abs(out["processing_report"].avg_confidence - expected_note_confidence) < 1e-6
+    ), "report.avg_confidence must average emitted-note confidence, not a constant"
 
 
 def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
@@ -498,7 +500,10 @@ def test_zero_onsets_never_produce_notes(pipeline_config):
 
 def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     """0 notes with happy metrics must route to fallback_options, not direct_download."""
-    guitar = torch.full((1, 1, SR), 0.2)  # clean, non-silent, no artifact flags
+    # A 220 Hz TONE, not torch.full(...): a constant is pure DC, and once
+    # _detect_artifacts flags input DC offset this fixture routes to COMPLEX for
+    # that reason instead of exercising the empty-render path this test pins.
+    guitar = 0.2 * torch.sin(2 * math.pi * 220 * torch.arange(SR).float() / SR)[None, None]
     model = _model_with_stems(pipeline_config, guitar, guitar * 0.5, onsets=[], pitches=[])
     with torch.inference_mode():
         out = model(guitar)
@@ -510,7 +515,9 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
         f"avg_confidence={report.avg_confidence:.2f} / "
         f"centroid_separation_db={report.centroid_separation_db:.1f}"
     )
-    assert out["routing_decision"]["action"] == "fallback_options"
+    # COMPLEX routes to `manual_review` upstream (the two COMPLEX actions --
+    # `fallback_options` and `manual_review` -- were merged into one).
+    assert out["routing_decision"]["action"] == "manual_review"
 
 
 @pytest.mark.real_mamba

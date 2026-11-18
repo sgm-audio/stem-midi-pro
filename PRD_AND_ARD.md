@@ -1,5 +1,9 @@
 # Stem+MIDI Pro — Product Requirements & Architecture Requirements Document
 
+> **Current-status note (2026-11):** This is a draft requirements/history document, not evidence that the current repository ships trained quality. See [VERIFICATION_MATRIX.md](VERIFICATION_MATRIX.md) for the current contract: native Mamba file inference requires a validated project checkpoint, while the explicit pretrained-backend profile supplies its own dependency weights; `separation_proxy` is not SI-SDR, confidence is JSON/Polyphonic Key Pressure rather than CC#127, and no reference-hardware or held-out quality claim is certified.
+>
+> **Reading the requirements below:** Part I and the original ARD preserve aspirational targets and historical design context for traceability. They are not current service guarantees. The current CPU/checkpoint/backend contract is documented in `README.md`, `SETUP.md`, `API_DOCUMENTATION.md`, `ARCHITECTURE.md`, and ADR 0007.
+
 > **Version:** 1.0-draft  
 > **Status:** Internal — for review and revision  
 > **Generated from:** codebase audit of the Stem+MIDI Pro prototype repository
@@ -76,14 +80,14 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 - Output standard MIDI files compatible with all major DAWs.
 
 ### F3: Confidence-Aware Quality Routing
-- Per-note confidence scores embedded as MIDI CC#127 metadata.
+- Per-note confidence scores in canonical JSON, with optional note-specific MIDI Polyphonic Key Pressure (the former CC#127 requirement is superseded by ADR 0007).
 - Three-tier routing: Studio (direct download), Draft (editor prompt), Complex (human review).
 - Per-note "needs review" flagging for low-confidence events.
 
 ### F4: DAW-Ready Output Package
 - WAV stems (guitar, bass).
 - MIDI files with expression CC data + confidence metadata.
-- JSON processing report (SI-SDR, phase coherence, artifact flags, quality tier).
+- JSON processing report (current runtime: `separation_proxy`, phase coherence, artifact flags, model status, and quality tier; reference-based SI-SDR remains an evaluation requirement).
 - Tempo and tuning metadata for DAW alignment.
 
 ### F5: API & Integration
@@ -96,9 +100,13 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 - Synthetic data fallback for development.
 - Data augmentation (time stretch, pitch shift, noise, gain).
 
-## 1.4 Quality Tier System
+## 1.4 Quality Tier System (original target, not current certification)
 
-| Tier | Confidence | SI-SDR | User Action | UI Treatment |
+The original product target used a reference-based separation metric. The current
+runtime uses a centroid-separation proxy instead, and no tier certifies audio or
+transcription quality without trained/evaluated weights.
+
+| Tier | Confidence | Reference metric target | User Action | UI Treatment |
 |------|-----------|--------|-------------|--------------|
 | **Studio** | ≥85% | ≥20 dB | Direct download | Green badge, no editor prompt |
 | **Draft** | 70–85% | any | Editor launch | Yellow badge, highlight low-confidence notes |
@@ -118,7 +126,10 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 5. **Mobile-friendly web upload** (future).
 6. **Processing estimate before start**: Show expected wait time based on file length.
 
-## 1.6 Performance Requirements
+## 1.6 Performance Requirements (original targets; not benchmark-certified)
+
+No target-hardware benchmark is committed. The historical values below are
+requirements to validate or revise, not current performance claims.
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
@@ -154,18 +165,23 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 - Mamba-SSM linear-time architecture (lower VRAM than Transformer-based competitors).
 - Canadian artist dataset alignment.
 
-## 1.9 Constraints & Assumptions
+## 1.9 Constraints & Assumptions (current status)
 
-1. **Mamba-SSM requires CUDA** — no CPU or Mac inference.
-2. **NeMo ModelPT** is the chosen framework — adds significant install complexity.
-3. **No labelled dataset exists yet** — all dataset loaders are stubs.
-4. **FP8 precision** maps to FP16 in Lightning until TransformerEngine is integrated.
-5. **Guitar + bass only** — drums, vocals, keys are out of scope for v1.
-6. **Single-GPU inference** — no model parallelism in v1.
+1. **CPU-only target:** the repository uses a pure-PyTorch Mamba fallback; the optional `mamba_ssm` package may require CUDA tooling to build and is not a hard dependency.
+2. **NeMo ModelPT and PyTorch Lightning are removed** from the current path; `StemMidiModel` and `train.py` are plain PyTorch.
+3. **No trained checkpoint or held-out quality evidence is shipped.** Dataset loaders and synthetic fallback support development, not a shippable quality claim.
+4. **FP8/CUDA graph requirements are removed** from the current CPU path.
+5. **Guitar + bass only** — drums, vocals, and keys are out of scope for v1.
+6. **Single-process inference** is the current service contract; no target-hardware throughput is certified.
 
 ---
 
 # Part II: Architecture Requirements Document (ARD)
+
+> The diagrams and infrastructure table in this draft retain the original
+> NeMo/GPU architecture for historical traceability. They are superseded for
+> the current path by the plain-PyTorch CPU implementation in `ARCHITECTURE.md`
+> and ADRs 0002, 0003, and 0007.
 
 ## 2.1 System Architecture Overview
 
@@ -217,7 +233,7 @@ Deliver an AI service that separates mixed audio into guitar/bass stems and tran
 ### C4: Confidence Injection (`ConfidenceInjector`)
 - Cross-modal validation: align MIDI onsets with stem energy peaks.
 - Per-note: confidence score, stem energy, alignment score, `needs_review` flag.
-- DAW metadata: CC#127 confidence, quantization suggestion (`grid` / `human`).
+- DAW metadata: canonical JSON confidence, optional Polyphonic Key Pressure, and quantization suggestion (`grid` / `human`).
 
 ### C5: Loss Functions (`PerceptualAudioLoss`)
 | Loss | Weight | Purpose |
@@ -272,19 +288,20 @@ Response: application/zip containing:
 Errors:   400 (bad file), 503 (model not loaded), 500 (processing error)
 ```
 
-### `GET /health`
+### `GET /live`, `GET /ready`, and `GET /health`
 ```
-Response: {"status": "healthy", "model_loaded": true}
-Errors:   503 if model not loaded
+/live:  {"status": "alive"} (always 200)
+/ready: {"status": "ready", "model_loaded": true} or 503 while unavailable
+/health: deprecated alias of /ready
 ```
 
 ### `GET /model-info`
 ```
-Response: model config (audio, separator, transcriber, training, quality_gates)
-Errors:   503 if model not loaded
+Response: model config plus selected backends and checkpoint_loaded
+Errors:   503 if model not ready
 ```
 
-## 2.5 Infrastructure Requirements
+## 2.5 Infrastructure Requirements (historical draft)
 
 | Resource | Requirement | Notes |
 |----------|-------------|-------|
@@ -304,15 +321,15 @@ Errors:   503 if model not loaded
 2. **File validation**: reject by extension, duration, sample rate, content inspection.
 3. **Minimal attack surface**: inference-only model (no training endpoints).
 4. **GDPR by design**: no personal data collection, ephemeral containers, auditable logs.
-5. **CORS**: restrict `allow_origins` in production (currently `["*"]`).
-6. **Auth (future)**: API key or JWT for production deployment.
+5. **CORS**: use the `CORS_ORIGINS` allowlist; wildcard mode disables credentials.
+6. **Auth:** optional comma-separated `API_KEYS` protect `/process` with `Authorization: Bearer <key>`; health/docs endpoints remain open.
 
 ## 2.7 Monitoring & Observability
 
 | Category | Metrics |
 |----------|---------|
 | **Latency** | Per-stage timing (upload, separation, transcription, packaging) |
-| **Quality** | SI-SDR, phase coherence, avg confidence, artifact rate, tier distribution |
+| **Quality** | separation proxy (not SI-SDR), phase score, avg confidence, artifact flags, tier distribution; reference SI-SDR remains an evaluation metric |
 | **Resource** | GPU util, VRAM, CPU, memory, request queue depth |
 | **Errors** | 4xx/5xx rate, model load failures, validation failures |
 | **Business** | Files processed, studio/draft/complex ratio, human review take rate |
@@ -324,13 +341,16 @@ Errors:   503 if model not loaded
 # Syntax check (fast)
 python check_syntax.py
 
-# Smoke test with synthetic data
+# Smoke test with synthetic data (random weights; structural only)
 python demo.py
 
-# CLI inference (audio path ignored — returns dummy)
-python main.py --audio path/to/file.wav
+# CLI inference with a validated project checkpoint
+python main.py --audio path/to/file.wav \
+  --config configs/model_config.yaml \
+  --checkpoint path/to/trained_checkpoint.pt
 
-# Dev API server
+# Dev API server (set MODEL_CHECKPOINT_PATH first, unless using the explicit
+# pretrained CPU backend config)
 uvicorn api:app --reload          # or: python api.py
 
 # Training (synthetic data by default)
@@ -339,8 +359,9 @@ python train.py --config configs/model_config.yaml --data-config example_data_co
 
 ### Required Order
 1. `python check_syntax.py` — AST-level syntax check.
-2. `python demo.py` — verify model instantiates and runs forward pass.
-3. `python api.py` — integration test through API.
+2. `python demo.py` — verify the random-weight structural smoke path.
+3. `python -m pytest -q -m "not cuda"` — run the contract/regression suite.
+4. Exercise the API only with a validated checkpoint or the explicit pretrained CPU backend pair.
 
 ## 2.9 Testing Strategy
 
@@ -356,14 +377,10 @@ python train.py --config configs/model_config.yaml --data-config example_data_co
 - Use `tmp_path` fixture for temp file testing.
 - Test quality gates with synthetic metrics.
 
-**To be created:**
-- `tests/test_separator.py`
-- `tests/test_transcriber.py`
-- `tests/test_losses.py`
-- `tests/test_quality_gates.py`
-- `tests/test_api.py`
-- `tests/test_integration.py`
-- `conftest.py` with shared fixtures and mock model
+**Current/target coverage:**
+- Existing component, loss, quality-gate, API, integration, MIDI, and checkpoint tests live under `tests/`.
+- `tests/test_remediation_contracts.py` covers the checkpoint, backend, independent-stream, timing, expression, confidence, and report contracts.
+- Additional real-audio, target-hardware, optional-backend, and DAW tests remain evidence work.
 
 ## 2.10 Build, CI/CD & Release
 
@@ -454,13 +471,13 @@ All issues discovered during codebase audit at commit `51d28b7`. **Many items be
 
 | ID | Pain Point | Impact |
 |----|------------|--------|
-| P1 | **Mamba-SSM requires CUDA with custom kernel compilation**. The `mamba_ssm` package compiles `selective_scan_fn` and `causal_conv1d` CUDA kernels. Cannot test on CPU or Mac. | Blocks development on most laptops. Requires cloud GPU or desktop with NVIDIA GPU. |
-| P2 | **NeMo toolkit is a massive, slow-to-install dependency** with many transitive deps (Megatron, Apex, etc.). Full install can take 30+ min and 10+ GB. | High friction for new contributors. |
+| P1 | **Historical Mamba-SSM CUDA build constraint.** The optional `mamba_ssm` package may compile CUDA kernels, but the current production path has a pure-PyTorch CPU fallback and does not require it. | Optional backend installation still needs platform-specific validation; CPU structural tests do not require it. |
+| P2 | **Historical NeMo dependency concern.** NeMo and PyTorch Lightning were removed from the current path. | Current contributors use the plain PyTorch module/loop; this historical pain point is resolved. |
 | P3 | **`verify_structure.py` hardcodes `stem_midi_pro/` prefix** but files are at repo root. Running it from repo root always reports all files as missing. | Confusing for new developers trying to verify setup. |
-| P4 | **No `.nemo` checkpoint exists** — model is randomly initialized. All outputs are garbage. Cannot evaluate quality without training. | Impossible to validate results. |
-| P5 | **`api.py` imports `from main import StemMidiModel` at module level**, which triggers YAML loading and model instantiation. Importing any utility from `api.py` will try to load the model. | Tight coupling makes it hard to test utilities independently. |
-| P6 | **`requirements.txt` lists `tensorrt>=8.6.0` and `torch-trt>=0.2.0`** but neither is used anywhere in the code. These require NVIDIA-specific install procedures and will fail on non-NVIDIA systems. | `pip install -r requirements.txt` may fail on non-NVIDIA machines. |
-| P7 | **Loss functions advertised but not fully implemented**: docstrings claim onset F1, pitch cross-entropy, velocity MAE losses but only cross-modal alignment is wired. | Training gradients may be incomplete or misleading. |
+| P4 | **No trained checkpoint exists.** Random-initialized forwards are available for tests/training, but file/API inference now refuses them. | Quality cannot be evaluated or certified without an external trained checkpoint and held-out data. |
+| P5 | **Resolved:** `api.py` imports the model lazily and does not instantiate it at module import. | Utilities can be imported independently; model loading happens during lifespan or an explicit call. |
+| P6 | **Resolved:** the core requirements no longer include unused TensorRT packages. | CPU installation avoids the former NVIDIA-only dependency trap; optional pretrained backends remain separately installed. |
+| P7 | **Loss functions advertised but not fully wired**: onset F1, pitch cross-entropy, velocity MAE, and duration IoU implementations exist, but only stem/onset targets are currently passed by the orchestrator. | Training gradients remain incomplete for the un-wired multitask terms. |
 
 ---
 

@@ -2,8 +2,8 @@
 """MIDI round-trip tests (T-8.3.6).
 
 Build a MidiFile with N events, save to bytes, re-parse, and verify event
-count and CC#127 values survive. Would have caught API-6.12 (fixed 1/16
-note duration ignoring duration_frames).
+count and note-specific confidence values survive. Would have caught API-6.12
+(fixed 1/16 note duration ignoring duration_frames).
 """
 
 import io
@@ -18,7 +18,7 @@ from utils.midi import build_midi_from_events  # noqa: E402
 
 @pytest.mark.parametrize("n_events", [0, 1, 3, 10])
 def test_event_count_roundtrip(n_events):
-    """N input events → N note_on + N note_off + N CC#127 on re-parse."""
+    """N input events → N note_on + N note_off + N poly-pressure messages."""
     events = [
         {
             "note": 40 + i,
@@ -34,15 +34,15 @@ def test_event_count_roundtrip(n_events):
     track = mid.tracks[0]
     note_ons = [m for m in track if m.type == "note_on"]
     note_offs = [m for m in track if m.type == "note_off"]
-    ccs = [m for m in track if m.type == "control_change" and m.control == 16]
+    pressures = [m for m in track if m.type == "polytouch"]
 
     assert len(note_ons) == n_events
     assert len(note_offs) == n_events
-    assert len(ccs) == n_events
+    assert len(pressures) == n_events
 
 
-def test_cc127_values_roundtrip():
-    """Legacy CC#127 values must match int(confidence*127) after re-parse."""
+def test_confidence_values_roundtrip():
+    """Note-specific confidence values match int(confidence*127)."""
     confidences = [0.1, 0.5, 0.9, 1.0]
     events = [
         {
@@ -53,15 +53,18 @@ def test_cc127_values_roundtrip():
         }
         for i, c in enumerate(confidences)
     ]
-    midi_bytes = build_midi_from_events({"midi_events": events}, "bass", confidence_cc=127)
+    midi_bytes = build_midi_from_events({"midi_events": events}, "bass")
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
 
-    ccs = [m.value for m in mid.tracks[0] if m.type == "control_change"]
-    assert ccs == [round(c * 127) for c in confidences]
+    pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
+    # MIDI-4: round, not truncate -- 0.9*127 = 114.3 must be 114 (round and
+    # truncate agree here), but 0.5*127 = 63.5 must be 64, not 63. Upstream
+    # introduced the same `int()` on the Polyphonic Key Pressure lane.
+    assert pressures == [round(c * 127) for c in confidences]
 
 
-def test_explicit_cc127_overrides_confidence():
-    """An explicit cc_127_value must win over the confidence-derived value."""
+def test_explicit_confidence_value_overrides_confidence():
+    """An explicit legacy confidence value must win over confidence-derived value."""
     events = [
         {
             "note": 64,
@@ -71,10 +74,10 @@ def test_explicit_cc127_overrides_confidence():
             "cc_127_value": 42,
         }
     ]
-    midi_bytes = build_midi_from_events({"midi_events": events}, "guitar", confidence_cc=127)
+    midi_bytes = build_midi_from_events({"midi_events": events}, "guitar")
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
-    ccs = [m.value for m in mid.tracks[0] if m.type == "control_change"]
-    assert ccs == [42]
+    pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
+    assert pressures == [42]
 
 
 def test_duration_frames_honoured():

@@ -27,11 +27,10 @@ def test_load_from_checkpoint_accepts_model_state_dict_key(tmp_path):
     """Exported checkpoints use the "model_state_dict" key — the loader must read it.
 
     scripts/export_fine_tuned.py:105, scripts/verify_cpu_export.py:121 and
-    scripts/fine_tune_demucs.py:196 all SAVE {"model_state_dict": ...}, and
-    scripts/runpod_deploy.py:131 reads ckpt["model_state_dict"], but
-    main.load_from_checkpoint only pops "state_dict" and then feeds the wrapper
-    dict to load_state_dict → RuntimeError. So every artifact the repo's own
-    export scripts produce fails to load through the documented entry point.
+    scripts/fine_tune_demucs.py:196 all save {"model_state_dict": ...}, and
+    scripts/runpod_deploy.py:131 reads ckpt["model_state_dict"]. The loader
+    accepts that wrapper as well as train.py's "state_dict" and a bare mapping,
+    so the repository's checkpoint formats share one documented entry point.
     """
     from main import StemMidiModel, load_from_checkpoint
 

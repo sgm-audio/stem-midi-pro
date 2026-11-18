@@ -70,11 +70,52 @@ def _tier(**kw):
 # ---------------------------------------------------------------------------
 
 
-def test_thresholds_come_from_the_config_not_from_hardcoded_defaults():
-    """Same numbers, different gate config → different commercial outcome."""
-    strict, _ = _tier(centroid_separation_db=19.0, avg_confidence=0.86)
+def test_confidence_thresholds_come_from_the_config_not_from_defaults():
+    """Confidence thresholds decide the tier; the proxy is observability-only."""
     from utils.quality_gates import ProcessingReport
 
+    strict = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "studio_confidence_threshold": 0.95}},
+    )
+    lenient = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "studio_confidence_threshold": 0.85}},
+    )
+    assert strict.quality_tier is not lenient.quality_tier
+
+    lowered = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
+    )
+    raised = ProcessingReport(
+        centroid_separation_db=19.0,
+        phase_coherence=0.5,
+        avg_confidence=0.86,
+        artifact_flags=["none"],
+        low_confidence_notes=0,
+        config={"quality_gates": {**GATES, "min_centroid_separation_db": 25.0}},
+    )
+    assert lowered.quality_tier is raised.quality_tier
+
+
+def test_proxy_thresholds_do_not_control_the_quality_tier():
+    """The centroid proxy is reported for observability, not used as a gate."""
+    from utils.quality_gates import ProcessingReport, QualityTier
+
+    strict, _ = _tier(centroid_separation_db=19.0, avg_confidence=0.86)
     lenient = ProcessingReport(
         centroid_separation_db=19.0,
         phase_coherence=0.5,
@@ -83,26 +124,9 @@ def test_thresholds_come_from_the_config_not_from_hardcoded_defaults():
         low_confidence_notes=0,
         config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
     )
-    assert strict is not lenient.quality_tier, (
-        f"min_centroid_separation_db 20 -> {strict.value}, 10 -> {lenient.quality_tier.value}: "
-        "the gate ignores its own config"
-    )
-
-    # C-2.6 renamed the field but kept the old CONFIG key working on purpose (every
-    # shipped yaml used `min_centroid_separation_db`); a user with an existing config must not
-    # silently get the 20.0 default instead of the threshold they wrote.
-    legacy = ProcessingReport(
-        centroid_separation_db=19.0,
-        phase_coherence=0.5,
-        avg_confidence=0.86,
-        artifact_flags=["none"],
-        low_confidence_notes=0,
-        config={"quality_gates": {**GATES, "min_centroid_separation_db": 10.0}},
-    )
-    assert legacy.quality_tier is lenient.quality_tier, (
-        "the pre-rename `min_centroid_separation_db` config key is no longer honoured, so existing "
-        "configs silently fall back to the 20.0 default and re-tier"
-    )
+    assert strict is lenient.quality_tier is QualityTier.STUDIO
+    assert lenient.min_centroid_separation_db == 10.0
+    assert lenient.centroid_separation_db == 19.0
 
 
 def test_artifact_flags_are_an_absolute_veto():
@@ -110,7 +134,8 @@ def test_artifact_flags_are_an_absolute_veto():
     for flags in (["clipping"], ["phase_cancellation"], ["clipping", "noise_floor"]):
         tier, route = _tier(centroid_separation_db=29.9, avg_confidence=0.99, flags=flags)
         assert tier.value == "complex", f"{flags} with 29.9 dB/0.99 conf routed to {tier.value}"
-        assert route["action"] == "fallback_options", route
+        assert route["action"] == "manual_review", route
+        assert route["review_in_daw"]
 
 
 def test_badges_and_actions_agree_with_the_tier():
@@ -119,10 +144,13 @@ def test_badges_and_actions_agree_with_the_tier():
             dict(centroid_separation_db=25.0, avg_confidence=0.95),
             ("studio", "direct_download", False),
         ),
-        (dict(centroid_separation_db=25.0, avg_confidence=0.75), ("draft", "editor_launch", True)),
+        (
+            dict(centroid_separation_db=25.0, avg_confidence=0.75),
+            ("draft", "manual_review", False),
+        ),
         (
             dict(centroid_separation_db=25.0, avg_confidence=0.30),
-            ("complex", "fallback_options", False),
+            ("complex", "manual_review", False),
         ),
     ):
         tier, route = _tier(**kw)

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Stem+MIDI Pro API is a FastAPI service for guitar/bass stem separation and MIDI transcription. It runs CPU-only; see [SETUP.md](SETUP.md) for deployment.
+The Stem+MIDI Pro API is a FastAPI service for guitar/bass stem separation and MIDI transcription. It runs CPU-only; see [SETUP.md](SETUP.md) for deployment. A validated Mamba checkpoint is required unless the config explicitly selects the tested pretrained Demucs + Basic Pitch pair with `weights_source: pretrained_dependencies`. Missing/invalid weights keep the process live but make `/ready` and `/process` return `503` rather than serving random weights.
 
 ## Base URL
 
@@ -30,7 +30,7 @@ Implemented per TODO API-6.5 (multi-key Bearer auth with `secrets.compare_digest
 
 ## Rate Limiting & Concurrency
 
-A hard concurrency cap of **1 in-flight processing request** is enforced (`asyncio.Semaphore(1)`); excess requests fail fast with `503 Service Unavailable` + `Retry-After: 1`. On the bare-metal i5 target assume **one request at a time, ~30–60 s per minute of audio**. Per-key token-bucket rate limiting is not implemented (TODO ARCH-11.10.2).
+A hard concurrency cap of **1 in-flight processing request** is enforced (`asyncio.Semaphore(1)`); excess requests fail fast with `503 Service Unavailable` + `Retry-After: 1`. No reproducible reference-i5 throughput result is committed, so historical seconds-per-minute estimates are not a service guarantee. Per-key token-bucket rate limiting is not implemented (TODO ARCH-11.10.2).
 
 ## Endpoints
 
@@ -77,8 +77,8 @@ Upload an audio file; receive a ZIP with stems, MIDI, and a processing report.
 |---|---|
 | `guitar_stem.wav` | Separated guitar stem |
 | `bass_stem.wav` | Separated bass stem |
-| `guitar.mid` | Guitar MIDI transcription (CC#16 = per-note confidence; override with `MIDI_CONFIDENCE_CC`) |
-| `bass.mid` | Bass MIDI transcription |
+| `guitar.mid` | Independent guitar MIDI transcription; confidence uses Polyphonic Key Pressure when present |
+| `bass.mid` | Independent bass MIDI transcription; confidence uses Polyphonic Key Pressure when present |
 | `processing_report.json` | Metrics (see schema below) |
 
 **Example:**
@@ -104,7 +104,7 @@ open("output.zip", "wb").write(r.content)
 
 ### `GET /model-info`
 
-Returns the loaded model configuration: `model_name`, `audio_config`, `separator_config`, `transcriber_config`, `training_config`, `quality_gates`. `503` while the model is loading.
+Returns the loaded model configuration plus `backends` and `checkpoint_loaded`: `model_name`, `audio_config`, `separator_config`, `transcriber_config`, `training_config`, `quality_gates`. `503` while the model is loading or the checkpoint is missing.
 
 ### `GET /templates`
 
@@ -137,23 +137,26 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 
 | Field | Type | Description |
 |---|---|---|
-| `centroid_separation_db` | float | How spectrally distinct the two stems are, in dB (a centroid heuristic — NOT true SI-SDR, which needs ground truth; renamed from `si_sdr` per C-2.6) |
-| `phase_coherence` | float | Stem phase coherence, 0–1 |
-| `avg_confidence` | float | Mean transcription confidence, 0–1 |
-| `artifact_flags` | list[str] | e.g. `["clipping"]`, empty when clean |
-| `low_confidence_notes` | int | Notes below the confidence threshold |
-| `quality_tier` | string | `"studio"` / `"draft"` / `"complex"` |
-| `invalid` | bool | `true` when a metric was non-finite and the render is unusable; `quality_tier` is then always `"complex"` |
-| `backend` | string or null | Which implementation produced the render, e.g. `"mamba (pure-torch)"` or `"separator=demucs,transcriber=basic_pitch"` (M-7) |
+| `separation_proxy` | float | Centroid-separation heuristic reported for observability; it is not used as a tier threshold, SI-SDR, or a dB certification |
+| `si_sdr` | float | Deprecated compatibility alias for `separation_proxy`; do not interpret as SI-SDR |
+| `metric_semantics` | string | `centroid_separation_proxy_not_si_sdr` |
+| `phase_coherence` | float | Model-reported phase score, 0–1; not independent quality certification |
+| `avg_confidence` | float | Mean confidence over emitted guitar and bass notes, 0–1 |
+| `confidence_encoding` | string | `polyphonic_key_pressure`; JSON event metadata remains canonical |
+| `artifact_flags` | list[str] | e.g. `["clipping"]`; clean output is `["none"]`, and random weights are `["untrained_weights"]` |
+| `low_confidence_notes` | int | Emitted notes below the confidence threshold, not all low-confidence frames |
+| `model_weights_loaded` | bool/null | Whether a validated checkpoint was loaded |
+| `quality_tier` | string | Heuristic `"studio"` / `"draft"` / `"complex"`, not an accuracy certificate |
+| `invalid` | bool | True when any reported metric was NaN/Inf, i.e. the render is unusable regardless of the other numbers |
+| `backend` | string/null | Which separator implementation produced the render; always present so a parser never branches on its existence |
 
-All `float` fields may be `null` rather than `NaN`/`Infinity`: the report is serialised
-with `allow_nan=False`, so it is always valid RFC 8259 and `JSON.parse` accepts it.
+**Numeric values may be `null` rather than `NaN`.** A non-finite metric (which the pipeline really produces for silent, DC-offset and non-finite input) is delivered as `null` so the document stays valid RFC 8259 — bare `NaN` is not JSON and makes `JSON.parse()` reject the whole download.
 
 ## Quality Tiers
 
-1. **Studio** — `avg_confidence ≥ 0.85` **and** `centroid_separation_db ≥ 20 dB`: direct download.
-2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW (CC#16 tags them).
-3. **Complex** — `avg_confidence < 0.70` or artifact flags present: raw output plus review options.
+1. **Studio gate** — `avg_confidence ≥ 0.85`, no artifact flags, and `low_confidence_notes == 0`: direct download with a warning to verify; the reported proxy is observability only and this is not SI-SDR certification.
+2. **Draft** — `avg_confidence ≥ 0.70` without artifacts or untrained weights, but below the studio conditions: refine low-confidence notes in your DAW.
+3. **Complex** — invalid metrics, `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
 
 ## CORS
 
@@ -168,7 +171,7 @@ Configured via the `CORS_ORIGINS` env var (comma-separated list):
 | Variable | Default | Purpose |
 |---|---|---|
 | `MODEL_CONFIG_PATH` | `configs/model_config.yaml` | Model config YAML |
-| `MODEL_CHECKPOINT_PATH` | unset | Optional checkpoint to load at startup |
+| `MODEL_CHECKPOINT_PATH` | unset | Path to a validated Mamba checkpoint; optional only for an explicit pretrained-backend config |
 | `API_KEYS` | unset (auth off) | Comma-separated API keys; clients send `Authorization: Bearer <key>` |
 | `CORS_ORIGINS` | localhost:3000,5173 | CORS allowlist |
 | `MAX_UPLOAD_BYTES` | `524288000` (500 MB) | Upload size cap |
@@ -176,10 +179,9 @@ Configured via the `CORS_ORIGINS` env var (comma-separated list):
 
 ## Performance Characteristics (CPU-only)
 
-- Reference hardware: bare-metal Intel i5, 4–8 GB RAM.
-- **~30–60 s of processing per 1 minute of audio**, end to end.
-- One concurrent request; a 3-minute song takes roughly 1.5–3 minutes.
-- Batch size 1. There is no GPU path.
+- Declared target: bare-metal Intel i5, 4–8 GB RAM.
+- No reference-i5 benchmark is currently committed. Any performance claim must use a trained checkpoint, real audio, peak RSS, and the target hardware.
+- One concurrent request by design; batch size 1. There is no required GPU path.
 
 ## Security & Privacy
 

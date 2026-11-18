@@ -7,7 +7,7 @@ from utils.quality_gates import ProcessingReport, QualityTier, route_by_quality
 
 
 def test_studio_tier():
-    """High confidence + high SI-SDR should route to studio."""
+    """High confidence + high separation proxy should pass the heuristic gate."""
     report = ProcessingReport(
         centroid_separation_db=25.0,
         phase_coherence=0.9,
@@ -55,7 +55,7 @@ def test_config_overrides_thresholds():
         low_confidence_notes=0,
         config=config,
     )
-    assert report.quality_tier != QualityTier.STUDIO  # Doesn't meet 25.0 SI-SDR
+    assert report.quality_tier != QualityTier.STUDIO  # Doesn't meet the 25.0 proxy threshold
 
 
 def test_route_by_quality_studio():
@@ -72,7 +72,7 @@ def test_route_by_quality_studio():
 
 
 def test_route_by_quality_draft():
-    """Draft report should produce editor_launch action."""
+    """Draft report should request manual DAW review."""
     report = ProcessingReport(
         centroid_separation_db=15.0,
         phase_coherence=0.7,
@@ -81,12 +81,13 @@ def test_route_by_quality_draft():
         low_confidence_notes=5,
     )
     decision = route_by_quality(report)
-    assert decision["action"] == "editor_launch"
-    assert decision["editor_launch"]
+    assert decision["action"] == "manual_review"
+    assert decision["review_in_daw"]
+    assert not decision["editor_launch"]
 
 
 def test_route_by_quality_complex():
-    """Complex report should produce fallback_options."""
+    """Complex report should request manual DAW review options."""
     report = ProcessingReport(
         centroid_separation_db=5.0,
         phase_coherence=0.3,
@@ -95,7 +96,8 @@ def test_route_by_quality_complex():
         low_confidence_notes=20,
     )
     decision = route_by_quality(report)
-    assert decision["action"] == "fallback_options"
+    assert decision["action"] == "manual_review"
+    assert decision["review_in_daw"]
     assert len(decision["options"]) == 3
 
 
@@ -111,7 +113,7 @@ def test_route_by_quality_complex():
 def test_artifact_flags_force_complex_tier(flags):
     """Artifact flags force COMPLEX tier regardless of confidence (T-8.3.9).
 
-    Even with stellar SI-SDR and confidence, real artifacts mean the output
+    Even with a stellar proxy and confidence, real artifacts mean the output
     cannot be studio or draft quality.
     """
     report = ProcessingReport(
@@ -123,4 +125,4 @@ def test_artifact_flags_force_complex_tier(flags):
     )
     assert report.quality_tier == QualityTier.COMPLEX
     decision = route_by_quality(report)
-    assert decision["action"] == "fallback_options"
+    assert decision["action"] == "manual_review"

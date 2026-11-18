@@ -28,6 +28,20 @@ from models.mamba_separator import MambaSeparator
 SR = 44100  # the only rates audio_io admits; 22050 would fail for the wrong reason
 
 
+def _detect(guitar, bass, source=None):
+    """Call the artifact detector without building a model (GATE-1 / ART-1).
+
+    `_detect_artifacts` is an instance method (it reads `_input_flags` and
+    `_weights_loaded`), but its stem logic is class-qualified, so an instance
+    whose only needed attribute is `_weights_loaded` is enough.
+    """
+    from types import SimpleNamespace
+
+    return StemMidiModel._detect_artifacts(
+        SimpleNamespace(_weights_loaded=True), guitar, bass, source
+    )
+
+
 # --------------------------------------------------------------------- inputs
 
 
@@ -113,10 +127,10 @@ def test_art_1_loud_clean_material_is_not_a_noise_floor():
     """ART-1: level alone must never raise `noise_floor` (that forced COMPLEX)."""
     t = torch.arange(SR) / SR
     loud_clean = (0.9 * torch.sin(2 * torch.pi * 220 * t))[None, None]
-    assert StemMidiModel._detect_artifacts(loud_clean, loud_clean) == ["none"]
+    assert _detect(loud_clean, loud_clean) == ["none"]
 
     quiet_noise = 0.05 * torch.randn(1, 1, SR)  # quiet, but broadband
-    assert "noise_floor" in StemMidiModel._detect_artifacts(
+    assert "noise_floor" in _detect(
         quiet_noise, quiet_noise
     ), "a broadband floor must still be caught when it is quiet"
 
@@ -125,14 +139,19 @@ def test_art_1_loud_clean_material_is_not_a_noise_floor():
 
 
 def test_midi_4_confidence_reaches_the_top_of_the_cc_range():
-    """MIDI-4: `int()` truncation made CC 127 unreachable for conf 0.999."""
+    """MIDI-4: `int()` truncation made the top of the range unreachable.
+
+    Confidence now rides Polyphonic Key Pressure (a note-specific message)
+    rather than a CC, but the truncation bug is lane-independent: 0.999*127 =
+    126.87 and `int()` gave 126, so "fully confident" could never be expressed.
+    """
     out = midi_mod.build_midi_from_events(
         {"midi_events": [{"note": 60, "onset_frame": 0, "velocity": 80, "confidence": 0.999}]},
         "guitar",
     )
     mid = mido.MidiFile(file=io.BytesIO(out))
-    ccs = [m.value for m in mid.tracks[0] if m.type == "control_change"]
-    assert ccs == [127], f"confidence 0.999 emitted CC {ccs}"
+    pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
+    assert pressures == [127], f"confidence 0.999 emitted pressure {pressures}"
 
 
 # ------------------------------------------------------------------ checkpoint
@@ -189,18 +208,31 @@ def test_zip_1_stems_are_delivered_without_quantisation(tmp_path):
     )
 
 
-def test_doc_1_the_confidence_controller_the_docs_name_is_the_one_written():
-    """DOC-1: USER_GUIDE/API docs said CC#127 while the writer emits CC#16."""
+def test_doc_1_the_docs_describe_the_lane_confidence_actually_rides():
+    """DOC-1 evolved upstream: confidence is Polyphonic Key Pressure, not a CC.
+
+    The original defect was that the docs told users to filter on CC#127 while
+    the writer emitted CC#16. Upstream then removed CC from the confidence path
+    entirely (correctly -- CC#120-127 are Channel Mode messages), so the guard
+    is now: the docs say poly pressure, and no CC is emitted for confidence.
+    """
     import pathlib
 
-    import utils.midi as m
+    out = midi_mod.build_midi_from_events(
+        {"midi_events": [{"note": 60, "onset_frame": 0, "velocity": 80, "confidence": 0.9}]},
+        "guitar",
+    )
+    mid = mido.MidiFile(file=io.BytesIO(out))
+    ccs = [m for m in mid.tracks[0] if m.type == "control_change" and m.value != 0]
+    assert ccs == [], f"confidence must not ride a CC lane, got {[m.value for m in ccs]}"
+    assert [m.value for m in mid.tracks[0] if m.type == "polytouch"] == [round(0.9 * 127)]
 
-    assert m.DEFAULT_CONFIDENCE_CC == 16
     root = pathlib.Path(__file__).resolve().parent.parent
-    for name in ("USER_GUIDE.md", "API_DOCUMENTATION.md", "DEVELOPMENT_GUIDE.md"):
+    for name in ("USER_GUIDE.md", "API_DOCUMENTATION.md"):
         text = (root / name).read_text()
-        assert "CC#16" in text, f"{name} never mentions the controller actually written"
-        assert "CC#127" not in text, f"{name} still sends users to CC#127"
+        assert "olyphonic" in text or "poly pressure" in text.lower(), (
+            f"{name} never mentions Polyphonic Key Pressure, the lane confidence " "actually rides"
+        )
 
 
 def test_gate_2_low_confidence_notes_counts_notes_not_frames():
@@ -225,10 +257,10 @@ def test_gate_1_gate_1_and_art_1_share_the_fixed_noise_rule():
     """GATE-1: full-scale input used to be labelled `clipping` and forced COMPLEX."""
     t = torch.arange(SR) / SR
     full_scale = (0.5 * torch.sin(2 * torch.pi * 440 * t))[None, None]
-    assert StemMidiModel._detect_artifacts(full_scale, full_scale) == ["none"]
+    assert _detect(full_scale, full_scale) == ["none"]
 
     clipped = torch.clamp(4.0 * full_scale, -1.0, 1.0)
-    assert "clipping" in StemMidiModel._detect_artifacts(
+    assert "clipping" in _detect(
         clipped, clipped
     ), "a signal that actually hit the rails must still be flagged"
 
@@ -359,6 +391,10 @@ def test_report_1_the_batched_report_averages_over_the_batch():
     cfg["separator"]["n_layers"] = 1
     cfg["transcriber"]["d_model"] = 32
     cfg["transcriber"]["n_layers"] = 1
+    # The shipped config sets `backends:`, which routes `_separate`/`_transcribe`
+    # through the backend objects and ignores the modules `inject()` replaces.
+    # This test is about the batch reduction, so force the module path.
+    cfg.pop("backends", None)
 
     class TwoItemSeparator:
         def __call__(self, audio):
@@ -370,6 +406,9 @@ def test_report_1_the_batched_report_averages_over_the_batch():
     model.eval()
     inject(model, "separator", TwoItemSeparator())
     n_frames = 10
+    # No onsets: this test is about the REPORT, so the batch must not try to
+    # produce events. BATCH-1 refuses to flatten a multi-item batch into one
+    # MIDI event list, and a fixture with onsets here would (correctly) trip it.
     inject(
         model,
         "transcriber",
@@ -383,9 +422,13 @@ def test_report_1_the_batched_report_averages_over_the_batch():
     )
     with torch.inference_mode():
         out = model(torch.full((2, 1, n_frames * 512), 0.1))
-    assert out["processing_report"].centroid_separation_db == pytest.approx(
-        13.0, abs=1e-3
-    ), "report is reporting item 0's 25.0 dB instead of the batch mean 13.0 dB"
+    # `centroid_separation_db` is a deprecated alias upstream; the live field is
+    # `separation_proxy`. Reading the alias here asserted 0.0.
+    report = out["processing_report"]
+    assert report.separation_proxy == pytest.approx(13.0, abs=1e-3), (
+        f"report says {report.separation_proxy} dB for a batch whose items measured "
+        "25.0 and 1.0 dB -- that is item 0, not the batch mean"
+    )
 
 
 def test_midi_7_a_mid_file_tempo_change_moves_later_notes(tmp_path):
@@ -424,7 +467,7 @@ def test_batch_1_two_recordings_never_become_one_midi_file(pipeline_config):
     """
     from main import StemMidiModel
 
-    model = StemMidiModel(pipeline_config)
+    model = StemMidiModel({**pipeline_config, "backends": {}})
     model.eval()
     n = 50
     onset = torch.full((2, n, 1), -10.0)
@@ -442,7 +485,7 @@ def test_batch_1_single_item_transcription_is_unaffected(pipeline_config):
     """The BATCH-1 guard must not touch the supported B=1 path."""
     from main import StemMidiModel
 
-    model = StemMidiModel(pipeline_config)
+    model = StemMidiModel({**pipeline_config, "backends": {}})
     model.eval()
     n = 50
     onset = torch.full((1, n, 1), -10.0)
