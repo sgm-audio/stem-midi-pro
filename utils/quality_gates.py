@@ -79,7 +79,7 @@ class ProcessingReport:
         # confidence alone ("refine in our editor") instead of being reported
         # as a failure (review §4).
         self.invalid = not all(
-            isinstance(v, (int, float)) and math.isfinite(float(v))
+            isinstance(v, int | float) and math.isfinite(float(v))
             for v in (self.centroid_separation_db, self.phase_coherence, self.avg_confidence)
         )
         # Normalise flags so an unknown flag can never silently bypass the
