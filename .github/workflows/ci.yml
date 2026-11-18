@@ -36,10 +36,39 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
-      # NOTE: coverage gate is aspirational (T-8.4.1); the current suite is thin,
-      # so allow failure until coverage reaches 70%.
-      - name: Run tests (CPU)
-        run: pytest -m "not cuda" --cov=. --cov-fail-under=70
+      # Correctness gate. This MUST be able to fail the build: a red test suite is
+      # the thing we are shipping against. `--strict-deps` turns "optional
+      # dependency missing" skips into failures, and `--fail-on-skip` fails the
+      # session when a `real_mamba` (must-run) test is skipped — that marker tier
+      # covers models/mamba_separator.py, models/mamba_transcriber.py,
+      # models/_mamba_compat.py and the Mamba path in main.py, i.e. the code that
+      # ships to every CPU user. See tests/conftest.py + tests/honesty.py.
+      - name: Run tests (CPU, honesty gates on)
+        run: |
+          set +e
+          pytest -m "not cuda" --strict-deps --fail-on-skip 2>&1 | tee /tmp/pytest.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            # Annotate the red test ids on the PR's Checks tab. The raw log is ~3k lines
+            # of xfails and warnings; a reviewer (or a sandbox that cannot fetch the
+            # artifact host) should not have to scroll it to learn WHICH test is red.
+            {
+              python -c "import sys, torch, numpy, pytest; print(f'py {sys.version.split()[0]} · torch {torch.__version__} · numpy {numpy.__version__} · pytest {pytest.__version__}')"
+              grep -E "^(FAILED|ERROR)" /tmp/pytest.log
+              grep -E "=+ .*(passed|failed|error).* =+" /tmp/pytest.log | tail -1
+            } | head -12 | while IFS= read -r line; do
+              # Only GitHub's control sequences need escaping in an annotation MESSAGE
+              # (% and the line breaks); colons are only special in the key=value part.
+              printf '::error::%s\n' "$(printf '%s' "$line" | cut -c1-200 | tr -d '\r' | sed 's/%/%25/g')"
+            done
+          fi
+          exit "$status"
+      # Coverage gate is aspirational (T-8.4.1) and deliberately separate, so a
+      # thin-coverage warning can never mask a failing assertion. Remove
+      # `continue-on-error` once the number in .codecov.yml is reachable.
+      - name: Coverage report
+        run: pytest -m "not cuda" --cov=. --cov-report=xml --cov-report=term
         continue-on-error: true
 
   structure:
@@ -69,3 +98,24 @@ jobs:
             fi
           done < <(find . -path ./research -prune -o -name "*.py" -print0)
           exit $missing
+
+  # ---------------------------------------------------------------------------
+  # mamba-ssm tier — enabled when a CUDA/self-hosted runner exists.
+  #
+  # On CPU-only runners the real_mamba tests still run (against the pure-torch
+  # shim in models/_mamba_compat.py), so this job adds *only* the parity check
+  # between the shim and the Triton kernels plus the --require-mamba-ssm gate.
+  # It is intentionally NOT `continue-on-error`: a job that cannot fail is how
+  # the old `test-cpu` step reported green while the suite was broken.
+  #
+  # jobs.mamba-ssm:
+  #   runs-on: [self-hosted, linux, gpu]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with: { python-version: "3.13" }
+  #     - run: pip install -r requirements.txt -r requirements-dev.txt
+  #     - run: pip install mamba-ssm causal-conv1d
+  #     - name: Parity + real-kernel inference
+  #       run: pytest -m "cuda or requires_mamba_ssm" --require-mamba-ssm
+  # ---------------------------------------------------------------------------

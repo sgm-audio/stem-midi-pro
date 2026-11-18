@@ -44,7 +44,7 @@ Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.
 - `utils/` — `quality_gates.py`, `template_engine.py`
 - `configs/` — `model_config.yaml`
 - `user_content/` — the 7 user-facing text templates rendered by `utils/template_engine.py`
-- `tests/` — pytest suite (several tests currently skipped pending TODO Section 8)
+- `tests/` — pytest suite (dependency-gated CUDA, `mamba_ssm`, `torchaudio`, and optional-backend tests may skip in a CPU-only environment)
 - `research/` — Mamba-3 experiments, separate from the production path (as-is, `research/README.md`)
 - `docs/` — ADRs and operations docs
 
@@ -52,11 +52,11 @@ Note: there is **no `stem_midi_pro/` package subdirectory** — `main.py`, `api.
 1. Audio input → validation → load (`soundfile`, mono, float32)
 2. `MambaSeparator` → guitar/bass stems
 3. `MambaTranscriber` → onset/pitch/velocity/expression/confidence logits
-4. `ConfidenceInjector` → MIDI events with CC#127 confidence
+4. `ConfidenceInjector` → note-level JSON events plus MIDI Polyphonic Key Pressure confidence (CC#127 is not emitted)
 5. `utils/quality_gates.route_by_quality` → studio/draft/complex tier
 6. `api.py` → ZIP (stems + MIDI + `processing_report.json`)
 
-Before changing pipeline code, read the open bug list in TODO.md Section 2 (C-2.1 … C-2.12) — several components have known defects you should not build assumptions on top of.
+Before changing pipeline code, read the live work queue in TODO.md Section 2. The P0 contracts C-2.1 … C-2.12 are marked complete, but their tests and explicit limitations document the assumptions that future changes must preserve.
 
 ## Development Setup
 
@@ -71,8 +71,13 @@ Environment variables for local runs:
 
 ```bash
 export MODEL_CONFIG_PATH=configs/model_config.yaml
-export MODEL_CHECKPOINT_PATH=path/to/checkpoint   # optional
+export MODEL_CHECKPOINT_PATH=path/to/trained_checkpoint.pt   # required for Mamba file/API inference
 ```
+
+The explicit `configs/model_config.cpu.yaml` profile is the exception: it
+selects the optional pretrained Demucs + Basic Pitch pair and declares its own
+weight source. Random Mamba initialization is suitable only for training and
+structural tests.
 
 The dataset loaders fall back to synthetic data automatically, so no real dataset is needed to develop. See [SETUP.md](SETUP.md) for the full install guide.
 
@@ -114,7 +119,7 @@ pytest --cov=. tests/           # with coverage
 4. Note that TODO ARCH-11.12.1 already tracks this — coordinate there first.
 
 ### Changing architecture dimensions
-Edit `configs/model_config.yaml` (`separator.d_model`, `n_layer`, etc.). For CPU deployment, use the smaller CPU preset planned in TODO CFG-9.1.3 (`d_model=256`, `n_layer=6`).
+Edit `configs/model_config.yaml` (`separator.d_model`, `n_layer`/`n_layers`, etc.). For the optional pretrained CPU backend profile, use `configs/model_config.cpu.yaml`; for native Mamba structural/training work, use a downsized test config and remember that file inference still requires a validated checkpoint.
 
 ## Documentation Standards
 
@@ -138,9 +143,11 @@ Edit `configs/model_config.yaml` (`separator.d_model`, `n_layer`, etc.). For CPU
 ## Useful Commands
 
 ```bash
-python demo.py                                   # smoke test
-python main.py --audio song.wav                  # CLI inference
-uvicorn api:app --reload                         # dev API server
+python demo.py                                   # random-weight structural smoke test
+python main.py --audio song.wav \
+  --config configs/model_config.yaml \
+  --checkpoint path/to/trained_checkpoint.pt     # CLI inference
+uvicorn api:app --reload                         # dev API server (set checkpoint first)
 pytest -m "not cuda"                             # tests (CPU)
 flake8 . && black --check . && isort --check . && mypy .   # lint (CI parity)
 python check_syntax.py                           # AST syntax check
@@ -161,7 +168,7 @@ python verify_structure.py                       # structural check (see Known q
 - **Dataset onset targets** carry a spurious `(1, T', 1)` batch dim and a hardcoded-hop frame count; `StemMidiModel._prepare_onset_target` normalizes them — keep new loss inputs shape-robust.
 - **mamba-ssm CPU path:** models use the pure-PyTorch reference impl via `models/_mamba_compat.py` (no `causal_conv1d`, no CUDA kernels). `mamba-ssm` is NOT a hard dependency (needs nvcc to build). Invalid kwargs like `causal_conv1d_impl` must never be passed.
 - **Streaming:** the old fake `_state_cache` activation-concat was removed (C-2.5); chunked inference restarts state per chunk — document, don't reintroduce.
-- **`centroid_separation_db` in `ProcessingReport`** (renamed from `si_sdr`, C-2.6) is a centroid-separation **heuristic**, not real SI-SDR (needs ground truth). Don't present it as SI-SDR.
-- **Pitch targets are format-dispatched:** `_prepare_pitch_target` returns (B, T) class indices when every labeled frame has one pitch (→ `pitch_ce_loss_fn`) and a (B, T, V) multi-hot grid when any frame labels a chord (→ `pitch_bce_loss_fn`). Don't argmax-collapse multi-hot rows — `midi_to_targets` writes one hot entry per note_on, so chord frames arrive multi-hot and collapsing silently deletes chord members. At inference, `_logits_to_midi` emits one note_on per pitch above `transcriber.pitch_threshold` (null = single-argmax legacy).
+- **`separation_proxy` in `ProcessingReport`** is the canonical separation field: a centroid-separation **heuristic**, not real SI-SDR (needs ground truth). `si_sdr` and `centroid_separation_db` are deprecated compatibility aliases on construction and output; don't present any of them as SI-SDR, and don't gate the tier on the proxy (review §9: one FFT bin of separation still reports ~20 dB, so it cannot discriminate).
+- **Pitch targets are format-dispatched:** `_prepare_pitch_target` returns (B, T) class indices when every labeled frame has one pitch (→ `pitch_ce_loss_fn`) and a (B, T, V) multi-hot grid when any frame labels a chord (→ `pitch_bce_loss_fn`). Don't argmax-collapse multi-hot rows — `midi_to_targets` writes one hot entry per note_on, so chord frames arrive multi-hot and collapsing silently deletes chord members. At inference, `_logits_to_midi` emits one note_on per pitch above `transcriber.pitch_threshold` when the key is set (production configs set 0.5); unset/None keeps single-argmax — bare test-config dicts without the key decode one argmax note per onset, which is what the density guards assume.
 - No real datasets ship; Slakh/MUSDB loaders fall back to synthetic data unless `--strict-data`.
 - **Line endings:** working tree is LF; `.gitattributes` enforces `eol=lf` for text files.

@@ -1,30 +1,25 @@
-# Stem+MIDI Pro Model Config — CPU-only target (Python 3.13, 4–8 GB RAM)
-# All CUDA-era keys (FP8/TensorRT/megatron_core/restore_from_path) were removed:
-# they were read by nothing and described the removed GPU path.
+# StemMidiModel Config: Stem+MIDI Pro v1.0
 name: "stem_midi_mamba_v1"
+restore_from_path: null  # For fine-tuning
+
+# Explicit backend selection. The native Mamba implementation uses the
+# pure-PyTorch fallback when mamba_ssm is unavailable.
+backends:
+  separator: mamba
+  transcriber: mamba
+  device: cpu
 
 # Audio I/O
 audio:
   sample_rate: 44100
   n_fft: 2048
-  hop_length: 512        # ~11.6ms @ 44.1kHz
+  hop_length: 512        # ~11.6ms @ 44.1kHz audio-frame grid; not a latency certification
   n_mels: 80
   chunk_duration_sec: 2.0
-  overlap_ratio: 0.5     # overlap-add crossfade for chunked separation
-  # Loud memory guard (C-1/C-6): process_audio_file refuses longer inputs
-  # instead of OOM-ing the 4–8 GB reference machine. Raise knowingly.
-  max_input_seconds: 600
-
-# Pluggable backends (optional; H-9). When present, models/backends/factory.py
-# builds these instead of the built-in Mamba modules (extras: `pretrained`).
-# backends:
-#   separator: demucs       # mamba | demucs | fake
-#   transcriber: basic_pitch  # mamba | basic_pitch | fake
-#   demucs_model: htdemucs
+  overlap_ratio: 0.5     # 50% waveform overlap-add; boundary quality needs validation
 
 # Mamba Separator Architecture
-# (CPU-only target: pure-PyTorch Mamba fallback in models/_mamba_compat.py,
-#  or the mamba-ssm CUDA package when installed on a CUDA machine.)
+# (CPU-only target: mamba-ssm reference impl — no custom CUDA kernels)
 separator:
   d_model: 768
   n_layers: 12
@@ -32,28 +27,28 @@ separator:
   d_conv: 4
   expand: 2
 
-# Mamba Transcriber Architecture
-# NOTE: pitch_vocab_size is 128 MIDI pitches (0-127). There is NO silence
-# class — frames without an onset are excluded via onset thresholding.
+# Mamba Transcriber Architecture  
 transcriber:
   d_model: 512
   n_layers: 8
   d_state: 12
-  d_conv: 4
-  expand: 2
-  pitch_vocab_size: 128        # MIDI pitches 0-127
+  onset_head_dim: 64
+  pitch_vocab_size: 128        # MIDI 0-127 + silence
+  velocity_bins: 128
   expression_heads: ["bend", "vibrato", "slide"]
   onset_threshold: 0.5
   # Chord-aware decoding: every pitch whose sigmoid exceeds this fires
   # its own note_on at an accepted onset frame; null = legacy single-argmax.
   pitch_threshold: 0.5
 
-# Training
+# Mixed Precision & Distributed
 training:
-  precision: "fp32"            # CPU-only target
-  # Actually honored: Mamba blocks wrap themselves in torch.utils.checkpoint
-  # when training (C-1) — bounds activation memory to one block.
-  gradient_checkpointing: true
+  precision: "fp32"            # CPU-only target — FP8/TransformerEngine require CUDA
+  gradient_checkpointing: true # Enable for 60s+ sequences
+  megatron_core:
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    distributed_timeout_minutes: 30
 
 # Loss Weights
 loss:
@@ -63,7 +58,7 @@ loss:
   onset_f1_weight: 1.0
   pitch_ce_weight: 0.8
   velocity_mae_weight: 0.3
-  duration_iou_weight: 0.5   # inert: no dataset emits duration targets yet (ARCH-11.5.2)
+  duration_iou_weight: 0.5
   cross_modal_alignment_weight: 0.5
 
 # Quality Gates
@@ -71,4 +66,7 @@ quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
-  min_centroid_separation_db: 20.0  # renamed from min_si_sdr (C-2.6)
+  min_separation_proxy: 20.0  # deprecated metadata only; proxy is not a tier gate or SI-SDR
+
+# Export
+# [REMOVED: TensorRT-LLM export block — TensorRT-LLM requires CUDA; target is CPU-only]

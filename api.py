@@ -275,14 +275,37 @@ def load_model():
 
     _import_model()  # lazy: keeps `import api` torch-free
 
-    checkpoint_path = os.getenv("MODEL_CHECKPOINT_PATH")
-    if checkpoint_path and os.path.exists(checkpoint_path):
+    checkpoint_path = os.getenv("MODEL_CHECKPOINT_PATH") or model_config.get("restore_from_path")
+    if checkpoint_path:
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                f"Configured model checkpoint does not exist: {checkpoint_path}. "
+                "Set MODEL_CHECKPOINT_PATH to a trained .pt file."
+            )
         log_event("info", "loading_checkpoint", checkpoint=checkpoint_path)
-
         m = load_from_checkpoint(checkpoint_path, config_path)
-    else:
-        m = StemMidiModel(model_config)
+        m.eval()
+        return m
 
+    # Demucs + Basic Pitch can be safe without a project state_dict because
+    # their constructors provide their own pretrained weights. Require an
+    # explicit config declaration and verify both backend attestations; never
+    # infer safety merely from a backend name.
+    backends = model_config.get("backends") or {}
+    if backends.get("weights_source") != "pretrained_dependencies":
+        raise RuntimeError(
+            "No trained checkpoint is configured. Set MODEL_CHECKPOINT_PATH "
+            "for the Mamba path, or explicitly configure the tested pretrained "
+            "backend pair with weights_source: pretrained_dependencies. The API "
+            "will remain not ready rather than serving random model weights."
+        )
+    log_event("info", "loading_pretrained_backends", backends=backends)
+    m = StemMidiModel(model_config)
+    if not getattr(m, "weights_loaded", False):
+        raise RuntimeError(
+            "Configured pretrained backends did not attest to loaded weights. "
+            "Install the selected dependencies or provide MODEL_CHECKPOINT_PATH."
+        )
     m.eval()
     return m
 
@@ -322,6 +345,8 @@ async def lifespan(app: FastAPI):
     global model, _model_ready, _processing_sem
     _configure_logging()
     _processing_sem = asyncio.Semaphore(1)
+    model = None
+    _model_ready = False
 
     log_event("info", "model_loading")
     try:
@@ -603,7 +628,9 @@ def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
 def create_response_zip(outputs: dict) -> io.BytesIO:
     """Create a ZIP in memory: stems (wav) + MIDI + processing report."""
     zip_buffer = io.BytesIO()
-    sr = (model_config or {}).get("audio", {}).get("sample_rate", 44100)
+    audio_cfg = (model_config or {}).get("audio", {})
+    sr = int(outputs.get("sample_rate", audio_cfg.get("sample_rate", 44100)))
+    hop_length = int(audio_cfg.get("hop_length", 512))
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for stem_name in ("guitar", "bass"):
@@ -612,25 +639,44 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             zip_file.writestr(f"{stem_name}_stem.wav", buf.getvalue())
 
         midi_pkg = outputs["midi"]
+        guitar_midi = _stem_midi_data(midi_pkg, "guitar")
+        bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
-            "guitar.mid", build_midi_from_events(_stem_midi_data(midi_pkg, "guitar"), "guitar")
+            "guitar.mid",
+            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
         )
         zip_file.writestr(
-            "bass.mid", build_midi_from_events(_stem_midi_data(midi_pkg, "bass"), "bass")
+            "bass.mid",
+            build_midi_from_events(bass_midi, "bass", hop_length=hop_length, sample_rate=sr),
         )
 
         report = outputs["report"]
+        separation_proxy = float(
+            getattr(
+                report,
+                "separation_proxy",
+                getattr(report, "centroid_separation_db", getattr(report, "si_sdr", 0.0)),
+            )
+        )
         report_json = {
-            "centroid_separation_db": float(report.centroid_separation_db),
+            "separation_proxy": separation_proxy,
+            # Deprecated compatibility alias. This value is not SI-SDR and
+            # must not be read as a reference-based dB certification.
+            "si_sdr": separation_proxy,
+            "metric_semantics": "centroid_separation_proxy_not_si_sdr",
             "phase_coherence": float(report.phase_coherence),
             "avg_confidence": float(report.avg_confidence),
+            "confidence_encoding": guitar_midi.get("summary", {}).get(
+                "confidence_encoding", "polyphonic_key_pressure"
+            ),
             "artifact_flags": report.artifact_flags,
             "low_confidence_notes": report.low_confidence_notes,
+            "model_weights_loaded": getattr(report, "model_weights_loaded", None),
             "quality_tier": report.quality_tier.value,
         }
         backend = getattr(report, "backend", None)
         if backend:
-            report_json["backend"] = backend  # M-7: which implementation ran
+            report_json["backend"] = backend
         zip_file.writestr("processing_report.json", json.dumps(report_json, indent=2))
 
     zip_buffer.seek(0)
@@ -845,7 +891,14 @@ async def get_model_info():
     backend = getattr(model, "backend_name", None)
     return {
         "model_name": cfg.get("name", "unknown"),
-        "backend": backend,  # M-7: which Mamba implementation / backend pair
+        "backend": backend,  # Which implementation / backend pair produced output.
+        # Report both the active Mamba implementation and the compatibility
+        # checkpoint flag; clients can distinguish random/native inference from
+        # a validated checkpoint or backend-owned pretrained weights.
+        "mamba_backend": getattr(model, "mamba_backend", None),
+        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
+        "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
+        "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),
         "separator_config": cfg.get("separator", {}),
         "transcriber_config": cfg.get("transcriber", {}),

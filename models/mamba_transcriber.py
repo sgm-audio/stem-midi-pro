@@ -163,8 +163,15 @@ class MambaTranscriber(nn.Module):
         # Convert to mel scale using the precomputed basis buffer (C-2.9)
         mel_spec = torch.matmul(self.mel_basis, mag)  # (B, n_mels, T)
 
-        # Apply log compression
-        log_mel_spec = torch.log(torch.clamp(mel_spec, min=1e-8))
+        # Apply log compression. Bounded on BOTH sides: the floor stops
+        # log(0) on digital silence, and the ceiling stops a corrupt or
+        # DC-heavy stem from feeding thousands of nats into the SSM blocks.
+        # Unbounded above, a loud stem reached log-mel 19.36 and the
+        # recurrence overflowed fp32 to NaN -- which, combined with the
+        # finiteness guard added elsewhere, made a completely silent input
+        # raise RuntimeError instead of returning an empty transcription
+        # (review §3).
+        log_mel_spec = torch.log(torch.clamp(mel_spec, min=1e-8, max=1e3))
 
         return log_mel_spec
 

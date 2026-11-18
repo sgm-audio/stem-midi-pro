@@ -6,6 +6,56 @@ All notable changes to Stem+MIDI Pro. Currently maintained manually; release aut
 
 Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 
+### Correctness pass: test-suite audit follow-through (2026-11-17)
+Audit of `tests/` against what the product actually ships; the write-up and
+measurements are in [`docs/test-suite-audit.md`](docs/test-suite-audit.md).
+The MIDI-writer, resampler, streaming and backend-wiring findings were fixed
+independently on `main`; the items below are what this branch adds on top.
+
+**Input validation** (`main.py`, `audio_io.py`)
+- `_validate_audio` rejects non-finite samples and clips shorter than one STFT
+  window with `AudioValidationError`, from `forward()` as well as from the file
+  path. A NaN upload used to reach `processing_report.json` as a bare `NaN`
+  token, or fail as a 500 from inside the separator; the API answers 400.
+- Silent input short-circuits to zero stems / zero notes before the separator
+  runs. On the production config the untrained Mamba stack emits NaN logits for
+  all-zero input, so a muted channel returned `RuntimeError` → HTTP 500.
+
+**Artifact flags** (`main.py`)
+- `_detect_artifacts` also takes the original input: input-peak `clipping`,
+  `silence` and `dc_offset`. A clipped DI is scaled down by the separator
+  masks, so the stem-level clipping test never fired for clipped uploads; a DC
+  upload was removed by the masks and silently cost input headroom.
+
+**CPU memory** (`main.py`)
+- Chunked separation factored into `_separate_chunked` and used by
+  `process_audio_file` as well as `process_audio_streaming`; `_finalize` builds
+  MIDI + report + routing once for both. 60 s upload peak-RSS growth
+  ~2 346 MB → ~190 MB, for 20–40% extra wall time on the re-processed overlap.
+
+**Review gates** (`models/confidence_injector.py`)
+- `needs_review` is `confidence < min_confidence`, not
+  `confidence * sigmoid(energy*10)`: a confident quiet passage was always
+  flagged and gain alone flipped the same events. Energy stays in
+  `alignment_score` as a diagnostic.
+- `low_confidence_count` counts notes rather than STFT frames (1 s of audio
+  reported ~86 "low-confidence notes"); `summary.total_notes` added.
+
+**Provenance** (`main.py`, `api.py`, `utils/quality_gates.py`)
+- `ProcessingReport.weights_loaded` (set by `load_from_checkpoint`) and
+  `StemMidiModel.mamba_backend`, both exposed by `/model-info` next to the
+  existing `backend`.
+
+**Tests** — six audit modules (`test_midi_timing`, `test_midi_usability`,
+`test_audio_adversarial`, `test_quality_gate_truthfulness`,
+`test_mamba_backend_honesty`, `test_backend_wiring`). Two pre-existing `main`
+failures are fixed as a side effect (`_detect_artifacts` used unbound
+`self`-qualified calls and raised `AttributeError` when called as
+`StemMidiModel._detect_artifacts(None, …)`), and one `main` test that
+contradicted the documented "the saturated centroid proxy must not decide the
+tier" contract was corrected. Suite: 336 passed, 42 xfailed (known-bug),
+1 skipped.
+
 ### Strategic decisions (TODO Section 0)
 - Consolidated on the v1 production path: `main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py`. Mamba-3 research code moved to `research/`.
 - Locked the platform: **CPU-only, bare-metal i5, Python 3.13**.
@@ -16,8 +66,8 @@ Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 - Renamed `data/canadian_datasets.py` → `data/datasets.py`; classes renamed (`AudioDataset`, `Slakh2100YourMT3Dataset`, `MUSDB18HQDataset`, `get_data_loaders`).
 
 ### API hardening (TODO Section 6)
-- Upload streaming with a 50 MiB cap and `413` responses; audio validation (format, duration, sample rate).
-- Optional API-key auth (`X-API-Key`) and configurable CORS allowlist.
+- Buffered/chunked upload reading with a 500 MB cap and `413` responses; audio validation (format, duration, sample rate).
+- Optional API-key auth (`Authorization: Bearer <key>` via `API_KEYS`) and configurable CORS allowlist.
 - Template rendering endpoints with path-traversal protection.
 
 ### Documentation (TODO Section 10)
@@ -27,8 +77,8 @@ Work is tracked item-by-item in [TODO.md](TODO.md); this summarizes the themes.
 - User-facing templates in `user_content/` audited against the real processing-report keys.
 
 ### Known outstanding work
-- NeMo/PyTorch-Lightning removal from the training loop (TR-12.3), dataset-class collapse (RF-3.1.1)
-- True streaming SSM state passing (C-2.5/ARCH-11.8.1), coverage gate hardening (T-8.1.3/T-8.4.1)
+- Dataset-class collapse (RF-3.1.1), pitch/velocity/duration training wiring, and coverage-gate hardening remain open.
+- True streaming SSM state passing (C-2.5/ARCH-11.8.1), trained-checkpoint quality evaluation, target-hardware benchmarking, optional-backend validation, and DAW evidence remain open.
 
 ### Maintenance pass 2026-10-07 (automated review fixes)
 - Deleted the stale `stem_midi_pro/` mirror tree (root files are canonical).

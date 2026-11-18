@@ -1,4 +1,4 @@
-﻿# Setup — Stem+MIDI Pro
+# Setup — Stem+MIDI Pro
 
 Install Stem+MIDI Pro on **bare-metal** hardware. Target: Intel i5 (or similar x86-64), 4–8 GB RAM, **CPU only, no CUDA**, Python **3.13**.
 
@@ -39,11 +39,18 @@ python demo.py          # smoke test with synthetic audio; no input file needed
 
 ## 5. Run
 
-**CLI inference:**
+**CLI inference with a validated project checkpoint:**
 
 ```bash
-python main.py --audio /path/to/song.wav --config configs/model_config.yaml
+python main.py --audio /path/to/song.wav \
+  --config configs/model_config.yaml \
+  --checkpoint /path/to/trained_checkpoint.pt
 ```
+
+For the optional pretrained CPU backend pair, install the dependencies with
+`scripts/install_pretrained.py` and use `configs/model_config.cpu.yaml`; that
+config declares its own pretrained weight source and does not use random Mamba
+weights. No trained project checkpoint is shipped here.
 
 **API server:**
 
@@ -57,7 +64,7 @@ Useful environment variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `MODEL_CONFIG_PATH` | `configs/model_config.yaml` | model config |
-| `MODEL_CHECKPOINT_PATH` | unset | checkpoint to load at startup |
+| `MODEL_CHECKPOINT_PATH` | unset | validated project checkpoint to load at startup; optional only for the explicit pretrained CPU backend config |
 | `API_KEYS` | unset (auth off) | comma-separated API keys; clients send `Authorization: Bearer <key>` on `/process` |
 | `CORS_ORIGINS` | `http://localhost:3000,http://localhost:5173` | CORS allowlist (`*` disables credentials) |
 | `MAX_UPLOAD_BYTES` | `524288000` (500 MB) | upload cap |
@@ -65,9 +72,10 @@ Useful environment variables:
 
 ## 6. Performance expectations (CPU)
 
-- **~30–60 s of processing per 1 minute of audio** on the reference i5.
-- 4–8 GB RAM is sufficient for the default config; a smaller CPU preset config is planned (TODO CFG-9.1.3).
-- One request at a time. `torch.set_num_threads` tuning (TODO PERF-7.4) will use all cores.
+- Declared target: bare-metal Intel i5 with 4–8 GB RAM.
+- No trained-checkpoint benchmark on the reference i5 is committed; do not treat historical seconds-per-minute estimates as a guarantee.
+- One API request at a time. `torch.set_num_threads` can be tuned with `OMP_NUM_THREADS`.
+- Native-Mamba file/API inference requires `MODEL_CHECKPOINT_PATH` or the CLI `--checkpoint`; the explicit pretrained CPU backend profile is the documented exception. No trained project checkpoint is shipped in this repository.
 
 ## Troubleshooting
 
@@ -75,7 +83,7 @@ Useful environment variables:
 |---|---|
 | `mamba_ssm` import/build error | Ensure Python 3.13 and a recent PyTorch (CPU wheel) are installed; the package falls back to the pure-PyTorch path on CPU. |
 | OOM on long files | Files are capped at 10 min / 500 MB; close other apps, or wait for the smaller CPU config (CFG-9.1.3). |
-| `503 Model not loaded` from the API | Wait for startup to finish; the model loads at server start. |
+| `503 Model not loaded` from the API | Set `MODEL_CHECKPOINT_PATH` to a valid trained checkpoint, then wait for `/ready`; startup intentionally refuses random weights. |
 | `Sample rate not supported` | Resample to 44.1 kHz or 48 kHz (e.g. with Audacity or `ffmpeg`). |
 
 ---

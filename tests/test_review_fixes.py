@@ -762,8 +762,16 @@ def test_onset_refractory_suppresses_bursts_and_jitter(mock_config):
 
 def test_report_metric_renamed_from_si_sdr():
     """C-2.6: ProcessingReport's separation field is honestly named
-    `centroid_separation_db` (it is a centroid heuristic, not SI-SDR), and
-    the legacy `min_si_sdr` config key still works as an alias."""
+    `centroid_separation_db` (it is a centroid heuristic, not SI-SDR).
+
+    Updated for review §9: renaming the field made the report honest but did
+    not make the number discriminating -- one FFT bin of separation still
+    reports 20.00 dB, so it cannot be the studio gate. The value is retained
+    for observability and no longer influences the tier, and the legacy
+    `min_si_sdr` key is accepted only to warn that it does nothing.
+    """
+    import warnings
+
     from utils.quality_gates import ProcessingReport
 
     report = ProcessingReport(
@@ -773,32 +781,50 @@ def test_report_metric_renamed_from_si_sdr():
         artifact_flags=["none"],
         low_confidence_notes=0,
     )
-    assert report.min_centroid_separation_db == 20.0  # default
+    # The metric is still carried and still named honestly.
+    assert report.centroid_separation_db == 21.0
     assert report.quality_tier.value == "studio"
 
-    # legacy alias: pre-rename configs keyed `min_si_sdr` still apply
-    legacy = ProcessingReport(
-        centroid_separation_db=22.0,
-        phase_coherence=0.9,
-        avg_confidence=0.9,
-        artifact_flags=["none"],
-        low_confidence_notes=0,
-        config={"quality_gates": {"min_si_sdr": 25.0}},
-    )
-    assert legacy.min_centroid_separation_db == 25.0
-    assert legacy.quality_tier.value == "draft"  # 22 < 25 -> not studio
+    # A single FFT bin (20.00 dB) must not be what decides STUDIO: with
+    # confidence below the studio bar the tier is DRAFT even at a saturated
+    # 30 dB, because the proxy is not consulted.
+    import math
 
-    # the new key wins when both are present
-    both = ProcessingReport(
-        centroid_separation_db=22.0,
-        phase_coherence=0.9,
-        avg_confidence=0.9,
+    one_bin = 10 * math.log10(1.0 + 1e-8) + 20
+    saturated = ProcessingReport(
+        centroid_separation_db=30.0,
+        phase_coherence=0.99,
+        avg_confidence=0.80,
         artifact_flags=["none"],
         low_confidence_notes=0,
-        config={"quality_gates": {"min_si_sdr": 30.0, "min_centroid_separation_db": 21.0}},
     )
-    assert both.min_centroid_separation_db == 21.0
-    assert both.quality_tier.value == "studio"
+    assert saturated.quality_tier.value == "draft"
+    assert one_bin >= 20.0
+
+    # Legacy alias no longer gates; it warns instead.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        legacy = ProcessingReport(
+            centroid_separation_db=22.0,
+            phase_coherence=0.9,
+            avg_confidence=0.9,
+            artifact_flags=["none"],
+            low_confidence_notes=0,
+            config={"quality_gates": {"min_si_sdr": 25.0}},
+        )
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+    # 22 < 25 under the old gate, but the proxy no longer decides -> studio.
+    assert legacy.quality_tier.value == "studio"
+
+    # Low-confidence notes DO decide (review §9).
+    noisy = ProcessingReport(
+        centroid_separation_db=30.0,
+        phase_coherence=0.99,
+        avg_confidence=0.95,
+        artifact_flags=["none"],
+        low_confidence_notes=50,
+    )
+    assert noisy.quality_tier.value == "draft"
 
 
 def test_chord_decoding_emits_all_pitches_above_threshold(mock_config):

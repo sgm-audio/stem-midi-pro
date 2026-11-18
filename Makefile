@@ -2,7 +2,7 @@
 # Python 3.13 / CPU-only target
 
 .PHONY: install install-dev lint format test test-cpu test-cuda demo serve \
-        docker-build docker-run clean dist
+        docker-build docker-run clean dist test-all test-quick
 
 PY ?= python
 
@@ -24,11 +24,22 @@ format:
 test:
 	pytest
 
+# Canonical CPU run: the honesty gates are on, so an "optional dependency
+# missing" skip or a skipped real_mamba (must-run) test fails the build instead
+# of scrolling past as 2 skipped.
 test-cpu:
-	pytest -m "not cuda"
+	pytest -m "not cuda" --strict-deps --fail-on-skip
 
 test-cuda:
 	pytest -m "cuda"
+
+# Everything, including the 8 s / RAM-ceiling perf probes.
+test-all:
+	pytest --strict-deps --fail-on-skip -m "not cuda"
+
+# Fast feedback: no model inference, no subprocess probes.
+test-quick:
+	pytest -m "not cuda and not slow and not memory"
 
 demo:
 	$(PY) demo.py
