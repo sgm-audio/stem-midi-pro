@@ -16,4 +16,5 @@ The v1 path is the **only production path**. All Mamba-3 experiment code moves u
 - One obvious place for each concern; CI, `check_syntax.py`, and `verify_structure.py` updated accordingly.
 - Research code is clearly marked as-is and unsupported (see `research/README.md`).
 - Old class names (`Slakh2100CADataset`, `MUSDBIndieDataset`) are retired everywhere including docs.
-- Future Mamba-3 work proceeds under `/research/` without destabilizing production.
+- Future Mamba-3 work proceeds under `/research/` without destabilizing the deployable v1 path.
+- “Production path” means the selected code path, not a claim of trained quality; API/CLI readiness requires an explicit checkpoint (ADR 0007).

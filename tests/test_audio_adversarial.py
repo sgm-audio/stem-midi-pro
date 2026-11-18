@@ -423,6 +423,10 @@ def test_one_minute_upload_fits_in_2gb(tmp_path):
 
     with open("configs/model_config.yaml", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    # This is a structural memory probe, not production inference. Opt into
+    # the explicit test-only random-weight path rather than weakening the
+    # checkpoint readiness guard used by file inference.
+    cfg["allow_untrained_inference"] = True
     model = StemMidiModel(cfg).eval()
     sr = int(cfg["audio"]["sample_rate"])
 

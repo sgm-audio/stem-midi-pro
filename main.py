@@ -29,6 +29,7 @@ torch.set_float32_matmul_precision("high")  # allows TF32/AVX-512 matmul where a
 # Import our custom components (after torch thread config above — intentional E402)
 from audio_io import AudioValidationError  # noqa: E402
 from models._mamba_compat import MAMBA_BACKEND  # noqa: E402
+from models.backends.factory import build_separator, build_transcriber  # noqa: E402
 from models.confidence_injector import ConfidenceInjector  # noqa: E402
 from models.losses import PerceptualAudioLoss  # noqa: E402
 from models.mamba_separator import MambaSeparator  # noqa: E402
@@ -36,6 +37,9 @@ from models.mamba_transcriber import MambaTranscriber  # noqa: E402
 from utils.quality_gates import ProcessingReport, route_by_quality  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Provenance label carried on every note that has expression data (ARCH-11.4.4).
+_EXPRESSION_SOURCE = "expression_head (untrained; ARCH-11.4.4)"
 
 # Default loud input cap (C-1 / C-6): with the chunked scan the separator no
 # longer needs O(L·d_inner·N) memory, but STFT-domain buffers and stems still
@@ -70,16 +74,23 @@ class StemMidiModel(nn.Module):
         super().__init__()
         self.cfg = config
 
+        # A freshly constructed module has random parameters. Forward passes
+        # remain available for training/unit tests, but file/stream inference
+        # must not present those weights as production output. The checkpoint
+        # loader marks a model as ready after state_dict validation.
+        # This flag is set only by a validated checkpoint load or by a backend
+        # that explicitly attests to its own pretrained weights; it is not
+        # accepted as a user-editable config value.
+        self._weights_loaded = False
+        self._allow_untrained_inference = bool(config.get("allow_untrained_inference", False))
+
         # Pluggable backends (H-9): only used when explicitly configured.
         self.backends_cfg = config.get("backends") or {}
         self._use_backends = bool(
             self.backends_cfg.get("separator") or self.backends_cfg.get("transcriber")
         )
 
-        # Initialize core components
         if self._use_backends:
-            from models.backends.factory import build_separator, build_transcriber
-
             self.separator_backend = build_separator(config)
             self.transcriber_backend = build_transcriber(config)
             self.backend_name = (
@@ -93,16 +104,19 @@ class StemMidiModel(nn.Module):
             self.backend_name = f"mamba ({MAMBA_BACKEND})"
             logger.info("StemMidiModel using built-in Mamba modules (%s)", MAMBA_BACKEND)
 
+        # Pretrained third-party backends are safe without a project checkpoint
+        # only when both constructors explicitly attest that their own weights
+        # are available. Native Mamba/fake backends never make that claim.
+        if self._use_backends:
+            self._weights_loaded = bool(
+                getattr(self.separator_backend, "weights_loaded", False)
+            ) and bool(getattr(self.transcriber_backend, "weights_loaded", False))
+
         self.confidence_injector = ConfidenceInjector(
             onset_threshold=self.cfg["transcriber"].get("onset_threshold", 0.5),
             min_confidence=self.cfg["quality_gates"]["min_confidence"],
         )
         self.loss_fn = PerceptualAudioLoss(self.cfg)
-        # Provenance (H-2 / HONESTY-1): this repo ships no trained weights, so a
-        # freshly constructed model runs on randomly-initialised defaults.
-        # `load_from_checkpoint` flips this to True. Without it a report from an
-        # untrained model is indistinguishable from a trained one.
-        self.weights_loaded = False
 
     @property
     def mamba_backend(self) -> str:
@@ -113,6 +127,26 @@ class StemMidiModel(nn.Module):
         identical, so the answer belongs in provenance.
         """
         return MAMBA_BACKEND
+
+    @property
+    def weights_loaded(self) -> bool:
+        """Whether a validated checkpoint or backend-owned weights are loaded."""
+        return self._weights_loaded
+
+    def mark_weights_loaded(self) -> None:
+        """Mark this instance safe for file inference after state_dict validation."""
+        self._weights_loaded = True
+
+    def _ensure_inference_ready(self) -> None:
+        """Reject accidental production use of random initialization."""
+        if self._weights_loaded or self._allow_untrained_inference:
+            return
+        raise RuntimeError(
+            "No trained checkpoint is loaded. Set MODEL_CHECKPOINT_PATH (or pass "
+            "--checkpoint) to a validated checkpoint before processing audio. "
+            "Set allow_untrained_inference=true only for explicit development/tests; "
+            "random weights are not usable production output."
+        )
 
     # ------------------------------------------------------------------
     # Component wrappers (unify the Mamba-module and pluggable-backend paths)
@@ -126,17 +160,18 @@ class StemMidiModel(nn.Module):
         guitar, bass, _residual, _state_cache, metrics = self.separator(audio)
         return guitar, bass, metrics
 
-    def _transcribe(self, stem: torch.Tensor) -> dict:
-        """Returns dict with onset_logits / pitch_logits / velocity /
-        confidence (all tensors) and optional per-batch ``events`` (backend)."""
+    def _transcribe(self, stem: torch.Tensor, instrument: str | None = None) -> dict:
+        """Transcribe one stem, optionally selecting its backend instrument."""
         if self._use_backends:
+            if instrument is not None and hasattr(self.transcriber_backend, "set_instrument"):
+                self.transcriber_backend.set_instrument(instrument)
             out = self.transcriber_backend.transcribe(stem)
             return {
                 "onset_logits": out.get("onset_logits"),
                 "pitch_logits": out.get("pitch_logits"),
                 "velocity": out.get("velocity"),
-                "confidence": out.get("confidence"),
                 "expression": out.get("expression"),
+                "confidence": out.get("confidence"),
                 "events": out.get("events"),
             }
         onset, pitch, velocity, expression, confidence = self.transcriber(stem)
@@ -144,9 +179,8 @@ class StemMidiModel(nn.Module):
             "onset_logits": onset,
             "pitch_logits": pitch,
             "velocity": velocity,
-            "confidence": confidence,
-            # EXPR-1: the head's output used to be discarded here (`_expression`).
             "expression": expression,
+            "confidence": confidence,
             "events": None,
         }
 
@@ -231,21 +265,33 @@ class StemMidiModel(nn.Module):
         guitar_stem, bass_stem, sep_metrics = self._separate(audio)
 
         # Transcription per stem (H-8: bass gets its own transcription)
-        guitar_tr = self._transcribe(guitar_stem)
-        bass_tr = self._transcribe(bass_stem)
+        guitar_tr = self._transcribe(guitar_stem, "guitar")
+        bass_tr = self._transcribe(bass_stem, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
 
-        guitar_meta, guitar_conf = self._enhance(guitar_tr, guitar_stem)
-        bass_meta, bass_conf = self._enhance(bass_tr, bass_stem)
+        guitar_meta, _ = self._enhance(guitar_tr, guitar_stem)
+        bass_meta, _ = self._enhance(bass_tr, bass_stem)
 
-        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
+        guitar_notes = len(guitar_meta["midi_events"])
+        bass_notes = len(bass_meta["midi_events"])
+        total_notes = guitar_notes + bass_notes
+        avg_confidence = (
+            (
+                guitar_meta["summary"]["avg_confidence"] * guitar_notes
+                + bass_meta["summary"]["avg_confidence"] * bass_notes
+            )
+            / total_notes
+            if total_notes
+            else 0.0
+        )
 
         midi_metadata = {
             "guitar": guitar_meta,
             "bass": bass_meta,
             "summary": {
                 "avg_confidence": avg_confidence,
+                "confidence_encoding": "polyphonic_key_pressure",
                 "low_confidence_count": (
                     guitar_meta["summary"]["low_confidence_count"]
                     + bass_meta["summary"]["low_confidence_count"]
@@ -261,14 +307,19 @@ class StemMidiModel(nn.Module):
         }
 
         # 3. Processing report for quality gating (batch element 0 — B=1 is the
-        #    supported inference shape; M-12)
+        #    supported inference shape; M-12). The public metric is a named
+        #    heuristic proxy, not reference-based SI-SDR.
+        artifact_flags = self._detect_artifacts(guitar_stem, bass_stem, source=audio)
+        if not self._weights_loaded and "untrained_weights" not in artifact_flags:
+            artifact_flags.append("untrained_weights")
         report = ProcessingReport(
-            centroid_separation_db=sep_metrics[0, 0].item(),
-            phase_coherence=sep_metrics[0, 1].item(),
+            separation_proxy=float(sep_metrics[:, 0].mean().item()),
+            phase_coherence=float(sep_metrics[:, 1].mean().item()),
             avg_confidence=avg_confidence,
-            artifact_flags=self._detect_artifacts(guitar_stem, bass_stem, source=audio),
+            artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             config=self.cfg,
+            model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
             weights_loaded=self.weights_loaded,
         )
@@ -507,33 +558,23 @@ class StemMidiModel(nn.Module):
                 "velocity": vel_values[b, t].item(),
                 "confidence": confidence[b, t].item(),
             }
-            if expression is not None and expression.dim() == 3:
-                event["expression"] = self._expression_at(expression, b, t)
+            if expression is not None:
+                values = expression[b, t].detach().cpu().flatten().tolist()
+                names = self.cfg["transcriber"].get(
+                    "expression_heads", ["bend", "vibrato", "slide"]
+                )
+                # The head is sigmoid, so every channel is already 0..1 with 0.5
+                # neutral (the writer's convention). The value is tagged with
+                # where it came from: an untrained head's output must never pass
+                # for learned phrasing.
+                event["expression"] = {
+                    name: max(0.0, min(1.0, float(values[i])))
+                    for i, name in enumerate(names)
+                    if i < len(values)
+                }
+                event["expression"]["source"] = _EXPRESSION_SOURCE
             events.append(event)
         return events
-
-    def _expression_at(self, expression: torch.Tensor, batch: int, frame: int) -> dict:
-        """Name the expression head's channels for one note (EXPR-1).
-
-        The head emits an unnamed E-vector; the config declares the order
-        (``transcriber.expression_heads``, e.g. ["bend", "vibrato", "slide"]).
-        Only channels the writer understands are surfaced: ``bend`` (-1..1) and
-        ``vibrato`` (0..1, magnitude). Everything else stays in ``vector`` so a
-        consumer can still use it.
-
-        Every event is labelled ``source`` because the head is UNTRAINED
-        (ARCH-11.4.4): these values are not predictions anyone should trust
-        without opt-in, and the MIDI writer will not emit them unless asked.
-        """
-        heads = list((self.cfg.get("transcriber") or {}).get("expression_heads") or [])
-        vector = [float(v) for v in expression[batch, frame]]
-        named: dict = {"vector": vector, "source": "expression_head (untrained; ARCH-11.4.4)"}
-        for name, value in zip(heads, vector, strict=False):
-            if name == "bend":
-                named["bend"] = max(-1.0, min(1.0, value))
-            elif name == "vibrato":
-                named["vibrato"] = max(0.0, min(1.0, abs(value)))
-        return named
 
     @staticmethod
     def _stem_is_silent(stem: torch.Tensor) -> bool:
@@ -663,19 +704,32 @@ class StemMidiModel(nn.Module):
         Mirror of the ``_forward_impl`` tail used by the chunked file path, so a
         long upload and a short one produce the same shape of answer.
         """
-        guitar_tr = self._transcribe(guitar)
-        bass_tr = self._transcribe(bass)
+        guitar_tr = self._transcribe(guitar, "guitar")
+        bass_tr = self._transcribe(bass, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
-        guitar_meta, guitar_conf = self._enhance(guitar_tr, guitar)
-        bass_meta, bass_conf = self._enhance(bass_tr, bass)
-        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
+        guitar_meta, _ = self._enhance(guitar_tr, guitar)
+        bass_meta, _ = self._enhance(bass_tr, bass)
+
+        guitar_notes = len(guitar_meta["midi_events"])
+        bass_notes = len(bass_meta["midi_events"])
+        total_notes = guitar_notes + bass_notes
+        avg_confidence = (
+            (
+                guitar_meta["summary"]["avg_confidence"] * guitar_notes
+                + bass_meta["summary"]["avg_confidence"] * bass_notes
+            )
+            / total_notes
+            if total_notes
+            else 0.0
+        )
 
         midi_metadata = {
             "guitar": guitar_meta,
             "bass": bass_meta,
             "summary": {
                 "avg_confidence": avg_confidence,
+                "confidence_encoding": "polyphonic_key_pressure",
                 "low_confidence_count": (
                     guitar_meta["summary"]["low_confidence_count"]
                     + bass_meta["summary"]["low_confidence_count"]
@@ -684,22 +738,24 @@ class StemMidiModel(nn.Module):
                     guitar_meta["summary"]["alignment_warnings"]
                     + bass_meta["summary"]["alignment_warnings"]
                 ),
-                "total_notes": (
-                    guitar_meta["summary"]["total_notes"] + bass_meta["summary"]["total_notes"]
-                ),
+                "total_notes": total_notes,
             },
         }
 
         m = metrics.detach().float()
         if m.dim() == 2:  # (B, 2) from _separate; (2,) from _separate_chunked
-            m = m[0]
+            m = m.mean(dim=0)
+        artifact_flags = self._detect_artifacts(guitar, bass, source=source)
+        if not self._weights_loaded and "untrained_weights" not in artifact_flags:
+            artifact_flags.append("untrained_weights")
         report = ProcessingReport(
-            centroid_separation_db=m[0].item(),
-            phase_coherence=m[1].item(),
+            separation_proxy=float(m[0].item()),
+            phase_coherence=float(m[1].item()),
             avg_confidence=avg_confidence,
-            artifact_flags=self._detect_artifacts(guitar, bass, source=source),
+            artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             config=self.cfg,
+            model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
             weights_loaded=self.weights_loaded,
         )
@@ -753,19 +809,24 @@ class StemMidiModel(nn.Module):
             "bass": bass_meta,
             "summary": {
                 "avg_confidence": 0.0,
+                "confidence_encoding": "polyphonic_key_pressure",
                 "low_confidence_count": 0,
                 "alignment_warnings": 0,
                 "total_notes": 0,
             },
         }
         silence = torch.zeros_like(audio_t)
+        artifact_flags = self._detect_artifacts(silence, silence, source=audio_t)
+        if not self._weights_loaded and "untrained_weights" not in artifact_flags:
+            artifact_flags.append("untrained_weights")
         report = ProcessingReport(
-            centroid_separation_db=0.0,
+            separation_proxy=0.0,
             phase_coherence=0.0,
             avg_confidence=0.0,
-            artifact_flags=self._detect_artifacts(silence, silence, source=audio_t),
+            artifact_flags=artifact_flags,
             low_confidence_notes=0,
             config=self.cfg,
+            model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
             weights_loaded=self.weights_loaded,
         )
@@ -902,6 +963,7 @@ class StemMidiModel(nn.Module):
                 clone of the model (PERF-7.7/7.8). Output shapes are identical
                 to the fp32 path.
         """
+        self._ensure_inference_ready()
         if quantize:
             return self._get_quantized_self().process_audio_file(audio_path, quantize=False)
 
@@ -975,10 +1037,13 @@ class StemMidiModel(nn.Module):
         Returns:
             Same format as process_audio_file (aggregated outputs)
         """
+        self._ensure_inference_ready()
         audio, sr = self._load_audio(audio_path)
         audio = self._resample_to_target(audio, sr)
         audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0)
         sr = int(self.cfg["audio"]["sample_rate"])
+
+        self._validate_audio(audio_t, audio_path)
 
         total_len = audio_t.shape[-1]
         chunk_len = max(1, int(chunk_seconds * sr))
@@ -1036,20 +1101,32 @@ class StemMidiModel(nn.Module):
 
         # Transcribe the recombined stems once — real logits on the full
         # timeline (C-2), no per-chunk frame-grid drift.
-        guitar_tr = self._transcribe(full_guitar)
-        bass_tr = self._transcribe(full_bass)
+        guitar_tr = self._transcribe(full_guitar, "guitar")
+        bass_tr = self._transcribe(full_bass, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
-        guitar_meta, guitar_conf = self._enhance(guitar_tr, full_guitar)
-        bass_meta, bass_conf = self._enhance(bass_tr, full_bass)
+        guitar_meta, _ = self._enhance(guitar_tr, full_guitar)
+        bass_meta, _ = self._enhance(bass_tr, full_bass)
 
-        avg_confidence = torch.stack([guitar_conf.mean(), bass_conf.mean()]).mean().item()
+        guitar_notes = len(guitar_meta["midi_events"])
+        bass_notes = len(bass_meta["midi_events"])
+        total_notes = guitar_notes + bass_notes
+        avg_confidence = (
+            (
+                guitar_meta["summary"]["avg_confidence"] * guitar_notes
+                + bass_meta["summary"]["avg_confidence"] * bass_notes
+            )
+            / total_notes
+            if total_notes
+            else 0.0
+        )
 
         midi_metadata = {
             "guitar": guitar_meta,
             "bass": bass_meta,
             "summary": {
                 "avg_confidence": avg_confidence,
+                "confidence_encoding": "polyphonic_key_pressure",
                 "low_confidence_count": (
                     guitar_meta["summary"]["low_confidence_count"]
                     + bass_meta["summary"]["low_confidence_count"]
@@ -1058,17 +1135,23 @@ class StemMidiModel(nn.Module):
                     guitar_meta["summary"]["alignment_warnings"]
                     + bass_meta["summary"]["alignment_warnings"]
                 ),
+                "total_notes": total_notes,
             },
         }
 
+        stream_artifacts = self._detect_artifacts(full_guitar, full_bass, source=audio_t)
+        if not self._weights_loaded and "untrained_weights" not in stream_artifacts:
+            stream_artifacts.append("untrained_weights")
         report = ProcessingReport(
-            centroid_separation_db=final_metrics[0].item(),
-            phase_coherence=final_metrics[1].item(),
+            separation_proxy=float(final_metrics[0].item()),
+            phase_coherence=float(final_metrics[1].item()),
             avg_confidence=avg_confidence,
-            artifact_flags=self._detect_artifacts(full_guitar, full_bass),
+            artifact_flags=stream_artifacts,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             config=self.cfg,
+            model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
+            weights_loaded=self.weights_loaded,
         )
 
         routing = route_by_quality(report)
@@ -1097,6 +1180,11 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
             "config_path is required when loading from checkpoint "
             "(config cannot be extracted from checkpoint in this prototype)"
         )
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found at {checkpoint_path}. Set MODEL_CHECKPOINT_PATH "
+            "to a trained checkpoint file."
+        )
 
     import yaml
 
@@ -1105,10 +1193,21 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
 
     model = StemMidiModel(config=config)
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+    if isinstance(ckpt, dict):
+        if "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+        elif "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+        else:
+            state_dict = ckpt
+    else:
+        state_dict = ckpt
+    if not isinstance(state_dict, dict):
+        raise ValueError(
+            "Checkpoint must contain a state_dict/model_state_dict mapping or be a bare state_dict"
+        )
     model.load_state_dict(state_dict)
-    # Provenance (H-2): from here on, reports may claim trained weights.
-    model.weights_loaded = True
+    model.mark_weights_loaded()
     return model
 
 
@@ -1126,19 +1225,36 @@ def cli() -> None:
         help="Path to model config YAML (or set MODEL_CONFIG_PATH)",
     )
     parser.add_argument("--audio", type=str, required=True, help="Path to input audio file")
-    parser.add_argument("--checkpoint", type=str, help="Path to checkpoint (.pt) to load")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Path to a trained checkpoint (.pt); required for native-Mamba file inference",
+    )
     args = parser.parse_args()
 
     # Load config
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    if args.checkpoint:
-        # Load from checkpoint
-        model = load_from_checkpoint(args.checkpoint, args.config)
-    else:
-        # Initialize new model
+    checkpoint = (
+        args.checkpoint
+        or os.environ.get("MODEL_CHECKPOINT_PATH")
+        or config.get("restore_from_path")
+    )
+    if checkpoint:
+        model = load_from_checkpoint(checkpoint, args.config)
+    elif (config.get("backends") or {}).get("weights_source") == "pretrained_dependencies":
         model = StemMidiModel(config)
+        if not model.weights_loaded:
+            parser.error(
+                "pretrained backends did not load weights; install their dependencies "
+                "or pass --checkpoint"
+            )
+    else:
+        parser.error(
+            "a trained checkpoint is required for file inference; pass --checkpoint "
+            "or set MODEL_CHECKPOINT_PATH"
+        )
 
     # Process audio
     result = model.process_audio_file(args.audio)
@@ -1146,9 +1262,7 @@ def cli() -> None:
     # Print summary
     print("Processing complete!")
     print(f"Quality: {result['report'].quality_tier.value}")
-    print(
-        f"Centroid separation (proxy, not SI-SDR): {result['report'].centroid_separation_db:.1f}dB"
-    )
+    print(f"Centroid separation proxy (not SI-SDR): " f"{result['report'].separation_proxy:.1f}")
     print(f"Backend: {result['report'].backend}")
     print(f"Avg Confidence: {result['report'].avg_confidence:.0%}")
     print(f"Routing: {result['routing']['action']}")

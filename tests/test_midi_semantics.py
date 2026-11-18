@@ -215,40 +215,17 @@ def test_top_end_of_confidence_range_reaches_cc_127():
     assert value == round(0.999 * 127) == 127, f"got {value}"
 
 
-def test_confidence_controller_is_gp1_not_a_channel_mode_message():
-    """Regression guard for main's fix: CC#127 is 'All Sound Off', not a data lane.
+def test_confidence_uses_note_specific_pressure_not_channel_mode_messages():
+    """Confidence is Polyphonic Key Pressure, never CC#127 channel mode."""
+    from utils.midi import build_midi_from_events
 
-    Confidence rides CC#16 (General Purpose 1) by default; #127 only appears if an
-    operator opts back in through MIDI_CONFIDENCE_CC, because spec-compliant gear
-    treats 120-127 as Channel Mode messages (a 0.9-confidence render used to send
-    All Sound Off / Panic to every device on the channel).
-    """
-    from utils.midi import DEFAULT_CONFIDENCE_CC, build_midi_from_events, resolve_confidence_cc
-
-    assert DEFAULT_CONFIDENCE_CC == 16
-    assert resolve_confidence_cc() == 16
     events = [_ev(60, 0, confidence=0.9), _ev(61, 20, confidence=0.4)]
-    parsed = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=16)
-    assert parsed["cc_values"] == [int(0.9 * 127), int(0.4 * 127)]
-    legacy = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=127)
-    assert legacy["cc_values"] == [], "CC#127 must not be emitted unless explicitly requested"
-
-    # the env escape hatch the docs promise
-    import os
-
-    os.environ["MIDI_CONFIDENCE_CC"] = "127"
-    try:
-        assert resolve_confidence_cc() == 127
-        with_mode = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=127)
-        assert (
-            len(with_mode["cc_values"]) == 2
-        ), "MIDI_CONFIDENCE_CC=127 must restore the legacy mapping"
-    finally:
-        del os.environ["MIDI_CONFIDENCE_CC"]
-    assert resolve_confidence_cc(127) == 127  # explicit value warns but is allowed
-
-    with pytest.raises(ValueError, match="0-127"):
-        resolve_confidence_cc(999)
+    mid = mido.MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
+    pressure = [m for m in mid.tracks[0] if m.type == "polytouch"]
+    assert [(m.note, m.value) for m in pressure] == [(60, int(0.9 * 127)), (61, int(0.4 * 127))]
+    assert not [
+        m for m in mid.tracks[0] if m.type == "control_change" and m.control == 127
+    ], "CC#127 must not be emitted for confidence"
 
 
 def test_confidence_ordering_survives_into_cc_values():

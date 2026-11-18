@@ -7,9 +7,9 @@ Expected behavior (per TODO API-6.5):
 - with a valid key → 200
 (`/health`, `/live`, `/ready`, `/metrics`, `/docs` remain open.)
 
-Marked xfail(strict=False) because API-6.5 (API_KEYS env middleware) is not
-yet implemented; the current stub uses a single `API_KEY` env var +
-X-API-Key header and returns 401 for both missing and invalid keys.
+The implementation uses comma-separated `API_KEYS` values and a
+`Authorization: Bearer <key>` header; the tests below lock the 401/403
+contract and leave health endpoints open.
 """
 
 import io
@@ -49,7 +49,7 @@ def _client_and_api(monkeypatch):
 
 @pytest.mark.integration
 def test_process_requires_api_key(monkeypatch, temp_audio_file):
-    """No key configured → request with no key rejected with 401."""
+    """When key auth is configured, a request with no key is rejected with 401."""
     monkeypatch.setenv("API_KEYS", "secret-key-1,secret-key-2")
     _api, client = _client_and_api(monkeypatch)
 

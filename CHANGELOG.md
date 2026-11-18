@@ -56,34 +56,34 @@ contradicted the documented "the saturated centroid proxy must not decide the
 tier" contract was corrected. Suite: 336 passed, 42 xfailed (known-bug),
 1 skipped.
 
-### Ported from PR #13: expression export, tempo-map helpers, verification scripts (2026-11-18)
+### Reconciled with `main`: expression export is opt-in (2026-11-18)
 PR #13 (`arena/d6d3cd74-…`) was built on the pre-rewrite `main` and could not be
-rebased: its overlapping fixes (60x MIDI clock, memory ceiling, gate changes) are
-already in `main`, so only its unique work is ported here.
+rebased. Meanwhile `main` had independently grown most of the same fixes plus a
+newer MIDI writer, so this branch keeps `main`'s writer and adds only what was
+missing.
 
 - **Expression export (`utils/midi.py`, `main.py`)** — the transcriber's
-  expression head is no longer discarded (`_expression`). Each note carries
-  `expression` with channels named from `transcriber.expression_heads` (`bend`,
-  `vibrato`), a raw `vector`, and `source: expression_head (untrained;
-  ARCH-11.4.4)`. `build_midi_from_events(..., include_expression=True)` writes
-  pitch-bend and CC#1; it is **off by default** because the head is untrained.
-  Resolves EXPR-1 (the audit's BUG-MIDI-9).
-- **Tempo support in the writer** — `tempo_us` parameter (default 120 BPM) is
-  honoured by both `set_tempo` and the frame→tick conversion; non-positive
-  values raise.
-- **Confidence marker track** — since one CC cannot distinguish simultaneous
-  notes, each note's exact confidence is also written as a marker
-  (`confidence note=… onset_tick=… value=…`); suppress with
-  `include_confidence_track=False`.
+  expression head is no longer discarded. Each note carries `expression` with
+  channels named from `transcriber.expression_heads` (`bend`, `vibrato`,
+  `slide`) plus `source: expression_head (untrained; ARCH-11.4.4)`. The writer
+  maps bend → pitch-wheel, vibrato → CC1, slide → CC74 `main`'s way (0..1 with
+  0.5 neutral, matching the sigmoid head), but only when the caller passes
+  `include_expression=True`. Export is **off by default**: the head is untrained,
+  so writing it into every file would fabricate phrasing. Resolves EXPR-1 (the
+  audit's BUG-MIDI-9), which `main`'s default-on wiring left pinned.
 - **`utils/midi_targets`** — `build_tempo_map` / `tick_to_seconds` exported
   publicly (they were `_`-private).
 - **`scripts/verify_midi.py`, `verify_numerics.py`, `verify_api.py`** and
-  **`tests/test_numerics.py`** — ported and adapted to this codebase. They are
-  the reproduction scripts for the audit claims and now run green here.
+  **`tests/test_numerics.py`** — the reproduction scripts behind the audit
+  claims, ported and adapted to this codebase; all three run green here.
 
-Measured by the ported `verify_numerics.py`, two real defects remain pinned:
-the separator's hidden state collapses ~2.5e9 across its six Mamba blocks
-(`1 → 4.9e-2 → … → 4.0e-10`, pinned as `C-1` in `tests/test_numerics.py`), and
+Dropped from #13 as superseded by `main`: the writer's `tempo_us` parameter and
+its confidence marker track (polyphonic key pressure already gives per-note
+values), and the 60x clock, memory-ceiling, gate and `models/*` changes.
+
+Measured by the ported `verify_numerics.py`, two real defects are pinned: the
+separator's hidden state collapses ~2.5e9 across its six Mamba blocks
+(`1 → 4.9e-2 → … → 4.0e-10`, pinned as `SEP-2` in `tests/test_numerics.py`), and
 its three independent sigmoid masks sit at 0.500 ± 0.005, so the stems do not
 sum to the mix (rel. err 0.5, already pinned as `SEP-1`).
 
@@ -97,8 +97,8 @@ sum to the mix (rel. err 0.5, already pinned as `SEP-1`).
 - Renamed `data/canadian_datasets.py` → `data/datasets.py`; classes renamed (`AudioDataset`, `Slakh2100YourMT3Dataset`, `MUSDB18HQDataset`, `get_data_loaders`).
 
 ### API hardening (TODO Section 6)
-- Upload streaming with a 50 MiB cap and `413` responses; audio validation (format, duration, sample rate).
-- Optional API-key auth (`X-API-Key`) and configurable CORS allowlist.
+- Buffered/chunked upload reading with a 500 MB cap and `413` responses; audio validation (format, duration, sample rate).
+- Optional API-key auth (`Authorization: Bearer <key>` via `API_KEYS`) and configurable CORS allowlist.
 - Template rendering endpoints with path-traversal protection.
 
 ### Documentation (TODO Section 10)
@@ -108,8 +108,8 @@ sum to the mix (rel. err 0.5, already pinned as `SEP-1`).
 - User-facing templates in `user_content/` audited against the real processing-report keys.
 
 ### Known outstanding work
-- NeMo/PyTorch-Lightning removal from the training loop (TR-12.3), dataset-class collapse (RF-3.1.1)
-- True streaming SSM state passing (C-2.5/ARCH-11.8.1), coverage gate hardening (T-8.1.3/T-8.4.1)
+- Dataset-class collapse (RF-3.1.1), pitch/velocity/duration training wiring, and coverage-gate hardening remain open.
+- True streaming SSM state passing (C-2.5/ARCH-11.8.1), trained-checkpoint quality evaluation, target-hardware benchmarking, optional-backend validation, and DAW evidence remain open.
 
 ### Maintenance pass 2026-10-07 (automated review fixes)
 - Deleted the stale `stem_midi_pro/` mirror tree (root files are canonical).

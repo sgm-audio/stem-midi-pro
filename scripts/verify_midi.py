@@ -87,24 +87,47 @@ def check_polyphony() -> None:
     print(f"polyphony   : 3 notes on one frame -> onsets {onsets}")
 
 
-def check_controller() -> None:
+def check_confidence() -> None:
+    """Confidence must be per note, and must not squat on a Channel Mode CC."""
     events = [
         {"note": 60, "onset_frame": 0, "duration_frames": 20, "velocity": 90, "confidence": 0.9},
         {"note": 64, "onset_frame": 0, "duration_frames": 20, "velocity": 90, "confidence": 0.4},
     ]
-    default_mid = _parse(build_midi_from_events({"midi_events": events}, "guitar"))
-    controls = sorted({m.control for m in default_mid.tracks[0] if m.type == "control_change"})
-    markers = [m.text for track in default_mid.tracks for m in track if m.type == "marker"]
-    print(f"confidence  : default controls {controls}, marker track {markers}")
+    mid = _parse(build_midi_from_events({"midi_events": events}, "guitar"))
+    track = mid.tracks[0]
+    polytouch = {m.note: m.value for m in track if m.type == "polytouch"}
+    controls = sorted({m.control for m in track if m.type == "control_change"})
+    expected = {60: round(0.9 * 127), 64: round(0.4 * 127)}
+    print(f"confidence  : polytouch per note {polytouch} (expected {expected})")
+    print(f"              CC lanes used {controls} (CC#120-127 are Channel Mode; none emitted)")
 
-    legacy = _parse(build_midi_from_events({"midi_events": events}, "guitar", confidence_cc=127))
-    legacy_controls = sorted({m.control for m in legacy.tracks[0] if m.type == "control_change"})
-    print(f"legacy CC   : confidence_cc=127 -> controls {legacy_controls}")
 
-    try:
-        build_midi_from_events({"midi_events": events}, "guitar", confidence_cc=121)
-    except ValueError as exc:
-        print(f"channel mode: CC#121 rejected -> {exc}")
+def check_expression() -> None:
+    """The untrained expression head is exported only when asked for, and labelled."""
+    event = {
+        "note": 62,
+        "onset_frame": 0,
+        "duration_frames": 40,
+        "velocity": 90,
+        "confidence": 0.8,
+        "expression": {
+            "bend": 0.75,
+            "vibrato": 1.0,
+            "slide": 0.0,
+            "source": "expression_head (untrained)",
+        },
+    }
+    default_types = {
+        m.type for m in _parse(build_midi_from_events({"midi_events": [event]}, "guitar")).tracks[0]
+    }
+    print(f"expression  : default render message types {sorted(default_types)} (no pitchwheel)")
+
+    mid = _parse(
+        build_midi_from_events({"midi_events": [event]}, "guitar", include_expression=True)
+    )
+    bend = next(m for m in mid.tracks[0] if m.type == "pitchwheel")
+    ccs = {m.control: m.value for m in mid.tracks[0] if m.type == "control_change"}
+    print(f"              opt-in -> pitchwheel {bend.pitch}, CC1 {ccs.get(1)}, CC74 {ccs.get(74)}")
 
 
 def check_durations() -> None:
@@ -129,7 +152,6 @@ def check_durations() -> None:
                 ]
             },
             "guitar",
-            tempo_us=500_000,
             hop_length=HOP,
             sample_rate=SR,
         )
@@ -182,6 +204,7 @@ def check_tempo() -> None:
 if __name__ == "__main__":
     check_clock(86, 3000)
     check_polyphony()
-    check_controller()
+    check_confidence()
+    check_expression()
     check_durations()
     check_tempo()
