@@ -74,7 +74,7 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ### 4. Separation Module (`models/mamba_separator.py`) [IMPLEMENTED]
 
-> The first separator metric is `centroid_separation_proxy`; it is a heuristic score and not reference-based SI-SDR or dB certification. A deprecated `si_sdr` compatibility alias may appear in reports, but routing uses the named proxy. C-2.5 state caching remains planned.
+> The first separator metric is `centroid_separation_proxy`; it is a heuristic score and not reference-based SI-SDR or dB certification. A deprecated `si_sdr` compatibility alias may appear in reports. The proxy is reported for observability and is not a quality-tier threshold. C-2.5 state caching remains planned.
 - **Architecture**: 12-layer Mamba-SSM
 - **Input**: Raw audio waveform (B, C, T)
 - **Processing**:
@@ -136,9 +136,9 @@ Stem+MIDI Pro is an audio AI service that combines source separation and audio-t
 
 ### 8. Quality Gates (`utils/quality_gates.py`) [IMPLEMENTED]
 - **Three-Tier System**:
-  1. **Studio**: Confidence ≥0.85 AND centroid-separation proxy ≥20 → heuristic gate only; never a SI-SDR certification
-  2. **Draft**: 0.70 ≤ confidence < 0.85 → manual DAW review
-  3. **Complex**: confidence <0.70, artifacts, or untrained weights → manual DAW review/raw-output options
+  1. **Studio**: Confidence ≥0.85, zero low-confidence notes, and no artifact/untrained/invalid flags → heuristic gate only; the reported proxy is not consulted and this is never a SI-SDR certification
+  2. **Draft**: Confidence ≥0.70 without blocking artifacts, but below the Studio conditions → manual DAW review
+  3. **Complex**: invalid metrics, confidence <0.70, artifacts, or untrained weights → manual DAW review/raw-output options
 - **Artifact Detection**:
   - Clipping detection (sample values >0.99)
   - Noise floor estimation

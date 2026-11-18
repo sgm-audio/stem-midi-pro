@@ -137,7 +137,7 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 
 | Field | Type | Description |
 |---|---|---|
-| `separation_proxy` | float | Centroid-separation heuristic used for routing; not SI-SDR and not a dB certification |
+| `separation_proxy` | float | Centroid-separation heuristic reported for observability; it is not used as a tier threshold, SI-SDR, or a dB certification |
 | `si_sdr` | float | Deprecated compatibility alias for `separation_proxy`; do not interpret as SI-SDR |
 | `metric_semantics` | string | `centroid_separation_proxy_not_si_sdr` |
 | `phase_coherence` | float | Model-reported phase score, 0–1; not independent quality certification |
@@ -150,9 +150,9 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 
 ## Quality Tiers
 
-1. **Studio gate** — `avg_confidence ≥ 0.85` **and** `separation_proxy ≥ 20`: direct download with a warning to verify; this is not SI-SDR certification.
-2. **Draft** — `0.70 ≤ avg_confidence < 0.85`: refine low-confidence notes in your DAW; artifact flags and untrained weights never pass this tier.
-3. **Complex** — `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
+1. **Studio gate** — `avg_confidence ≥ 0.85`, no artifact flags, and `low_confidence_notes == 0`: direct download with a warning to verify; the reported proxy is observability only and this is not SI-SDR certification.
+2. **Draft** — `avg_confidence ≥ 0.70` without artifacts or untrained weights, but below the studio conditions: refine low-confidence notes in your DAW.
+3. **Complex** — invalid metrics, `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
 
 ## CORS
 

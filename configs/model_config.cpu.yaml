@@ -57,4 +57,4 @@ quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
-  min_separation_proxy: 20.0  # heuristic score; not dB SI-SDR
+  min_separation_proxy: 20.0  # deprecated metadata only; proxy is not a tier gate or SI-SDR

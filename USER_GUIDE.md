@@ -81,11 +81,11 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 
 ### Quality Tiers
 
-**🟢 Studio gate** — confidence ≥ 85% and centroid proxy ≥ 20. This is a heuristic route only, not SI-SDR certification or a promise that the unedited output is correct. A report from untrained weights cannot reach this tier.
+**🟢 Studio gate** — confidence ≥ 85%, no low-confidence notes, and no artifact or invalid flags. The reported centroid proxy is observability only; this is a heuristic route, not SI-SDR certification or a promise that the unedited output is correct. A report from untrained weights cannot reach this tier.
 
-**🟡 Draft** — confidence 70–85%. Review and refine notes in your DAW.
+**🟡 Draft** — confidence ≥ 70% without blocking artifacts, but below the Studio conditions. Review and refine notes in your DAW.
 
-**🔴 Complex** — confidence < 70%, artifacts, or untrained weights. Raw output may be delivered for inspection, but treat it as a sketch.
+**🔴 Complex** — invalid metrics, confidence < 70%, artifacts, or untrained weights. Raw output may be delivered for inspection, but treat it as a sketch.
 
 ## Working with the MIDI in Your DAW
 
