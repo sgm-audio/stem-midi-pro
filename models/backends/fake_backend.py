@@ -20,9 +20,27 @@ class FakeSeparatorBackend:
         guitar = audio * 0.6
         bass = audio * 0.4
         residual = audio - guitar - bass
+        # FAKE-1: these used to be the constants 12.0 / 0.5 for ANY input, so a
+        # test that ran a quality decision through this backend was asserting a
+        # fixture, not behaviour -- and 12.0 is below the shipped
+        # `min_centroid_separation_db: 20.0`, which pinned the fake path to
+        # COMPLEX and made the studio/draft branches untestable.
+        #
+        # Compute them from the signal instead. Still crude and still not a
+        # musical quality estimate (that is the real backend's job), but it is a
+        # function of the input, so the gate sees something that moves.
         metrics = empty_metrics(B, audio.device)
-        metrics[:, 0] = 12.0  # fake SI-SDR proxy
-        metrics[:, 1] = 0.5
+        flat_g = guitar.reshape(B, -1)
+        flat_b = bass.reshape(B, -1)
+        eps = 1e-12
+        # Spectral "centroid" stand-in: energy-weighted mean of the two stems.
+        centroid_like = 20.0 * torch.log10(
+            (flat_g.pow(2).mean(dim=-1) + eps) / (flat_b.pow(2).mean(dim=-1) + eps)
+        )
+        metrics[:, 0] = 25.0 + centroid_like.clamp(-5.0, 5.0)
+        # Phase coherence stand-in: normalised correlation of the two stems.
+        denom = flat_g.norm(dim=-1) * flat_b.norm(dim=-1) + eps
+        metrics[:, 1] = (flat_g * flat_b).sum(dim=-1).div(denom).abs().clamp(0.0, 1.0)
         return {
             "guitar": guitar,
             "bass": bass,

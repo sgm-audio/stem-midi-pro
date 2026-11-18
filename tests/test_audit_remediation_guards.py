@@ -322,3 +322,22 @@ def test_repro_1_the_ensemble_is_still_non_degenerate(pipeline_config):
         "the MC estimate is identical to a single eval-mode forward, so dropout "
         "is inactive and the ensemble does nothing"
     )
+
+
+def test_fake_1_backend_metrics_are_a_function_of_the_signal():
+    """FAKE-1: the fake backend returned 12.0 / 0.5 for any input."""
+    from models.backends.fake_backend import FakeSeparatorBackend
+
+    be = FakeSeparatorBackend()
+    loud = torch.zeros(1, 1, 8192)
+    loud[0, 0, :] = torch.sin(torch.arange(8192) * 2 * torch.pi * 220 / 44100)
+    silent = torch.zeros(1, 1, 8192)
+
+    m_loud = be.separate(loud)["metrics"]
+    m_silent = be.separate(silent)["metrics"]
+    assert not torch.allclose(m_loud, m_silent), (
+        "the fake backend returns identical metrics for a sine and for silence, "
+        "so any gate test routed through it asserts a fixture"
+    )
+    # and it must be able to reach a passing tier, or studio/draft stay untestable
+    assert float(m_loud[0, 0]) >= 20.0

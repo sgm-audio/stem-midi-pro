@@ -150,16 +150,6 @@ def test_a_render_with_no_notes_is_never_routed_as_a_result():
     ), f"an empty render was offered for download as {tier.value} with badge {route['badge']!r}"
 
 
-@known_bug(
-    "FAKE-1",
-    "the Fake backend returns a constant centroid_separation_db=12.0 / phase_coherence=0.5 "
-    "for ANY input "
-    "(models/backends/fake_backend.py), so a test that runs a quality decision through the fake "
-    "path asserts a fixture, not behaviour — and the constant is *below* "
-    "min_centroid_separation_db, which makes "
-    "the fake path permanently COMPLEX and therefore unable to exercise the studio/draft branches "
-    "at all. Return metrics computed from the signal (even cheap ones).",
-)
 def test_backend_metrics_depend_on_the_signal(pipeline_config):
     from models.backends.fake_backend import FakeSeparatorBackend
 
