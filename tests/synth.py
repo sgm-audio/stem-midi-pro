@@ -219,10 +219,10 @@ class NoteEvent:
     off_tick: int
     on_sec: float
     off_sec: float
-    #: CC#127 value in force at this note's onset, i.e. the value a DAW or
-    # importer reads as "the confidence for this note" (last-one-wins before
-    # note_on). None when no CC#127 precedes the note. Off-by-one emission of
-    # confidence CCs is exactly what tests/test_midi_semantics.py guards.
+    #: Polyphonic Key Pressure value in force at this note's onset, i.e. the
+    # note-specific confidence value emitted by the product. None when no
+    # pressure precedes the note. Off-by-one emission of confidence metadata is
+    # exactly what tests/test_midi_semantics.py guards.
     cc_at_onset: int | None = None
     cc_after: int | None = None  # value written between this note_off and the next note_on
 
@@ -234,11 +234,11 @@ class NoteEvent:
 def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0, cc: int | None = 16) -> dict:
     """Decode an SMF into notes + absolute time in ticks and seconds.
 
-    ``cc`` selects which control-change stream to attribute to each note. The
-    product writes confidence to **CC#16** (General Purpose 1) by default —
-    ``utils.midi.DEFAULT_CONFIDENCE_CC``; CC#127 is a Channel Mode message and is
-    only emitted when ``MIDI_CONFIDENCE_CC=127`` restores the legacy mapping, so
-    pass ``cc=127`` for that. ``cc=None`` collects every control_change.
+    The product writes confidence as Polyphonic Key Pressure, a note-specific
+    MIDI message. For compatibility with the audit suite's ``cc_values`` name,
+    pressure values are collected when ``cc`` is the default 16; explicit
+    ``cc`` values select actual control-change messages, and ``cc=None``
+    collects both streams.
 
     Returns {"notes": [NoteEvent], "ticks_per_beat": int, "tempo_us": int,
              "all_messages": [mido.Message], "length_sec": float,
@@ -246,7 +246,7 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0, cc: int | None = 
     """
     import mido
 
-    src = io.BytesIO(midi_bytes) if isinstance(midi_bytes, (bytes, bytearray)) else midi_bytes
+    src = io.BytesIO(midi_bytes) if isinstance(midi_bytes, bytes | bytearray) else midi_bytes
     mid = mido.MidiFile(file=src)
     trk = mid.tracks[track]
 
@@ -269,6 +269,10 @@ def parse_midi(midi_bytes: bytes | io.BytesIO, track: int = 0, cc: int | None = 
             continue
         if msg.type == "control_change":
             if cc is None or msg.control == cc:
+                cc_events.append((tick, msg.value))
+            continue
+        if msg.type == "polytouch":
+            if cc is None or cc == 16:
                 cc_events.append((tick, msg.value))
             continue
         if msg.type == "note_on" and msg.velocity > 0:

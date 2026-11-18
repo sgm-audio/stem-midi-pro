@@ -267,6 +267,9 @@ def _child_peak_rss_mb(seconds: float, mode: str = "mono") -> float:
     """Peak RSS (VmHWM) of a fresh process that runs one full pipeline; no psutil needed."""
     cfg = {
         "name": "mem-probe",
+        # This child process is a structural CPU memory probe, not production
+        # file inference. Opt into random weights explicitly for the test only.
+        "allow_untrained_inference": True,
         "audio": {"sample_rate": SR, "n_fft": 2048, "hop_length": HOP, "n_mels": 80},
         "separator": {"d_model": 64, "n_layers": 2, "d_state": 8, "d_conv": 4, "expand": 2},
         "transcriber": {

@@ -270,13 +270,17 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
     api, _ = api_env
     zf = _zip(_post(api, tmp_path, _wav_bytes()))
     assert json.loads(zf.read("processing_report.json")) == {
-        "centroid_separation_db": 6.5,
+        "separation_proxy": 6.5,
+        "si_sdr": 6.5,
+        "metric_semantics": "centroid_separation_proxy_not_si_sdr",
         "phase_coherence": 0.42,
         "avg_confidence": 0.55,
+        "confidence_encoding": "polyphonic_key_pressure",
         "artifact_flags": ["none"],
         "low_confidence_notes": 0,
+        "model_weights_loaded": None,
         "quality_tier": "complex",
-    }, "the ZIP report disagrees with the pipeline's QualityReport"
+    }, "the ZIP report disagrees with the pipeline's ProcessingReport"
 
 
 @pytest.mark.parametrize(
@@ -343,14 +347,6 @@ def test_zip_midi_duration_matches_the_uploaded_audio(api_env, tmp_path):
     )
 
 
-@known_bug(
-    "MIDI-5",
-    "create_response_zip calls build_midi_from_events(midi_data, stem) and lets the writer fall "
-    "back to its module defaults (hop_length=512, sample_rate=44100) even though the frames came "
-    "from the configured grid and outputs['sample_rate'] is right there in the dict — a "
-    "16kHz/hop=128 model ships MIDI with every event ~2.75x off in time. Forward the pipeline's "
-    "hop_length/sample_rate into the builder.",
-)
 def test_zip_forwards_the_pipeline_grid_to_the_midi_writer(api_env, tmp_path, monkeypatch):
     api, _ = api_env
     seen: dict = {}

@@ -123,15 +123,6 @@ def test_non_default_hop_changes_note_time_one_to_one():
     assert abs(a.on_sec / b.on_sec - 4.0) < 0.01, (a.on_sec, b.on_sec)
 
 
-@known_bug(
-    "MIDI-5",
-    "api.create_response_zip() calls build_midi_from_events(midi_data, stem) with "
-    "utils.midi's module defaults (hop_length=512, sample_rate=44100) while the model's "
-    "onset frames live on cfg['audio']['hop_length'] / cfg['audio']['sample_rate']. Any "
-    "config with hop != 512 or sr != 44100 (a 16 kHz Slakh-derived config, the test "
-    "config's hop=128) shifts every MIDI note by hop_model/512 — silently. Thread the "
-    "loaded audio config into the writer (and stop defaulting HOP_LENGTH in utils.midi).",
-)
 def test_api_midi_writer_is_given_the_models_frame_grid():
     """The API must pass the model's hop/sample-rate into the MIDI writer."""
     import inspect

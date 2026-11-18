@@ -559,7 +559,7 @@ class StemMidiModel(nn.Module):
 
         # Digital silence in both stems means nothing was separated (e.g. no
         # guitar in the mix). It must not reach STUDIO via the clamped proxy.
-        if self._stems_are_silent(guitar, bass):
+        if StemMidiModel._stems_are_silent(guitar, bass):
             return ["silent_output"]
 
         # Check for clipping
