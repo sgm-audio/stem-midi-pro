@@ -37,7 +37,14 @@ def _report(
     avg_confidence: float,
     flags=("none",),
     low_confidence_notes: int = 0,
+    note_count: int | None = 1,
 ):
+    """Build a report. `note_count=1` by default so the sample is a *render*.
+
+    GATE-3 makes a zero-note render COMPLEX regardless of its numbers, so a
+    helper that left `note_count` unset would silently test a case the gate no
+    longer reaches. Tests that mean "an empty render" pass `note_count=0`.
+    """
     from utils.quality_gates import ProcessingReport
 
     return ProcessingReport(
@@ -46,6 +53,7 @@ def _report(
         avg_confidence=avg_confidence,
         artifact_flags=list(flags),
         low_confidence_notes=low_confidence_notes,
+        note_count=note_count,
         config={"quality_gates": dict(GATES)},
     )
 
@@ -130,17 +138,13 @@ def test_badges_and_actions_agree_with_the_tier():
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "GATE-3",
-    "a render containing ZERO notes can be sold as studio quality: the gate only sees "
-    "avg_confidence/si_sdr/artifact_flags, so 0 notes + confidence 0.95 + 25 dB → STUDIO → "
-    "'direct_download, ✨ Studio Quality'. Nothing in the pipeline feeds note count (or "
-    "note-density sanity) into the decision, even though ProcessingReport already carries "
-    "low_confidence_notes — require n_notes > 0 and a plausible density (measured: the "
-    "untrained transcriber emits 342-343 notes per second even for digital silence).",
-)
 def test_a_render_with_no_notes_is_never_routed_as_a_result():
-    tier, route = _tier(centroid_separation_db=25.0, avg_confidence=0.95, low_confidence_notes=0)
+    tier, route = _tier(
+        centroid_separation_db=25.0,
+        avg_confidence=0.95,
+        low_confidence_notes=0,
+        note_count=0,  # the render contains no notes at all
+    )
     assert (
         route["action"] != "direct_download"
     ), f"an empty render was offered for download as {tier.value} with badge {route['badge']!r}"

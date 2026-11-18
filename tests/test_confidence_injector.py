@@ -43,13 +43,18 @@ def test_needs_review_threshold(injector):
 
 
 def test_cc127_mapping(injector):
-    """cc_127_value must equal int(confidence * 127)."""
+    """cc_127_value must equal round(confidence * 127).
+
+    MIDI-4: truncation made 0.999 -> 126, so the top of the CC range was
+    unreachable and "fully confident" could never be expressed. This test
+    previously asserted `int(0.5 * 127) == 63`, i.e. it encoded the bug.
+    """
     events = _make_events(frames=(0, 1))
     confidence = torch.tensor([0.5, 1.0])
     energy = torch.ones(2)
 
     out = injector.inject_midi_metadata(events, confidence, energy)
-    assert out["midi_events"][0]["cc_127_value"] == int(0.5 * 127)
+    assert out["midi_events"][0]["cc_127_value"] == round(0.5 * 127)
     assert out["midi_events"][1]["cc_127_value"] == 127
 
 

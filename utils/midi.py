@@ -142,7 +142,9 @@ def build_midi_from_events(
             dur_ticks = max(1, int(default_duration_beats * ticks_per_beat))
 
         cc_val = ev.get(
-            "confidence_cc_value", ev.get("cc_127_value", int(ev.get("confidence", 0.0) * 127))
+            # MIDI-4: round, not truncate -- see confidence_injector.py.
+            "confidence_cc_value",
+            ev.get("cc_127_value", round(ev.get("confidence", 0.0) * 127)),
         )
         cc_clamped = min(127, max(0, int(cc_val)))
 

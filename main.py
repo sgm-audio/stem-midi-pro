@@ -217,6 +217,9 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=self._detect_artifacts(guitar_stem, bass_stem),
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            # GATE-3: the gate must be able to refuse an empty render.
+            note_count=len(midi_metadata["guitar"].get("midi_events") or [])
+            + len(midi_metadata["bass"].get("midi_events") or []),
             config=self.cfg,
             backend=self.backend_name,
         )
@@ -763,6 +766,9 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=self._detect_artifacts(full_guitar, full_bass),
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            # GATE-3: the gate must be able to refuse an empty render.
+            note_count=len(midi_metadata["guitar"].get("midi_events") or [])
+            + len(midi_metadata["bass"].get("midi_events") or []),
             config=self.cfg,
             backend=self.backend_name,
         )
@@ -785,8 +791,15 @@ class StemMidiModel(nn.Module):
 def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -> StemMidiModel:
     """Load model weights from a plain PyTorch checkpoint.
 
-    Expects either a raw ``state_dict`` or a dict with a ``"state_dict"`` key
-    (e.g. saved by ``train.py``). Config must come from ``config_path``.
+    Accepts a raw ``state_dict``, or a dict wrapping it under ``state_dict``
+    (``train.py``) or ``model_state_dict`` (``scripts/export_fine_tuned.py``,
+    ``scripts/fine_tune_demucs.py``, ``scripts/verify_cpu_export.py``). Config
+    must come from ``config_path``.
+
+    CKPT-1: only ``state_dict`` used to be unwrapped, so every fine-tune export
+    a user follows the docs to produce raised Missing/Unexpected key(s). A dict
+    with neither key is rejected explicitly rather than silently treated as a
+    state dict, which is what produced the confusing key errors.
     """
     if config_path is None:
         raise ValueError(
@@ -801,7 +814,24 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
 
     model = StemMidiModel(config=config)
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+    if not isinstance(ckpt, dict):
+        state_dict = ckpt
+    elif "state_dict" in ckpt:
+        state_dict = ckpt["state_dict"]
+    elif "model_state_dict" in ckpt:
+        state_dict = ckpt["model_state_dict"]
+    else:
+        # A checkpoint dict that carries neither wrapper: treat it as the state
+        # dict itself (a bare save), but say so if it clearly is not one.
+        looks_like_weights = all(isinstance(v, torch.Tensor) for v in ckpt.values())
+        if not looks_like_weights:
+            raise ValueError(
+                "Checkpoint "
+                f"{checkpoint_path!r} has neither a 'state_dict' nor a "
+                "'model_state_dict' key and does not look like a raw state dict "
+                f"(keys: {sorted(ckpt)[:8]})."
+            )
+        state_dict = ckpt
     model.load_state_dict(state_dict)
     return model
 

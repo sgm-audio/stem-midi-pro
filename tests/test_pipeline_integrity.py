@@ -210,7 +210,7 @@ def test_model_confidence_reaches_the_confidence_controller_unchanged(pipeline_c
     assert [e["onset_frame"] for e in events] == frames
     got_cc = [e["cc_127_value"] for e in events]
     assert got_cc == [
-        int(c * 127) for c in confs
+        round(c * 127) for c in confs
     ], f"CC#127 {got_cc} != the transcriber confidence mapping {confs}"
     midi = build_midi_from_events(out["midi_metadata"]["guitar"], "guitar")
     parsed = parse_midi(midi)
@@ -223,15 +223,6 @@ def test_model_confidence_reaches_the_confidence_controller_unchanged(pipeline_c
     ), "report.avg_confidence must be the transcriber's mean confidence, not a constant"
 
 
-@known_bug(
-    "ALIGN-1",
-    "main._forward_impl computes stem_energy = mean(guitar_stem**2, dim=1) — a PER-SAMPLE "
-    "squared value (the dim it averages is the channel dim) — and ConfidenceInjector then "
-    "indexes it with onset_frame. So 'cross-modal alignment' reads waveform sample #40 for "
-    "frame 40, i.e. a single sample ~11 ms into the file, and alignment_score/needs_review "
-    "are meaningless for any file longer than a few frames. Compute frame-mean energy "
-    "(unfold/pool over hop) and index it.",
-)
 def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
     """A loud note must see the energy of ITS frame, not of sample index onset_frame."""
     T = SR  # 1 s
@@ -243,7 +234,7 @@ def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
     )
     with torch.inference_mode():
         out = model(guitar)
-    (ev,) = out["midi_metadata"]["midi_events"]
+    (ev,) = out["midi_metadata"]["guitar"]["midi_events"]
     assert ev["stem_energy"] == pytest.approx(1.0, abs=1e-3), (
         f"frame 2 is full-scale but stem_energy={ev['stem_energy']:.6f} — the injector is "
         f"indexing a per-sample array with a frame index"
@@ -521,14 +512,6 @@ def test_zero_onsets_never_produce_notes(pipeline_config):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "GATE-3",
-    "route_by_quality never looks at what the render actually contains: with non-silent "
-    "stems, confidence 0.95 and a 25 dB proxy it stamps STUDIO on a render with ZERO "
-    "notes, and the user gets direct_download on an empty MIDI. ProcessingReport must "
-    "carry note_count (and the input RMS) and a studio/draft tier must require a sane, "
-    "non-empty note stream — 'draft' is a promise that there is something to edit.",
-)
 def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     """0 notes with happy metrics must route to fallback_options, not direct_download."""
     guitar = torch.full((1, 1, SR), 0.2)  # clean, non-silent, no artifact flags

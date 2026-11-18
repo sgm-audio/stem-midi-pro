@@ -69,7 +69,12 @@ class ConfidenceInjector:
             # are Channel Mode messages per the MIDI spec (H-5). The writer
             # (utils/midi.py) chooses the actual controller number;
             # "cc_127_value" is kept as a legacy alias.
-            cc_value = int(conf_score * 127)
+            # MIDI-4: `int()` truncates, so confidence 0.999 -> 126 and the top
+            # of the CC range ("fully confident") is unreachable. `round()`
+            # makes 0.999 -> 127 and 0.5 -> 64. Both this call site and the
+            # writer's fallback must round -- rounding only one changes nothing
+            # for a model-produced event.
+            cc_value = round(conf_score * 127)
 
             enhanced_events.append(
                 {

@@ -41,6 +41,11 @@ class ProcessingReport:
     # "mamba (pure-torch)" vs "mamba (mamba-ssm)" vs a backend pair like
     # "separator=demucs,transcriber=basic_pitch".
     backend: str | None = None
+    # How many note events the render actually contains (GATE-3). `None` means
+    # "caller did not supply it" -- reports built by older call sites (and test
+    # doubles) keep working, and the empty-render rule then simply does not
+    # apply. Supplying it is what lets the gate refuse to sell an empty MIDI.
+    note_count: int | None = None
     # True when any metric is NaN/Inf: the render is unusable regardless of
     # what the other numbers say (review §4).
     invalid: bool = field(default=False, init=False)
@@ -102,6 +107,13 @@ class ProcessingReport:
         real_flags = [f for f in self.artifact_flags if f != "none"]
         if real_flags:
             return QualityTier.COMPLEX
+        # GATE-3: a render with no notes is not a deliverable, however good its
+        # numbers look. `draft` is a promise that there is something to edit and
+        # `studio`/direct_download is a promise that there is something to use,
+        # so an empty MIDI must fall through to COMPLEX (fallback + refund
+        # options) rather than being sold.
+        if self.note_count is not None and self.note_count <= 0:
+            return QualityTier.COMPLEX
         # STUDIO requires ALL of: confidence at the studio bar, no individually
         # unreliable notes, and (when configured) the separation threshold.
         # Requiring several independent signals is the fix for §9 -- one FFT bin
@@ -144,6 +156,7 @@ class ProcessingReport:
             "avg_confidence": _safe(self.avg_confidence),
             "artifact_flags": list(self.artifact_flags),
             "low_confidence_notes": int(self.low_confidence_notes),
+            "note_count": None if self.note_count is None else int(self.note_count),
             "quality_tier": self.quality_tier.value,
             "invalid": self.invalid,
             "backend": self.backend,

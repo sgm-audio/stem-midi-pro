@@ -34,7 +34,7 @@ import math
 
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 mido = require("mido", "MIDI semantics require mido", module_level=True)
 
@@ -197,17 +197,10 @@ def test_confidence_cc_describes_the_note_it_sits_on(confidences):  # regression
     events = [_ev(60 + i, i * 20, confidence=c) for i, c in enumerate(confidences)]
     parsed = parse_midi(_build(events))
     got = [n.cc_at_onset for n in parsed["notes"]]
-    want = [int(c * 127) for c in confidences]
+    want = [round(c * 127) for c in confidences]
     assert got == want, f"notes carry CC {got}, expected {want} (off-by-one placement)"
 
 
-@known_bug(
-    "MIDI-4",
-    "confidence is truncated twice: models/confidence_injector.py:72 and utils/midi.py:145 "
-    "both use int(conf*127), so conf=0.999 -> 126 and 0.5 -> 63. A DAW that treats the top of "
-    "the CC range as 'fully confident' never sees it. Fix BOTH call sites — rounding only the "
-    "writer changes nothing for a model-produced event, which is the trap here.",
-)
 def test_top_end_of_confidence_range_reaches_cc_127():
     """Confidence ~1.0 must map to the top of the CC range, not one below it."""
     midi = _build([_ev(60, 0, confidence=0.999)])
@@ -229,7 +222,7 @@ def test_confidence_controller_is_gp1_not_a_channel_mode_message():
     assert resolve_confidence_cc() == 16
     events = [_ev(60, 0, confidence=0.9), _ev(61, 20, confidence=0.4)]
     parsed = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=16)
-    assert parsed["cc_values"] == [int(0.9 * 127), int(0.4 * 127)]
+    assert parsed["cc_values"] == [round(0.9 * 127), round(0.4 * 127)]
     legacy = parse_midi(build_midi_from_events({"midi_events": events}, "guitar"), cc=127)
     assert legacy["cc_values"] == [], "CC#127 must not be emitted unless explicitly requested"
 

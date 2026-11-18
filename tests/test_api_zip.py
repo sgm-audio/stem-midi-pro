@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 soundfile = require("soundfile", "ZIP/stem round-trip")
 mido = require("mido", "MIDI parsing")

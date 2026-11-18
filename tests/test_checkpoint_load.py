@@ -19,19 +19,10 @@ import pytest
 import torch
 import yaml
 
-from tests.honesty import known_bug
-
 #: real model path on CPU: must never skip for a missing optional dep
 pytestmark = pytest.mark.real_mamba
 
 
-@known_bug(
-    "CKPT-1",
-    "load_from_checkpoint reads only ckpt['state_dict'], so checkpoints written by "
-    "scripts/export_fine_tuned.py / verify_cpu_export.py / fine_tune_demucs.py under "
-    "'model_state_dict' fail to load; accept both keys (the skipped-by-gate test that "
-    "used to lock this contract never ran on CPU).",
-)
 def test_load_from_checkpoint_accepts_model_state_dict_key(tmp_path):
     """Exported checkpoints use the "model_state_dict" key — the loader must read it.
 

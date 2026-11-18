@@ -57,7 +57,7 @@ def test_cc127_values_roundtrip():
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
 
     ccs = [m.value for m in mid.tracks[0] if m.type == "control_change"]
-    assert ccs == [int(c * 127) for c in confidences]
+    assert ccs == [round(c * 127) for c in confidences]
 
 
 def test_explicit_cc127_overrides_confidence():
