@@ -40,7 +40,17 @@ DEFAULT_NOTE_DURATION_BEATS = float(os.getenv("MIDI_DEFAULT_NOTE_DURATION_BEATS"
 
 
 def _clamp_midi(value: Any, low: int = 0, high: int = 127) -> int:
-    return min(high, max(low, int(value)))
+    """Clamp to the MIDI byte range, rounding rather than truncating (MIDI-4).
+
+    `int()` here silently turned 63.5 into 63 and 126.9 into 126, so a
+    confidence of ~1.0 could never reach 127. Callers that already pass an int
+    are unaffected.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = float(low)
+    return min(high, max(low, round(numeric)))
 
 
 def _expression_messages(event: dict[str, Any], channel: int) -> list[Message]:
@@ -201,9 +211,14 @@ def build_midi_from_events(
         # Polyphonic key pressure is note-specific and is the confidence lane.
         # Keep the old cc_127_value key as an input alias for callers, but do
         # not emit CC#127 because it is a channel-mode command.
+        # MIDI-4: round, not truncate. `int()` made confidence 0.999 -> 126, so
+        # the top of the 0-127 range ("fully confident") was unreachable, and
+        # 0.5 -> 63 rather than 64. This is the writer half of the fix; the
+        # injector rounds too, because rounding only one changes nothing for a
+        # model-produced event (the injector has already written the integer).
         confidence_value = ev.get(
             "confidence_value",
-            ev.get("cc_127_value", float(ev.get("confidence", 0.0)) * 127),
+            ev.get("cc_127_value", round(float(ev.get("confidence", 0.0)) * 127)),
         )
         sequence += 1
         scheduled.append(

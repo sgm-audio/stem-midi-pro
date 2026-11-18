@@ -100,9 +100,11 @@ def _band_db(x: np.ndarray, sr: int, freq: float) -> float:
 
 
 def _rss_mb() -> float:
-    import resource  # POSIX only; these tests are already CPU/Linux-targeted
+    """Peak RSS, resettable -- see ``tests/memprobe.py`` for why that matters."""
+    from tests import memprobe
 
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    value = memprobe.peak_mb()
+    return value if value is not None else 0.0
 
 
 def _run_file(model, tmp_path, name: str, samples: np.ndarray, sr: int = SR):
@@ -430,8 +432,16 @@ def test_one_minute_upload_fits_in_2gb(tmp_path):
     model = StemMidiModel(cfg).eval()
     sr = int(cfg["audio"]["sample_rate"])
 
+    from tests import memprobe
+
     path = _write(tmp_path / "sixty.wav", _tone(60.0, 220.0, sr))
-    baseline = _rss_mb()
+    # Peak is a monotonic process-wide high-water mark; reset it so this test
+    # reports ITS growth and not the largest allocation any earlier test made.
+    # Before the reset, a full-suite CI run attributed ~12 GB of someone else's
+    # peak to this 60 s upload.
+    baseline = memprobe.current_mb() or 0.0
+    if not memprobe.reset_peak():
+        pytest.skip("peak-RSS measurement is not resettable on this platform")
     model.process_audio_file(path)
     growth = _rss_mb() - baseline
 

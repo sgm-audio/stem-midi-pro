@@ -37,8 +37,18 @@ def _report(
     avg_confidence: float,
     flags=("none",),
     low_confidence_notes: int = 0,
-    total_notes: int | None = None,
+    note_count: int | None = 1,
+    total_notes: int | None = 1,
 ):
+    """Build a report. Both counters default to 1 so the sample is a *render*.
+
+    GATE-3 makes a zero-note render COMPLEX regardless of its numbers, so a
+    helper that left a counter unset would silently test a case the gate never
+    reaches. Two counters exist because upstream added `total_notes` (which
+    drives the `empty_render` flag) while this branch carries `note_count`
+    (which also rejects a negative count); tests that mean "an empty render"
+    pass 0 for both.
+    """
     from utils.quality_gates import ProcessingReport
 
     return ProcessingReport(
@@ -47,6 +57,7 @@ def _report(
         avg_confidence=avg_confidence,
         artifact_flags=list(flags),
         low_confidence_notes=low_confidence_notes,
+        note_count=note_count,
         total_notes=total_notes,
         config={"quality_gates": dict(GATES)},
     )
@@ -166,6 +177,7 @@ def test_a_render_with_no_notes_is_never_routed_as_a_result():
         centroid_separation_db=25.0,
         avg_confidence=0.95,
         low_confidence_notes=0,
+        note_count=0,  # the render contains no notes at all
         total_notes=0,
     )
     assert (
@@ -173,16 +185,6 @@ def test_a_render_with_no_notes_is_never_routed_as_a_result():
     ), f"an empty render was offered for download as {tier.value} with badge {route['badge']!r}"
 
 
-@known_bug(
-    "FAKE-1",
-    "the Fake backend returns a constant centroid_separation_db=12.0 / phase_coherence=0.5 "
-    "for ANY input "
-    "(models/backends/fake_backend.py), so a test that runs a quality decision through the fake "
-    "path asserts a fixture, not behaviour — and the constant is *below* "
-    "min_centroid_separation_db, which makes "
-    "the fake path permanently COMPLEX and therefore unable to exercise the studio/draft branches "
-    "at all. Return metrics computed from the signal (even cheap ones).",
-)
 def test_backend_metrics_depend_on_the_signal(pipeline_config):
     from models.backends.fake_backend import FakeSeparatorBackend
 

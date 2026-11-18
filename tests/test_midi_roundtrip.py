@@ -57,7 +57,10 @@ def test_confidence_values_roundtrip():
     mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
 
     pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
-    assert pressures == [int(c * 127) for c in confidences]
+    # MIDI-4: round, not truncate -- 0.9*127 = 114.3 must be 114 (round and
+    # truncate agree here), but 0.5*127 = 63.5 must be 64, not 63. Upstream
+    # introduced the same `int()` on the Polyphonic Key Pressure lane.
+    assert pressures == [round(c * 127) for c in confidences]
 
 
 def test_explicit_confidence_value_overrides_confidence():

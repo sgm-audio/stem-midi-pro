@@ -27,7 +27,7 @@ from __future__ import annotations
 import pytest
 
 from tests.doubles import inject
-from tests.honesty import known_bug, mamba_ssm_available, require
+from tests.honesty import mamba_ssm_available, require
 
 torch = require("torch", "backend contract tests", module_level=True)
 
@@ -162,29 +162,50 @@ def test_shim_reports_the_backend_it_actually_uses():
     )
 
 
-@known_bug(
-    "SHIM-1",
-    "the pure-torch fallback's signature ends in `**_ignored`, so CUDA-only kwargs "
-    "(causal_conv1d_impl=, selective_scan_impl=, use_fast_path= — the exact C-2.1 bug class) "
-    "are silently swallowed on CPU and only blow up on a CUDA box. Validate kwargs and raise "
-    "TypeError, so the fallback rejects what real mamba-ssm rejects.",
-)
+def test_shim_rejects_unknown_kwargs():
+    """The fallback must reject what real mamba-ssm rejects (SHIM-1).
+
+    `**_ignored` used to swallow anything, so a config carrying a CUDA-only
+    kwarg (`causal_conv1d_impl=`, `selective_scan_impl=` -- the C-2.1 bug class)
+    constructed happily on CPU and only failed on a CUDA box.
+    """
+    from models._mamba_compat import Mamba
+
+    for kwargs in (
+        {"causal_conv1d_impl": "triton"},
+        {"selective_scan_impl": "cudnn"},
+        {"n_groups": 1},
+        {"bogus_kwarg": 1},
+    ):
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            Mamba(d_model=8, d_state=4, d_conv=4, expand=2, **kwargs)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"causal_conv1d_impl": "triton"},
-        {"selective_scan_impl": "cudnn"},
         {"use_fast_path": False},
-        {"n_groups": 1},
-        {"bogus_kwarg": 1},
+        {"use_fast_path": True},
+        {"layer_idx": 0},
+        {"bias": True},
+        {"conv_bias": False},
+        {"dt_rank": 4},
+        {"dt_min": 1e-4},
     ],
-    ids=["causal_conv1d_impl", "selective_scan_impl", "use_fast_path", "n_groups", "bogus"],
+    ids=["fast_path_off", "fast_path_on", "layer_idx", "bias", "no_conv_bias", "dt_rank", "dt_min"],
 )
-def test_shim_rejects_unknown_kwargs(kwargs):
+def test_shim_accepts_every_upstream_mamba_kwarg(kwargs):
+    """These ARE real mamba-ssm parameters -- rejecting them would be a regression.
+
+    Checked against research/mamba-ssm-reference/mamba/mamba_ssm/modules/
+    mamba_simple.py, which is the signature the fallback stands in for. The
+    fused-kernel knobs (`use_fast_path`) are accepted and ignored: the CPU path
+    has no fused kernels, but a config that sets them must still construct.
+    """
     from models._mamba_compat import Mamba
 
-    with pytest.raises(TypeError):
-        Mamba(d_model=8, d_state=4, d_conv=4, expand=2, **kwargs)
+    blk = Mamba(d_model=8, d_state=4, d_conv=4, expand=2, **kwargs)
+    assert blk(torch.randn(1, 6, 8)).shape == (1, 6, 8)
 
 
 def test_shim_accepts_the_documented_signature_only():
@@ -267,14 +288,6 @@ def test_mamba_block_is_stateless_between_calls():
 
 
 @pytest.mark.real_mamba
-@known_bug(
-    "REPRO-1",
-    "inference is not reproducible: mc_dropout_eval() calls head.train() to keep Dropout live "
-    "in eval mode, so two identical calls on the same file return different confidence "
-    "(measured max |Δconf| = 0.0065 on an 8192-sample input). That moves CC#127, can flip "
-    "needs_review at the threshold, and can change the quality tier between retries of the "
-    "same paid request. Seed it per request or make the eval-time estimate deterministic.",
-)
 def test_inference_on_the_same_file_is_bitwise_reproducible(pipeline_config, make_wav, synth):
     from main import StemMidiModel
 
@@ -284,10 +297,19 @@ def test_inference_on_the_same_file_is_bitwise_reproducible(pipeline_config, mak
     model.eval()
     first = model.process_audio_file(path)
     second = model.process_audio_file(path)
-    a = [e["confidence"] for e in first["midi"]["midi_events"]]
-    b = [e["confidence"] for e in second["midi"]["midi_events"]]
-    assert [e["note"] for e in first["midi"]["midi_events"]] == [
-        e["note"] for e in second["midi"]["midi_events"]
+
+    # `outputs["midi"]` is the per-stem dict {"guitar":…, "bass":…, "summary":…}
+    def _events(out):
+        return [
+            e
+            for stem in ("guitar", "bass")
+            for e in (out["midi"].get(stem) or {}).get("midi_events") or []
+        ]
+
+    a = [e["confidence"] for e in _events(first)]
+    b = [e["confidence"] for e in _events(second)]
+    assert [e["note"] for e in _events(first)] == [
+        e["note"] for e in _events(second)
     ], "the same file transcribed differently on a retry"
     assert a == b, (
         f"confidences differ between two runs of the same file "

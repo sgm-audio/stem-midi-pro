@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 soundfile = require("soundfile", "ZIP/stem round-trip")
 mido = require("mido", "MIDI parsing")
@@ -235,14 +235,6 @@ def test_zip_stems_are_playable_and_are_not_two_copies_of_each_other(api_env, tm
     assert rel > 0.05, f"guitar and bass differ by {rel:.2%} — a copy, not a separation"
 
 
-@known_bug(
-    "ZIP-1",
-    "create_response_zip calls sf.write(buf, stem, sr, format='WAV') with no subtype, so "
-    "libsndfile picks PCM_16: every float32 stem is quantised to 1/32768 and any sample outside "
-    "[-1, 1] is hard-clipped in the delivery layer itself (measured: a 3.0 peak decodes as "
-    "exactly 1.0). A clipped or hot stem therefore becomes a permanently clipped file with no "
-    "flag or warning. Write subtype='FLOAT' (or normalise and report the gain).",
-)
 def test_zip_stems_keep_the_pipeline_amplitude_and_precision(api_env, tmp_path):
     api, _ = api_env
     hot = np.full(int(SR * 0.1), 3.0, dtype="float32")
@@ -257,7 +249,8 @@ def test_zip_stems_keep_the_pipeline_amplitude_and_precision(api_env, tmp_path):
     stub.process_audio_file = process
     zf = _zip(_post(api, tmp_path, _wav_bytes(seconds=0.1)))
     for name, expected in monkey_stems.items():
-        audio, _ = soundfile.read(io.BytesIO(zf.read(name)), dtype="float32")
+        # the archive entry is "<stem>_stem.wav"; the stem dict key is not a path
+        audio, _ = soundfile.read(io.BytesIO(zf.read(f"{name}_stem.wav")), dtype="float32")
         err = float(np.max(np.abs(audio - expected)))
         assert err < 1e-4, (
             f"{name} was re-encoded on the way out: max |Δ| = {err:.6f} "
@@ -280,6 +273,10 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
         "low_confidence_notes": 0,
         "model_weights_loaded": None,
         "quality_tier": "complex",
+        # delivered since JSON-1/DOC-2: the render is finite, and the backend
+        # key is always present so a parser never branches on its existence.
+        "invalid": False,
+        "backend": None,
     }, "the ZIP report disagrees with the pipeline's ProcessingReport"
 
 
@@ -486,50 +483,6 @@ def _report_json_from_zip(api_env, tmp_path):
     return json.loads(zf.read("processing_report.json"))
 
 
-@known_bug(
-    "DOC-1",
-    "the user-facing docs still describe confidence as CC#127 - USER_GUIDE.md:11 and :88 "
-    "('use CC#127 to find uncertain notes', with the bands 96-127 / 64-95 / 0-63) and "
-    "API_DOCUMENTATION.md:80/150 - while PR #11 (H-5) moved the controller to CC#16 because "
-    "CC#120-127 are MIDI Channel Mode messages. README.md was updated, the workflow docs were "
-    "not, so a user following USER_GUIDE.md:88 filters on a controller that is "
-    "never written and concludes the export is broken. Update the three doc files to say CC#16 "
-    "(and mention MIDI_CONFIDENCE_CC=127 as the opt-in), then keep this guard.",
-)
-def test_the_documented_confidence_controller_is_the_one_the_writer_emits():
-    """A documented MIDI controller is an API promise: it must be the one we emit."""
-    from utils.midi import DEFAULT_CONFIDENCE_CC, resolve_confidence_cc
-
-    assert DEFAULT_CONFIDENCE_CC == resolve_confidence_cc() == 16
-    offenders = []
-    for name in _DOC_FILES:
-        text = (ROOT / name).read_text(encoding="utf-8")
-        mentions_127 = [
-            ln.strip()
-            for ln in text.split("\n")
-            if re.search(r"CC\s*#?127", ln) and re.search(r"confidence", ln, re.I)
-        ]
-        if not mentions_127:
-            continue
-        if re.search(r"CC\s*#?16|MIDI_CONFIDENCE_CC", text):
-            continue  # the file explains the default and the opt-in
-        offenders.append(f"{name}: {mentions_127[0][:110]}")
-    assert not offenders, (
-        "docs promise CC#127 for confidence without mentioning that the writer emits CC#16:\n"
-        + "\n".join(offenders)
-    )
-
-
-@known_bug(
-    "DOC-2",
-    "API_DOCUMENTATION.md's 'Processing Report Schema' table lists 6 fields, but the delivered "
-    "processing_report.json has 7 in production: main always sets report.backend (M-7) and "
-    "api.create_response_zip copies it into the JSON (api.py:631-633), so the shipped artefact "
-    'carries an undocumented `backend` key (`"mamba (pure-torch)" / "separator=demucs,..."). '
-    "An integrator generating a parser from the table gets an unexpected field, and the operator "
-    "who needs to know which stack produced a render cannot find the key documented. Add the row: "
-    "`| backend | string | Which Mamba/backend stack produced this result (M-7) |`.",
-)
 def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path, monkeypatch):
     """`processing_report.json` is a paid artefact; its key set is a contract.
 

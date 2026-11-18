@@ -704,7 +704,12 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for stem_name in ("guitar", "bass"):
             buf = io.BytesIO()
-            sf.write(buf, outputs["stems"][stem_name], sr, format="WAV")
+            # ZIP-1: without an explicit subtype libsndfile picks PCM_16, so
+            # every float32 stem is quantised to 1/32768 and any sample outside
+            # [-1, 1] is HARD-CLIPPED in the delivery layer itself (measured: a
+            # 3.0 peak decodes as exactly 1.0). The model's output is float and
+            # the report's amplitude claims refer to it, so ship FLOAT.
+            sf.write(buf, outputs["stems"][stem_name], sr, format="WAV", subtype="FLOAT")
             zip_file.writestr(f"{stem_name}_stem.wav", buf.getvalue())
 
         midi_pkg = outputs["midi"]
@@ -741,14 +746,33 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
                 getattr(report, "centroid_separation_db", getattr(report, "si_sdr", 0.0)),
             )
         )
+
+        # JSON-1: `json.dumps` defaults to allow_nan=True, so a NaN metric --
+        # which the pipeline really produces for silent, DC and non-finite input
+        # -- emitted a bare `NaN` token. That is not valid RFC 8259 and makes
+        # browsers' JSON.parse() reject the WHOLE download, not just the field.
+        # Every float goes through `_safe`, which maps a non-finite value to
+        # null, and the dump uses allow_nan=False so any survivor is a hard
+        # error rather than a silently-invalid paid artefact.
+        def _safe(value):
+            try:
+                fvalue = float(value)
+            except (TypeError, ValueError):
+                return None
+            return fvalue if math.isfinite(fvalue) else None
+
         report_json = {
-            "separation_proxy": _finite(separation_proxy),
+            # `_safe` (not the module's `_finite`) on purpose: `_finite`
+            # substitutes 0.0, which would report an unmeasurable metric as a
+            # real reading of zero. null says "we could not measure this",
+            # which is what a silent or non-finite render actually means.
+            "separation_proxy": _safe(separation_proxy),
             # Deprecated compatibility alias. This value is not SI-SDR and
             # must not be read as a reference-based dB certification.
-            "si_sdr": _finite(separation_proxy),
+            "si_sdr": _safe(separation_proxy),
             "metric_semantics": "centroid_separation_proxy_not_si_sdr",
-            "phase_coherence": _finite(report.phase_coherence),
-            "avg_confidence": _finite(report.avg_confidence),
+            "phase_coherence": _safe(report.phase_coherence),
+            "avg_confidence": _safe(report.avg_confidence),
             "confidence_encoding": guitar_midi.get("summary", {}).get(
                 "confidence_encoding", "polyphonic_key_pressure"
             ),
@@ -756,15 +780,17 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             "low_confidence_notes": report.low_confidence_notes,
             "model_weights_loaded": getattr(report, "model_weights_loaded", None),
             "quality_tier": report.quality_tier.value,
+            "invalid": bool(getattr(report, "invalid", False)),
+            # M-7: which implementation produced this render. Always present so
+            # an integrator's parser never has to branch on its existence.
+            "backend": getattr(report, "backend", None),
         }
-        backend = getattr(report, "backend", None)
-        if backend:
-            report_json["backend"] = backend
         zip_file.writestr(
             "processing_report.json",
             # NaN/Infinity are not valid JSON (RFC 8259) and break browsers'
-            # JSON.parse(): every numeric is sanitised by _finite above and the
-            # dump itself refuses non-finite values (API-6.9).
+            # JSON.parse(): every numeric is sanitised to null above and the
+            # dump itself refuses non-finite values, so a survivor is a hard
+            # error rather than a silently-invalid paid artefact.
             json.dumps(report_json, indent=2, allow_nan=False),
         )
 

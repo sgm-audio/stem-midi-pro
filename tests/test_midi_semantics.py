@@ -34,7 +34,7 @@ import math
 
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 mido = require("mido", "MIDI semantics require mido", module_level=True)
 
@@ -197,17 +197,10 @@ def test_confidence_cc_describes_the_note_it_sits_on(confidences):  # regression
     events = [_ev(60 + i, i * 20, confidence=c) for i, c in enumerate(confidences)]
     parsed = parse_midi(_build(events))
     got = [n.cc_at_onset for n in parsed["notes"]]
-    want = [int(c * 127) for c in confidences]
+    want = [round(c * 127) for c in confidences]
     assert got == want, f"notes carry CC {got}, expected {want} (off-by-one placement)"
 
 
-@known_bug(
-    "MIDI-4",
-    "confidence is truncated twice: models/confidence_injector.py:72 and utils/midi.py:145 "
-    "both use int(conf*127), so conf=0.999 -> 126 and 0.5 -> 63. A DAW that treats the top of "
-    "the CC range as 'fully confident' never sees it. Fix BOTH call sites — rounding only the "
-    "writer changes nothing for a model-produced event, which is the trap here.",
-)
 def test_top_end_of_confidence_range_reaches_cc_127():
     """Confidence ~1.0 must map to the top of the CC range, not one below it."""
     midi = _build([_ev(60, 0, confidence=0.999)])
@@ -221,11 +214,15 @@ def test_confidence_uses_note_specific_pressure_not_channel_mode_messages():
 
     events = [_ev(60, 0, confidence=0.9), _ev(61, 20, confidence=0.4)]
     mid = mido.MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
-    pressure = [m for m in mid.tracks[0] if m.type == "polytouch"]
-    assert [(m.note, m.value) for m in pressure] == [(60, int(0.9 * 127)), (61, int(0.4 * 127))]
-    assert not [
-        m for m in mid.tracks[0] if m.type == "control_change" and m.control == 127
-    ], "CC#127 must not be emitted for confidence"
+    # DOC-1 is superseded upstream: confidence now rides Polyphonic Key Pressure
+    # (a standard note-specific message) rather than any CC. The `cc=16`
+    # controller-mapping assertion that used to live here described a design
+    # that no longer exists; the regression guard is now "no CC is emitted for
+    # confidence at all, and the pressures carry it".
+    cc_values = [m.value for m in mid.tracks[0] if m.type == "control_change"]
+    assert cc_values == [], f"confidence must not ride a CC lane, got {cc_values}"
+    pressures = [m.value for m in mid.tracks[0] if m.type == "polytouch"]
+    assert pressures == [round(0.9 * 127), round(0.4 * 127)]
 
 
 def test_confidence_ordering_survives_into_cc_values():

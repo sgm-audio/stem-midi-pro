@@ -63,6 +63,10 @@ def open_and_validate(file_path: str, max_duration_seconds: int = MAX_DURATION_S
         "bit_depth": _infer_bit_depth(snd.subtype),
     }
 
+    # IO-2: a 0-frame WAV passes every other check and then dies inside torch
+    # (`Expected 2D or 3D ... but got: [1, 1, 0]`) as an HTTP 500 with internals
+    # in the body. Refuse it at the door so the caller can answer 400. Also
+    # checks duration: a header can report frames whose duration rounds to 0.
     if info["frames"] <= 0 or info["duration"] <= 0:
         snd.close()
         raise AudioValidationError(
@@ -92,6 +96,19 @@ def open_and_validate(file_path: str, max_duration_seconds: int = MAX_DURATION_S
             f"Sample rate {info['sample_rate']}Hz not supported. "
             f"Supported: {SUPPORTED_SAMPLE_RATES}"
         )
+
+    # IO-3: non-finite samples must be refused for *every* caller, not only
+    # those that go through `load_native_mono`. Reading the file here costs one
+    # pass and is the only place the API validates before inference; a NaN/Inf
+    # upload used to return 200 with artifact_flags=['none'] and deliver a
+    # constant -1.0 full-scale "stem" (PCM_16 encoding of NaN).
+    _data = snd.read(dtype="float32", always_2d=True)
+    if not np.isfinite(_data).all():
+        snd.close()
+        raise AudioValidationError(
+            "Audio contains non-finite samples (NaN/Inf); refusing to process"
+        )
+    snd.seek(0)
 
     try:
         yield snd, info
@@ -127,10 +144,30 @@ def load_native_mono(snd: sf.SoundFile) -> tuple[np.ndarray, int]:
     """
     audio = snd.read(dtype="float32", always_2d=True)
     sr = snd.samplerate
+
+    # IO-4: mean-downmixing an anti-phase stereo file (L = -R) produces exact
+    # silence from a full-level input. Every downstream stage then reports an
+    # empty render blamed on "complex material". Compare the downmix energy
+    # against the per-channel energy and refuse when it collapses.
+    if audio.shape[1] > 1:
+        mono_sum = audio.mean(axis=1)
+        channel_rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+        mono_rms = float(np.sqrt(np.mean(mono_sum.astype(np.float64) ** 2)))
+        if channel_rms > 1e-6 and mono_rms < 0.05 * channel_rms:
+            raise AudioValidationError(
+                "Stereo channels cancel when mixed to mono "
+                f"(downmix RMS {mono_rms:.2e} vs channel RMS {channel_rms:.2e}). "
+                "This file is anti-phase; mixing it to mono leaves silence. "
+                "Re-export with the channels in phase, or process each channel separately."
+            )
+
     audio = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
     audio = np.asarray(audio, dtype=np.float32)
-    # NaN/Inf samples survive every decoder and then poison the STFT, the masks
-    # and finally the JSON report (IO-3). Refuse them at the boundary.
+    # IO-3: a NaN/Inf upload used to sail through validation and be DELIVERED as
+    # a successful render (artifact_flags=['none'], metrics NaN) whose PCM_16
+    # encoding turned into a constant -1.0 full-scale "stem". Refuse it at the
+    # boundary: there is no meaningful separation of a non-finite signal, and
+    # the count makes a corrupt-frame report actionable.
     if not np.isfinite(audio).all():
         bad = int(np.count_nonzero(~np.isfinite(audio)))
         raise AudioValidationError(

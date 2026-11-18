@@ -211,7 +211,7 @@ def test_model_confidence_reaches_poly_pressure_unchanged(pipeline_config):
     assert [e["onset_frame"] for e in events] == frames
     got_cc = [e["cc_127_value"] for e in events]
     assert got_cc == [
-        int(c * 127) for c in confs
+        round(c * 127) for c in confs
     ], f"CC#127 {got_cc} != the transcriber confidence mapping {confs}"
     midi = build_midi_from_events(out["midi_metadata"]["guitar"], "guitar")
     parsed = parse_midi(midi)
@@ -225,15 +225,6 @@ def test_model_confidence_reaches_poly_pressure_unchanged(pipeline_config):
     ), "report.avg_confidence must average emitted-note confidence, not a constant"
 
 
-@known_bug(
-    "ALIGN-1",
-    "main._forward_impl computes stem_energy = mean(guitar_stem**2, dim=1) — a PER-SAMPLE "
-    "squared value (the dim it averages is the channel dim) — and ConfidenceInjector then "
-    "indexes it with onset_frame. So 'cross-modal alignment' reads waveform sample #40 for "
-    "frame 40, i.e. a single sample ~11 ms into the file, and alignment_score/needs_review "
-    "are meaningless for any file longer than a few frames. Compute frame-mean energy "
-    "(unfold/pool over hop) and index it.",
-)
 def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
     """A loud note must see the energy of ITS frame, not of sample index onset_frame."""
     T = SR  # 1 s
@@ -245,7 +236,7 @@ def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
     )
     with torch.inference_mode():
         out = model(guitar)
-    (ev,) = out["midi_metadata"]["midi_events"]
+    (ev,) = out["midi_metadata"]["guitar"]["midi_events"]
     assert ev["stem_energy"] == pytest.approx(1.0, abs=1e-3), (
         f"frame 2 is full-scale but stem_energy={ev['stem_energy']:.6f} — the injector is "
         f"indexing a per-sample array with a frame index"
@@ -256,23 +247,18 @@ def test_alignment_energy_is_measured_over_the_notes_frame(pipeline_config):
     )
 
 
-@known_bug(
-    "GATE-2",
-    "ConfidenceInjector.summary['low_confidence_count'] counts FRAMES of the confidence "
-    "tensor below min_confidence ((confidence < thr).sum()), and main feeds it into "
-    "ProcessingReport.low_confidence_notes / the API's processing_report.json. One second "
-    "of audio is 86 frames, so the number reported to the user as 'low confidence notes' is "
-    "a frame count and grows with file length. Count notes.",
-)
 def test_low_confidence_notes_counts_notes_not_frames(pipeline_config):
     """The field the user sees as 'low confidence notes' must be a note count."""
     n = 200
     conf = torch.full((1, n), 0.3)  # every frame low confidence
     onset = torch.full((1, n, 1), -10.0)
-    for f in (5, 9, 44):  # ... but only three notes
+    # Three notes, spaced past the decoder's minimum inter-onset gap (frames
+    # 5 and 9 collapse into one note, which made this fixture emit 2 events).
+    note_frames = (5, 44, 120)
+    for f in note_frames:  # ... but only three notes
         onset[0, f, 0] = 10.0
     pitch = torch.zeros(1, n, 128)
-    for f in (5, 9, 44):
+    for f in note_frames:
         pitch[0, f, 60] = 10.0
     from main import StemMidiModel
 
@@ -287,7 +273,7 @@ def test_low_confidence_notes_counts_notes_not_frames(pipeline_config):
     )
     with torch.inference_mode():
         out = model(guitar)
-    n_notes = len(out["midi_metadata"]["midi_events"])
+    n_notes = len(out["midi_metadata"]["guitar"]["midi_events"])
     assert n_notes == 3, f"fixture broke: {n_notes} notes"
     assert out["processing_report"].low_confidence_notes == n_notes, (
         f"report says {out['processing_report'].low_confidence_notes} low-confidence notes "
@@ -321,14 +307,6 @@ def test_summary_and_alignment_counts_agree(pipeline_config):
 # ---------------------------------------------------------------------------
 
 
-@known_bug(
-    "REPORT-1",
-    "main reads centroid_separation_db=sep_metrics[0, 0].item() and "
-    "phase_coherence=sep_metrics[0, 1] with "
-    "the comment 'Average over batch', so a batched call reports item 0's quality for the "
-    "whole batch. A 2-item batch where the second render is garbage is stamped studio. "
-    "Average (or return per-item reports).",
-)
 def test_batched_report_aggregates_over_the_batch(pipeline_config):
     guitar = torch.full((2, 1, SR), 0.1)
 
@@ -345,12 +323,16 @@ def test_batched_report_aggregates_over_the_batch(pipeline_config):
     inject(model, "separator", TwoItemSeparator())
     n = frame_count(SR, HOP)
     conf = torch.full((2, n), 0.9)
-    model.transcriber = lambda stem: (
-        torch.full((2, n, 1), -10.0),
-        torch.zeros(2, n, 128),
-        torch.full((2, n, 1), 0.7),
-        torch.zeros(2, n, 3),
-        conf,
+    inject(
+        model,
+        "transcriber",
+        lambda stem: (
+            torch.full((2, n, 1), -10.0),
+            torch.zeros(2, n, 128),
+            torch.full((2, n, 1), 0.7),
+            torch.zeros(2, n, 3),
+            conf,
+        ),
     )
     with torch.inference_mode():
         out = model(guitar)
@@ -361,13 +343,6 @@ def test_batched_report_aggregates_over_the_batch(pipeline_config):
     )
 
 
-@known_bug(
-    "BATCH-1",
-    "_logits_to_midi flattens every batch item's events into one list with raw per-item "
-    "frame indices (its docstring admits it), so a B=2 call returns one merged MIDI where "
-    "two songs' notes are interleaved and unattributable. Either reject B>1 for inference "
-    "or key events per batch item.",
-)
 def test_batched_inference_does_not_merge_songs_into_one_midi(pipeline_config):
     guitar = torch.full((2, 1, SR), 0.1)
     n = frame_count(SR, HOP)
@@ -540,7 +515,13 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
         f"avg_confidence={report.avg_confidence:.2f} / "
         f"centroid_separation_db={report.centroid_separation_db:.1f}"
     )
+    # An empty render is caught BEFORE the tiers and routed to its own action, so
+    # the user is offered something actionable (download the raw stems / discard)
+    # rather than a generic review. A non-empty COMPLEX render still routes to
+    # `manual_review`; this assertion pins the empty case specifically.
+    assert report.artifact_flags.count("empty_render") == 1
     assert out["routing_decision"]["action"] == "fallback_options"
+    assert out["routing_decision"]["badge"] == "No notes detected"
 
 
 def test_stems_sum_back_to_the_mix(pipeline_config, synth):

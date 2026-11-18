@@ -82,16 +82,64 @@ except ImportError:  # CPU / ROCm / no-CUDA environments
         # Frames per scan chunk. Bounded temporaries: chunk * d_inner * N * 4 B.
         SCAN_CHUNK = 256
 
+        # Parameters the real mamba-ssm ``Mamba.__init__`` accepts (see
+        # research/mamba-ssm-reference/mamba/mamba_ssm/modules/mamba_simple.py).
+        # This set is what the fallback accepts too -- anything else is a
+        # TypeError, exactly as on a CUDA box (SHIM-1).
+        _UPSTREAM_KWARGS = frozenset(
+            {
+                "d_state",
+                "d_conv",
+                "expand",
+                "dt_rank",
+                "dt_min",
+                "dt_max",
+                "dt_init",
+                "dt_scale",
+                "dt_init_floor",
+                "conv_bias",
+                "bias",
+                "use_fast_path",
+                "layer_idx",
+                "device",
+                "dtype",
+            }
+        )
+
         def __init__(
             self,
             d_model: int,
             d_state: int = 16,
             d_conv: int = 4,
             expand: int = 2,
-            gradient_checkpointing: bool = False,
+            dt_rank: str | int = "auto",
+            dt_min: float = 0.001,
             dt_max: float = 0.1,
-            **_ignored,
+            dt_init: str = "random",
+            dt_scale: float = 1.0,
+            dt_init_floor: float = 1e-4,
+            conv_bias: bool = True,
+            bias: bool = False,
+            use_fast_path: bool = True,
+            layer_idx: int | None = None,
+            device=None,
+            dtype=None,
+            gradient_checkpointing: bool = False,
+            **kwargs,
         ):
+            if kwargs:
+                unknown = ", ".join(sorted(kwargs))
+                raise TypeError(
+                    f"Mamba.__init__() got unexpected keyword argument(s): {unknown}. "
+                    "Accepted: "
+                    + ", ".join(sorted(self._UPSTREAM_KWARGS | {"gradient_checkpointing"}))
+                )
+            # Accepted for signature compatibility; the pure-PyTorch path has no
+            # fused kernels, so these are recorded and unused. `dt_max` is the
+            # exception: it clamps the discretisation step below, because an
+            # unclamped dt turns the recurrence into a pure integrator.
+            self.use_fast_path = use_fast_path
+            self.layer_idx = layer_idx
             super().__init__()
             if not 0 < dt_max <= 1.0:
                 raise ValueError(f"dt_max must be in (0, 1], got {dt_max!r}")

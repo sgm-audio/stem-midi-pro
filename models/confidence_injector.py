@@ -83,7 +83,14 @@ class ConfidenceInjector:
                     f"MIDI event {i}: non-finite confidence {conf_score}; the model "
                     "produced NaN/Inf output. Refusing to write corrupt metadata."
                 )
-            confidence_value = int(max(0, min(127, conf_score * 127)))
+            # MIDI-4: `int()` truncates, so confidence 0.999 -> 126 and the top
+            # of the 0-127 range ("fully confident") is unreachable. `round()`
+            # makes 0.999 -> 127 and 0.5 -> 64. Upstream introduced this
+            # `confidence_value` clamp on the Polyphonic Key Pressure lane with
+            # the same truncation, so the fix applies here too -- rounding only
+            # the writer changes nothing for a model-produced event, because
+            # this line has already written the integer.
+            confidence_value = max(0, min(127, round(conf_score * 127)))
 
             enhanced_events.append(
                 {
@@ -116,6 +123,10 @@ class ConfidenceInjector:
                     "Standard MIDI note-specific pressure; DAW interpretation varies. "
                     "Use JSON confidence fields when unsupported."
                 ),
+                # GATE-2: `low_confidence_count` below counts NOTES, not frames.
+                # Upstream reached the same conclusion independently
+                # (`note_confidences` is indexed by note onset), so this branch
+                # keeps upstream's implementation.
                 "avg_confidence": (
                     float(note_confidences.mean().item()) if len(note_confidences) > 0 else 0.0
                 ),

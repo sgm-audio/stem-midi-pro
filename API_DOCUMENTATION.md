@@ -147,6 +147,10 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 | `low_confidence_notes` | int | Emitted notes below the confidence threshold, not all low-confidence frames |
 | `model_weights_loaded` | bool/null | Whether a validated checkpoint was loaded |
 | `quality_tier` | string | Heuristic `"studio"` / `"draft"` / `"complex"`, not an accuracy certificate |
+| `invalid` | bool | True when any reported metric was NaN/Inf, i.e. the render is unusable regardless of the other numbers |
+| `backend` | string/null | Which separator implementation produced the render; always present so a parser never branches on its existence |
+
+**Numeric values may be `null` rather than `NaN`.** A non-finite metric (which the pipeline really produces for silent, DC-offset and non-finite input) is delivered as `null` so the document stays valid RFC 8259 — bare `NaN` is not JSON and makes `JSON.parse()` reject the whole download.
 
 ## Quality Tiers
 
