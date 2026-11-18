@@ -22,11 +22,11 @@ Third-party attributions are in [NOTICE](NOTICE).
 
 ## What It Does
 
-- **Configured stem separation** — the model honors the selected separator backend (`mamba` or optional `demucs`) and returns independent guitar, bass, and residual stems. The pure-PyTorch Mamba path is structural code; useful output requires trained weights.
-- **Independent MIDI transcription** — guitar and bass are transcribed separately. MIDI preserves absolute audio-frame timing, duration, overlapping notes, and same-onset chords. The writer's polyphony is a serialization capability: the pitch head is a 128-way argmax, so one note per onset is what the model can actually emit today (see `AUDIT_REPORT.md` H-5).
-- **Expression mapping** — emitted bend, vibrato, and slide fields are mapped to pitch-wheel, CC1, and CC74 messages. This is a serialization capability, not evidence that an available checkpoint learned expression.
-- **Confidence metadata** — note confidence is canonical in JSON and is also encoded as standard MIDI Polyphonic Key Pressure when supported by a DAW. CC#127 is retained only as a deprecated JSON alias and is never emitted.
-- **Quality gates** — reports expose a named centroid-separation proxy, not SI-SDR. Untrained weights and artifact flags force manual review rather than certification (`utils/quality_gates.py`).
+- **Configured stem separation** — the model honors the selected separator backend (`mamba` or optional `demucs`) and returns independent guitar, bass, and residual stems. The pure-PyTorch Mamba path is structural code; useful output requires trained weights. Measured CPU throughput (production config, 2 vCPU): ~4x realtime with 1 min audio ≈ 1.8 GB peak RSS.
+- **Independent, chord-aware MIDI transcription** — guitar and bass are transcribed separately. Decoding is per-pitch when `transcriber.pitch_threshold` is set (production configs set 0.5): every pitch whose sigmoid exceeds it emits its own note_on at a detected onset, so polyphonic frames produce chords; unset/null = legacy single-argmax. Multi-hot pitch targets (chords) train via multi-label BCE (`pitch_bce_loss_fn`); single-pitch targets via cross-entropy. MIDI preserves absolute audio-frame timing, duration, overlapping notes, and same-onset chords, with onset peak-picking (rising-edge + refractory window). Whether the model predicts chords or expression depends on training data — no trained checkpoint ships with the repo.
+- **Expression mapping** — bend, vibrato, and slide fields map to pitch-wheel, CC1, and CC74 messages, written only when a caller asks for them (`include_expression=True`). Export is off by default on purpose: the head is untrained, so writing it into every file would fabricate phrasing. Every event that carries expression is labelled `source: expression_head (untrained; ARCH-11.4.4)`, and mapping is never evidence that a checkpoint learned expression.
+- **Confidence metadata** — note confidence is canonical in JSON and is also encoded as standard MIDI Polyphonic Key Pressure when supported by a DAW — per-note, which is what makes per-note confidence meaningful inside chords (channel-wide CCs cannot differ between simultaneous notes). CC#127 and `cc_127_value` are deprecated JSON aliases and are never emitted as MIDI CC.
+- **Quality gates** — reports expose a named `separation_proxy` (centroid-separation heuristic, not SI-SDR). The proxy is reported for observability only; tiers use confidence, low-confidence-note counts, and artifact/invalid flags. Untrained weights and artifact flags force manual review rather than certification (`utils/quality_gates.py`).
 
 Everything runs locally. No GPU or cloud service is required by the core path; optional Demucs/Basic Pitch dependencies must be installed when configured.
 
@@ -73,10 +73,10 @@ The pure-PyTorch Mamba fallback runs on CPU. The optional `configs/model_config.
 
 ### Measured on the audit machine (not the reference i5)
 
-PR #13 measured the chunked and single-pass paths on its own box: 2 threads, pure-PyTorch fallback,
-`configs/model_config.yaml`, **random weights** (so the numbers describe the runtime, not a trained
-render). Reproduce with `scripts/verify_numerics.py`; the method and the deltas are in
-[`FIXES.md`](FIXES.md). These are the first committed timings, and they are still not an
+PR #13 re-measured the chunked and single-pass paths on the audit machine: 2 threads, pure-PyTorch
+fallback, `configs/model_config.yaml`, **random weights** (so the numbers describe the runtime, not a
+trained render). Reproduce with `scripts/verify_numerics.py`; the method and the deltas are in
+[`FIXES.md`](FIXES.md). It is a second opinion on the figures in the capability list above, not an
 Intel i5 / 4–8 GB certification.
 
 | Input length | Path | Wall time | Peak RSS |
@@ -86,12 +86,15 @@ Intel i5 / 4–8 GB certification.
 | 10 min | chunked | 173.6 s | 2.22 GB |
 | 10 min | one pass | not measured (peak grows with length) | — |
 
-- That is ~0.25–0.3x realtime for separation + transcription together; imports plus the idle model
-  account for ~0.65 GB of each peak, so most of it is the runtime, not the audio.
-- **Long inputs are separated in overlapping chunks (`audio.chunk_duration_sec`, default 2 s) and
-  transcribed in frame segments (`inference.segment_seconds`, default 60 s), so peak memory tracks the
-  chunk size rather than the file length.** A single pass is faster (no per-chunk re-priming) but its
-  peak grows with the input: 2.16 GB at 5 minutes.
+- Separation + transcription together run at **~2.9x realtime chunked** (5 min in 104.0 s) and
+  **~4.35x realtime in one pass** (5 min in 69.0 s). That is the same order as the ~4x figure in the
+  capability list above, which main measured at 1 minute on a 2-vCPU runner; different silicon and
+  random weights keep it short of a certification, but the claim itself holds.
+- **Peak memory tracks the chunk, not the file, as long as chunking is on**: separated in overlapping
+  chunks (`audio.chunk_duration_sec`, default 2 s) and transcribed in frame segments
+  (`inference.segment_seconds`, default 60 s) it is 1.60 GB at 5 min and 2.22 GB at 10 min. One pass is
+  faster (no per-chunk re-priming) but its peak grows with the input: 2.16 GB at 5 min. ~0.65 GB of
+  every peak is imports plus the idle model.
 - One concurrent request. Scale up CPU/RAM for more.
 - **No tempo detection**: MIDI is written on a fixed grid at the tempo you pass (`tempo_us`, default
   120 BPM), so quantisation is only as good as that choice.

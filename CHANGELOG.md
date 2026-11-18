@@ -56,6 +56,37 @@ contradicted the documented "the saturated centroid proxy must not decide the
 tier" contract was corrected. Suite: 336 passed, 42 xfailed (known-bug),
 1 skipped.
 
+### Reconciled with `main`: expression export is opt-in (2026-11-18)
+PR #13 (`arena/d6d3cd74-…`) was built on the pre-rewrite `main` and could not be
+rebased. Meanwhile `main` had independently grown most of the same fixes plus a
+newer MIDI writer, so this branch keeps `main`'s writer and adds only what was
+missing.
+
+- **Expression export (`utils/midi.py`, `main.py`)** — the transcriber's
+  expression head is no longer discarded. Each note carries `expression` with
+  channels named from `transcriber.expression_heads` (`bend`, `vibrato`,
+  `slide`) plus `source: expression_head (untrained; ARCH-11.4.4)`. The writer
+  maps bend → pitch-wheel, vibrato → CC1, slide → CC74 `main`'s way (0..1 with
+  0.5 neutral, matching the sigmoid head), but only when the caller passes
+  `include_expression=True`. Export is **off by default**: the head is untrained,
+  so writing it into every file would fabricate phrasing. Resolves EXPR-1 (the
+  audit's BUG-MIDI-9), which `main`'s default-on wiring left pinned.
+- **`utils/midi_targets`** — `build_tempo_map` / `tick_to_seconds` exported
+  publicly (they were `_`-private).
+- **`scripts/verify_midi.py`, `verify_numerics.py`, `verify_api.py`** and
+  **`tests/test_numerics.py`** — the reproduction scripts behind the audit
+  claims, ported and adapted to this codebase; all three run green here.
+
+Dropped from #13 as superseded by `main`: the writer's `tempo_us` parameter and
+its confidence marker track (polyphonic key pressure already gives per-note
+values), and the 60x clock, memory-ceiling, gate and `models/*` changes.
+
+Measured by the ported `verify_numerics.py`, two real defects are pinned: the
+separator's hidden state collapses ~2.5e9 across its six Mamba blocks
+(`1 → 4.9e-2 → … → 4.0e-10`, pinned as `SEP-2` in `tests/test_numerics.py`), and
+its three independent sigmoid masks sit at 0.500 ± 0.005, so the stems do not
+sum to the mix (rel. err 0.5, already pinned as `SEP-1`).
+
 ### Strategic decisions (TODO Section 0)
 - Consolidated on the v1 production path: `main.py` / `api.py` / `models/*` / `train.py` / `data/datasets.py`. Mamba-3 research code moved to `research/`.
 - Locked the platform: **CPU-only, bare-metal i5, Python 3.13**.

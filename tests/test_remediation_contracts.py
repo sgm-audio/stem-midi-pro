@@ -79,7 +79,15 @@ def test_expression_is_mapped_to_standard_midi_messages():
         "confidence": 0.9,
         "expression": {"bend": 0.75, "vibrato": 1.0, "slide": 0.0},
     }
-    mid = mido.MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": [event]}, "guitar")))
+    # The mapping is exercised on request: expression export is opt-in because the
+    # head is untrained (see tests/test_pipeline_integrity.py::EXPR-1 guard).
+    default = mido.MidiFile(
+        file=io.BytesIO(build_midi_from_events({"midi_events": [event]}, "guitar"))
+    )
+    assert not any(msg.type == "pitchwheel" for msg in default.tracks[0])
+
+    rendered = build_midi_from_events({"midi_events": [event]}, "guitar", include_expression=True)
+    mid = mido.MidiFile(file=io.BytesIO(rendered))
     messages = list(mid.tracks[0])
 
     bend = next(msg for msg in messages if msg.type == "pitchwheel")
@@ -101,8 +109,18 @@ def test_model_expression_fields_reach_midi_serializer(mock_config):
         torch.tensor([[0.9]]),
         torch.tensor([[[0.75, 1.0, 0.0]]]),
     )
-    assert events[0]["expression"] == {"bend": 0.75, "vibrato": 1.0, "slide": 0.0}
-    mid = mido.MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
+    expression = events[0]["expression"]
+    assert {k: expression[k] for k in ("bend", "vibrato", "slide")} == {
+        "bend": 0.75,
+        "vibrato": 1.0,
+        "slide": 0.0,
+    }
+    assert "untrained" in expression["source"]
+    mid = mido.MidiFile(
+        file=io.BytesIO(
+            build_midi_from_events({"midi_events": events}, "guitar", include_expression=True)
+        )
+    )
     assert any(message.type == "pitchwheel" for message in mid.tracks[0])
     assert {message.control for message in mid.tracks[0] if message.type == "control_change"} == {
         1,

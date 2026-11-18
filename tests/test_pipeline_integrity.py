@@ -637,19 +637,21 @@ def test_process_audio_file_resamples_foreign_rate(pipeline_config, make_wav, sy
     assert float(np.max(np.abs(out["stems"]["guitar"]))) > 0.0, "resampled stem is silent"
 
 
-@known_bug(
-    "EXPR-1",
-    "README/API_DOCUMENTATION advertise MIDI expression (bend/vibrato/slide per note), but "
-    "_forward_impl discards the expression head (`_expression`) and build_midi_from_events "
-    "writes no pitch_bend and no CC1/CC2 — verified: the only non-note messages in a rendered "
-    "file are CC#127. Either carry expression into the SMF (pitch_bend for bend, CC1 for "
-    "vibrato depth) or remove the claim from the docs and the transcriber's head.",
-)
-def test_expression_head_output_reaches_the_midi(pipeline_config):
+def test_expression_head_output_reaches_the_midi_when_opted_in(pipeline_config):
+    """EXPR-1, resolved as opt-in: the head's output is carried, labelled, and
+    only written when the caller asks for it.
+
+    Previously `_forward_impl` discarded the expression head entirely
+    (`_expression`) and the writer emitted no pitch-bend and no CC1, so the
+    README's "bend/vibrato per note" claim was false for every export. The head
+    is UNTRAINED (ARCH-11.4.4), so writing its output by default would fabricate
+    expression — hence the two halves of this test: carried always, emitted only
+    on request.
+    """
     guitar = torch.full((1, 1, SR // 4), 0.2)
     n = frame_count(guitar.shape[-1], HOP)
     expr = torch.zeros(1, n, 3)
-    expr[0, :, 0] = 0.9  # max bend on every frame
+    expr[0, :, 0] = 0.9  # channel 0 == "bend" in pipeline_config.expression_heads
     model = _model_with_stems(
         pipeline_config,
         guitar,
@@ -661,11 +663,29 @@ def test_expression_head_output_reaches_the_midi(pipeline_config):
     with torch.inference_mode():
         out = model(guitar)
     events = out["midi_metadata"]["guitar"]["midi_events"]
-    assert any(
-        "expression" in e or "bend" in e for e in events
-    ), "the transcriber's expression output never reaches the MIDI events at all"
-    midi = build_midi_from_events(out["midi_metadata"], "guitar")
+    assert all(
+        "expression" in e for e in events
+    ), "the transcriber's expression output still never reaches the MIDI events"
+    assert events[0]["expression"]["bend"] == pytest.approx(0.9, abs=1e-5)
+    assert (
+        "untrained" in events[0]["expression"]["source"]
+    ), "expression values are written without saying the head is untrained"
+
+    # The writer takes ONE stem's payload (api.py passes `_stem_midi_data(...)`),
+    # not the whole {"guitar": …, "bass": …} package.
+    guitar_pkg = out["midi_metadata"]["guitar"]
+
+    # Default: carried in the metadata, NOT written to the file.
+    default_types = {
+        m.type for m in parse_midi(build_midi_from_events(guitar_pkg, "guitar"))["all_messages"]
+    }
+    assert (
+        "pitchwheel" not in default_types
+    ), "untrained expression is written to every export by default"
+
+    # Opt-in: pitch-bend (bend) and CC1 (vibrato depth) appear.
+    midi = build_midi_from_events(guitar_pkg, "guitar", include_expression=True)
     types = {m.type for m in parse_midi(midi)["all_messages"]}
     assert (
-        "pitch_bend" in types or "aftertouch" in types
-    ), f"no expression messages in the SMF: {sorted(types)}"
+        "pitchwheel" in types
+    ), f"no pitch-bend in the SMF with include_expression=True: {sorted(types)}"

@@ -112,5 +112,8 @@ def midi_to_targets(
 
 # Back-compat aliases: earlier code (and some call sites) used the private
 # names with the same signatures.
+# Back-compat aliases for external callers that used the private spellings while
+# main's version had them (no in-tree caller does; the public names above are the
+# definitions, so these must stay *after* them).
 _build_tempo_map = build_tempo_map
 _tick_to_seconds = tick_to_seconds

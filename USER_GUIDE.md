@@ -8,7 +8,7 @@ Stem+MIDI Pro separates a mixed recording into **guitar and bass stems** and tra
 
 1. **Stem separation** — produces independent `guitar_stem.wav` and `bass_stem.wav` files (plus a residual internally) using the configured backend.
 2. **MIDI transcription** — produces independent `guitar.mid` and `bass.mid` files with absolute audio-frame timing, pitches, velocities, duration-aware note-offs, same-onset chords, and overlapping notes.
-3. **Expression mapping** — expression fields, when supplied by a backend, map to pitch-wheel (bend), CC1 (vibrato), and CC74 (slide). Mapping is implemented; expression quality still depends on a trained checkpoint.
+3. **Expression mapping** — expression fields, when supplied by a backend, map to pitch-wheel (bend), CC1 (vibrato), and CC74 (slide). The mapping is implemented but **off by default** (`include_expression=True` turns it on), because the bundled head is untrained; exported events are labelled with that provenance. Expression quality still depends on a trained checkpoint.
 4. **Confidence metadata** — JSON note fields are canonical. MIDI also carries Polyphonic Key Pressure (0–127), a standard note-specific message whose interpretation varies by DAW. CC#127 is not emitted; `cc_127_value` is only a deprecated JSON alias.
 5. **Quality report** — `processing_report.json` exposes a named centroid-separation proxy (not SI-SDR), phase coherence, note-level confidence counts, artifact flags, model-weight status, and a heuristic routing tier.
 
@@ -93,7 +93,7 @@ For best results: clean recordings with clearly audible guitar and bass, minimal
 2. Assign guitar/bass virtual instruments.
 3. Use the JSON event metadata as the canonical confidence overlay. MIDI files also contain Polyphonic Key Pressure values: 96–127 high, 64–95 medium, 0–63 low. Some DAWs expose poly pressure as per-note aftertouch; others ignore it. Do not look for CC#127 — it is not emitted.
 4. Edit pitch/timing/velocity of low-confidence notes by ear against the stems. Same-onset and overlapping notes are represented as independent MIDI note events.
-5. If expression data is present, pitch-wheel is bend, CC1 is vibrato, and CC74 is the slide/brightness proxy. Mapping does not imply that the checkpoint learned useful expression.
+5. If you enabled expression export, pitch-wheel is bend, CC1 is vibrato, and CC74 is the slide/brightness proxy. Mapping does not imply that the checkpoint learned useful expression.
 
 There is no built-in MIDI editor — your DAW is the editor. MIDI import support for poly pressure, pitch bend, and CC lanes varies, so verify the rendered instrument in the target DAW.
 

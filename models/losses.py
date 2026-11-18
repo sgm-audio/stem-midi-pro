@@ -54,8 +54,9 @@ class PerceptualAudioLoss(nn.Module):
     """Composite loss: MR-STFT + spectral flatness + crest factor + onset alignment.
 
     Transcription components are optional and only active when the
-    corresponding targets are supplied by the caller (C-3): pitch CE requires
-    ``target_pitches`` (class indices or one-hot), velocity MAE requires
+    corresponding targets are supplied by the caller (C-3): pitch CE
+    (class-index / single-hot targets) or multi-label pitch BCE (multi-hot
+    targets — chords) requires ``target_pitches``; velocity MAE requires
     ``target_velocities``. Duration IoU and expression losses remain
     unwired — no dataset currently emits those targets (see TODO ARCH-11.6).
     """
@@ -105,12 +106,17 @@ class PerceptualAudioLoss(nn.Module):
                     pred_onsets.detach(), target_onsets.detach(), is_logits=True
                 )
 
-        # Pitch: multi-hot targets -> BCE over the 128 logits (polyphonic
-        # capable); integer targets -> cross-entropy (single-label head).
+        # Pitch loss: multi-hot targets (any frame labeling >1 pitch — a
+        # chord) train via multi-label BCE (pitch_bce_loss_fn); class-index /
+        # single-hot targets train via 128-way cross-entropy, unchanged.
         pitch_ce_loss = 0
         if pred_pitch_logits is not None and target_pitches is not None:
+            # A multi-hot chord grid is (B, T, V); a class-index grid is (B, T).
+            # Both halves of this test matter: `dim() == 3` alone would push an
+            # unbatched (T, V) grid into cross-entropy, and a width test alone would
+            # read a (B, 128)-frame class-index target as multi-hot.
             n_classes = pred_pitch_logits.shape[-1]
-            if target_pitches.dim() >= 2 and target_pitches.shape[-1] == n_classes:
+            if target_pitches.dim() == 3 and target_pitches.shape[-1] == n_classes:
                 pitch_ce_loss = pitch_bce_loss_fn(pred_pitch_logits, target_pitches)
             else:
                 pitch_ce_loss = pitch_ce_loss_fn(pred_pitch_logits, target_pitches)
@@ -154,9 +160,12 @@ class PerceptualAudioLoss(nn.Module):
             "spectral": spectral_loss.item(),
             "flatness": flatness_loss.item(),
             "crest": crest_loss.item(),
+            # PR #13's split, kept: the hard F1 has no gradient, so it is reported as
+            # a metric while onset_bce is what the optimiser actually minimises (H-4).
             "onset_bce": _scalar(onset_bce_loss),
-            "onset_f1": _scalar(onset_f1_metric),  # metric only (no gradient)
-            "pitch_ce": _scalar(pitch_ce_loss),
+            "onset_f1": _scalar(onset_f1_metric),
+            "pitch": _scalar(pitch_ce_loss),  # CE (single-label) or BCE (chords)
+            "pitch_ce": _scalar(pitch_ce_loss),  # same number, PR #13's key name
             "velocity_mae": _scalar(velocity_mae_loss),
             "duration_iou": _scalar(duration_iou_loss),
             "alignment": _scalar(alignment_loss),
@@ -273,21 +282,6 @@ def onset_bce_loss_fn(
     return F.binary_cross_entropy_with_logits(logits[:n], target[:n], pos_weight=weight)
 
 
-def pitch_bce_loss_fn(pred_pitch_logits, target_multihot):
-    """Multi-label pitch loss for multi-hot targets (B, T, V) or (B, 1, T, V)."""
-    logits = pred_pitch_logits
-    if logits.dim() == 4:
-        logits = logits.squeeze(1)
-    target = target_multihot
-    if target.dim() == 4:
-        target = target.squeeze(1)
-    target = target.float().clamp(0, 1)
-    n = min(logits.shape[1], target.shape[1])
-    if n == 0:
-        return logits.new_zeros(())
-    return F.binary_cross_entropy_with_logits(logits[:, :n], target[:, :n])
-
-
 def onset_f1_loss_fn(
     pred_onsets,
     target_onsets,
@@ -376,6 +370,55 @@ def pitch_ce_loss_fn(pred_pitch_logits, target_pitches, ignore_index: int = -100
         # zero that stays connected to the graph instead.
         return logits.sum() * 0.0
     return F.cross_entropy(logits, flat, ignore_index=ignore_index)
+
+
+def pitch_bce_loss_fn(pred_pitch_logits, target_multi_hot):
+    """Multi-label pitch BCE loss for POLYPHONIC (chord) targets.
+
+    Args:
+        pred_pitch_logits: (B, T, V) pitch logits, decoded per-pitch
+            (sigmoid threshold) at inference — a frame may activate several
+            pitches at once.
+        target_multi_hot: (B, T, V) multi-hot float/long targets. Frames
+            whose row sums to 0 have no pitch label and are excluded from
+            the loss (mirrors ``pitch_ce_loss_fn``'s ignore_index rows).
+            ``_prepare_pitch_target`` returns this format when any frame
+            labels more than one pitch (a chord).
+    Returns:
+        Scalar loss. Per frame, the positive class terms are weighted by
+        ``(V - n_active) / n_active`` so a 3-note chord is balanced against
+        its 125 negatives exactly like a single note is against its 127 —
+        without this, BCE over 128 classes is dominated by negatives and
+        collapses toward "predict nothing".
+    """
+    logits = pred_pitch_logits
+    if logits.dim() != 3:
+        raise ValueError(
+            f"pitch_bce_loss_fn expects pred_pitch_logits (B, T, V); got {tuple(logits.shape)}"
+        )
+    vocab = logits.shape[-1]
+    targets = target_multi_hot
+    if targets.dim() == 4 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)  # collated (B, 1, T, V)
+    if targets.dim() != 3 or targets.shape[-1] != vocab:
+        raise ValueError(
+            f"pitch_bce_loss_fn expects multi-hot (B, T, {vocab}) targets; "
+            f"got {tuple(targets.shape)} — class-index targets belong to pitch_ce_loss_fn"
+        )
+
+    valid = targets.sum(dim=-1) > 0  # (B, T): frames with at least one label
+    if valid.sum() == 0:
+        # All frames unlabeled: keep the result connected to the graph.
+        return logits.sum() * 0.0
+
+    logits_v = logits[valid]  # (M, V)
+    targets_v = targets[valid].float().clamp(0.0, 1.0)
+    counts = targets_v.sum(dim=-1, keepdim=True).clamp(min=1.0)  # (M, 1)
+    pos_weight = (vocab - counts) / counts  # broadcast over the vocab dim
+    bce = F.binary_cross_entropy_with_logits(
+        logits_v, targets_v, pos_weight=pos_weight, reduction="none"
+    )
+    return bce.mean()
 
 
 def velocity_mae_loss_fn(pred_velocities, target_velocities, mask=None):

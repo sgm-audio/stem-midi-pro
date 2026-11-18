@@ -27,7 +27,7 @@ python3 scripts/verify_api.py                         # OOM mapping, untrained g
 | C-1 | Stems do not reconstruct the mix | Follows from softmax masks | `||guitar+bass+residual − mix|| / ||mix||` = **1.15e-7** |
 | C-3 | MIDI clock 60x slow (3 s of audio → 179.8 s of MIDI) | `main` had `ticks_per_second = ticks_per_beat · 1e6 / tempo_us`; kept, and the writer now honours `duration_frames` | two events spanning **34.83 s** of audio → MIDI ends at **35.29 s (1.01x)**. (With random weights the peak-picker emits a single note, so an end-to-end file-length check needs a trained model.) |
 | C-3 | Chords serialised into arpeggios (`+120`-tick stagger) | `main` had already merged events into one time-sorted stream; kept | 3 simultaneous notes → **3 note-ons at tick 0** |
-| C-3 | Confidence written to CC#127 (`Poly Mode On`, a Channel Mode message) | `main`'s convention is kept: default **CC#16**, `MIDI_CONFIDENCE_CC` override, CC#120–127 rejected unless explicitly requested | parsed controllers `{127}` → **`{16}`**, no channel-mode writes |
+| C-3 | Confidence written to CC#127 (`Poly Mode On`, a Channel Mode message) | row written before the merge; **the merged lane is per-note Polyphonic Key Pressure with no confidence CC at all** (see “Merge onto `main” below) — main's CC#16/`MIDI_CONFIDENCE_CC` convention did not survive it | controllers `{127}` → `{}`; polytouch `[(60, 114), (64, 50)]` |
 | C-3 | A channel CC cannot express per-note confidence (simultaneous notes share the channel) | **Added here**: `confidence note=<n> value=<v>` marker track (`include_confidence_track`) | 2 simultaneous notes → 2 marker messages, one per note |
 | C-3 | Fixed 1/16-note durations | **Added here**: `duration_frames` honoured; `_logits_to_midi` derives durations from inter-onset gaps (clamped to `min_note_seconds`/`max_note_seconds`) | 400-frame note → 4458 ticks = 400 × ticks/frame; 20-frame note → 222 ticks (±1 from rounding) @120 BPM |
 | C-4 | `O(T)` scan memory (23 MB per second of audio; 180 s OOM-killed) | `main` ships the chunked state-carrying scan (`Mamba.SCAN_CHUNK`, default 256, checkpointed in training); `_mamba_compat.py` taken wholesale | 300 s single pass: **2546 MB peak, completes** (audit: 180 s killed) |
@@ -111,3 +111,69 @@ The 36 xfails are `main`'s still-open defects (`TODO.md` §18.1), not this branc
 this audit set are now satisfied and were converted into pass-today guards — SEP-1
 (`test_stems_sum_back_to_the_mix`), JSON-1 (`test_zip_report_is_strict_json`) and, for the docs
 half, DOC-1 — while MIDI-5 and CKPT-1 had already been fixed on `main` by PR #15/#16.
+
+## Merge onto `main` (round 2: `f216fef` + `origin/main` @ `fda6071`, 2026-11-18)
+
+PR #13's head was merged once (round 1, `f216fef`) and `main` moved again before the
+review finished, so the branch was re-merged onto `fda6071`: 13 files, 26 hunks, one of
+them an add/add on all four `scripts/verify_*` + `tests/test_numerics.py` pairs (both
+branches had rewritten the same files from scratch). Nothing was resolved by deleting a
+side's semantics; where both sides were right, both survive, and where one side was
+wrong it is recorded here rather than quietly dropped.
+
+| Site | `main` @ `fda6071` | This branch | Resolution |
+|---|---|---|---|
+| `utils/midi.py` signature | `include_expression=False` (PR #18: the head is untrained, so an opt-in) | `tempo_us`, `include_confidence_track` | **union of all three** parameters; the expression block is gated by main's flag, the marker collection stays, and both defaults keep main's one-track contract |
+| `utils/midi.py` docstring | one paragraph per behaviour | two paragraphs, merged badly | rewritten once, no duplicated paragraphs; states that the marker track is opt-in *because* `len(mid.tracks) == 1` is pinned |
+| `main.py::_logits_to_midi` | chord-aware decoding (`pitch_threshold` → one `note_on` per pitch above threshold, argmax fallback) | gap-derived `duration_frames`, `events.sort`, expression averaged over the note | **both**: chord decoding drives emission, `duration_frames` comes from inter-onset spacing, expression is the mean over that note and keeps main's `source` label. A chord's notes share one duration - stated in the docstring |
+| `main.py` velocity | `(velocity * 127).long()` (truncates) | `squeeze(-1).clamp(0, 1) * 127 → round → clamp(1, 127)` | **kept the hardened mapping** (a 0 velocity is a `note_off`); main's new chord test expected `63` for 0.5 and now expects `64`, with the reason inline |
+| `models/losses.py` multi-hot test | `target_pitches.dim() == 3` | `shape[-1] == n_classes` | **both conditions** (`dim() == 3 and shape[-1] == n_classes`): either alone misclassifies a `(T, V)` unbatched grid or a `(B, 128)`-frame class-index target |
+| `models/losses.py` `loss_dict` | `"pitch"`, `"onset_f1"` | `"pitch_ce"`, `"onset_bce"`, `"onset_f1"` (metric-only) | main's key names stay (its `test_review_fixes.py:1026` asserts `loss_dict["pitch"] > 0`); `onset_bce`/`pitch_ce` are kept as extra keys, since main's single `onset_f1` reported the no-gradient metric as if it were the loss term (H-4) |
+| `models/losses.py` `pitch_bce_loss_fn` | new, validating, chord-weighted | new, simpler squeeze-based | **main's only.** The merge auto-kept both definitions in one file (`def` twice, second shadowing the first) - #13's copy is deleted, and an AST duplicate-def sweep now runs as part of this merge's checks |
+| `models/mamba_transcriber.py` | "chords are NOT modeled" replaced by the PR #19 decoder note | pre-norm residual stack note (C-1) | main's text, then #13's stack note appended - both are true of the merged module |
+| `configs/model_config*.yaml` | `transcriber.pitch_threshold: 0.5` | `transcriber.min/max_note_seconds`, `quality_gates.min_separation_proxy`, top-level `inference:` | **both key groups** in all three files (YAML-validated after the merge, not by eye) |
+| `utils/midi_targets.py` | private `_build_tempo_map` + `build_tempo_map = _build_tempo_map` alias block | public def + private aliases at the end | the auto-merge produced `build_tempo_map = _build_tempo_map` *above* the definition - an `ImportError`/`NameError` on any import of `utils.midi_targets`. Alias block deleted, back-compat aliases kept after the definitions |
+| `scripts/verify_midi.py` | main's (clock, polyphony, confidence-polytouch, expression, durations, reader tempo) - docstring still promised "CC#16 default, `confidence_cc=127`", which main's own writer has no parameter for | writer `tempo_us` round trip, marker track, no-CC assertion | **main's script + this branch's `check_writer_params()`**, and the stale header rewritten. Its `check_confidence` printed `(expected {64: 51})` next to `{64: 50}` because it re-derived with `round()` while the writer truncates; it now asserts the writer's mapping and prints both spellings |
+| `scripts/verify_api.py` | untrained *provenance* only; states "there is no hard gate" | untrained *refusal* gate + `ALLOW_UNTRAINED_MODEL` | main's script, with a `check_untrained_gate()` appended: it asserts `load_model()` refuses **and** that the override serves with `trained_weights=False`. A script that only printed the flag would pass whether or not the gate existed |
+| `scripts/verify_numerics.py` | hand-replays the *bare* stack (`for block in sep.mamba_blocks: h = block(h)`, sigmoid masks) to show the C-1/SEP-2 collapse and ~0.5 mixture consistency | walks the model's real normed residual stack + softmax masks | **walks the real modules.** Main's replay described a structure the merged model no longer has, so it was reporting numbers for a dead bug and passing |
+| `tests/test_numerics.py` | 7 tests, incl. `@known_bug("SEP-2")` on the hand-replayed ladder | 8, incl. `test_mixture_consistency` | main's 7 as the base (SEP-1's mixture pin stays in `test_pipeline_integrity.py::test_stems_sum_back_to_the_mix`, one pin per defect). The two hand-replay tests now drive the real stack, and the ladder test gained a structural assertion (`len(sep.block_norms) == len(sep.mamba_blocks)`) so a future replay/forward drift fails loudly |
+| `README.md` | five bullets incl. "~4x realtime … 1.8 GB peak RSS" | benchmark subsection + a note that main's figure was wrong by 15x | **main's bullets verbatim**, and the audit-machine table stays - but its "~0.25–0.3x realtime" claim was **this branch's arithmetic error** (300 s of audio in 104.0 s is 2.9x *faster* than realtime, not 4x slower). Corrected: the measurements now corroborate main's ~4x (4.35x one pass, 2.9x chunked) and the "271 MB/audio-second" activation ceiling is left in `AUDIT-test-suite.md`, where it is defined, instead of being conflated with end-to-end peak RSS |
+| `TODO.md` §18.1 | `EXPR-1` closed, `SEP-2` opened, `MIDI-5` open with no lock, MIDI-6 citing a test name that has never existed | `MIDI-5`/`CKPT-1`/`SEP-1`/`JSON-1`/`DOC-1` closed | main's list as the base; this branch's closures grafted by id; `SEP-2` closed because main's own cure is in the tree; `MIDI-5` re-closed; the stale citation repaired; header counts re-measured (never copied) |
+
+### Two defects the merge itself found
+
+1. **`utils/midi_targets.py` did not import.** Git auto-merged main's
+   `build_tempo_map = _build_tempo_map` alias *above* the function that HEAD defines, so
+   `import utils.midi_targets` raised `NameError` - and because `utils/__init__.py`
+   re-exports it, every test module importing anything from `utils.*` failed at
+   collection. No conflict marker was involved: a clean, silent, tree-breaking merge. The
+   first thing that surfaced it was `tests/test_pipeline_integrity.py` erroring on
+   import, which is why the suite is run before *and* after the doc pass of every merge here.
+2. **A stale "known bug" is worse than no known bug.** Both `main`'s
+   `scripts/verify_numerics.py` and `tests/test_numerics.py` proved the C-1/SEP-2
+   collapse by re-implementing the buggy stack inline instead of calling the model. After
+   PR #13 landed the normed residual stack, that replay kept producing the collapse, so
+   the "bug is still here" evidence was self-generated. The merged versions drive the real
+   `forward` and assert the structure they replay; `SEP-2` is closed on that basis.
+
+### Re-measured on the round-2 merge
+
+```bash
+$ .venv/bin/python -m pytest -q -m "not cuda" --strict-deps --fail-on-skip
+381 passed, 1 skipped, 3 deselected, 35 xfailed in 57.13s        # exit 0
+$ .venv/bin/python -m ruff check .        # All checks passed!
+$ .venv/bin/python -m black --fast --check .   # 88 files unchanged
+$ for f in scripts/verify_{midi,api,numerics}.py; do .venv/bin/python $f; done   # all exit 0
+$ for f in $(git ls-files '*.py' | grep -v '^research/'); do head -3 "$f" | grep -q SPDX || echo "$f"; done
+                                                              # no output = 0 missing SPDX headers
+```
+
+`main` @ `fda6071` on the same interpreter, without the honesty flags: 362 passed /
+1 skipped / 3 deselected / 39 xfailed over 405 collected (measured in a throwaway
+worktree with the same venv). The delta is +19 tests (PR #19's chord/expression coverage
+plus this branch's guards) and −4 xfails. The four are exactly the locks this branch turns
+into pass-today guards because the fixes are in the merged tree: `SEP-1` and `JSON-1` (PR
+#13), `DOC-1` (PR #15's docs plus the new writer-vs-doc guard) and `SEP-2` (PR #13's
+pre-norm residual stack). `EXPR-1`, `MIDI-5` and `CKPT-1` are documentation closures on
+`main`, not markers - main had already converted those locks itself.
+

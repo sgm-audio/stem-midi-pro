@@ -38,6 +38,9 @@ from utils.quality_gates import ProcessingReport, route_by_quality  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Provenance label carried on every note that has expression data (ARCH-11.4.4).
+_EXPRESSION_SOURCE = "expression_head (untrained; ARCH-11.4.4)"
+
 # Default loud input cap (C-1 / C-6): with the chunked scan the separator no
 # longer needs O(L·d_inner·N) memory, but STFT-domain buffers and stems still
 # scale with length. Override via cfg["audio"]["max_input_seconds"].
@@ -60,7 +63,8 @@ class StemMidiModel(nn.Module):
 
     Input:  audio (B, C=1, T); optional training targets
             target_guitar / target_bass (B, C, T),
-            target_onsets (B, T, 1), target_pitch (B, T) or one-hot (B, T, V),
+            target_onsets (B, T, 1), target_pitch (B, T) / one-hot (B, T, V) /
+            multi-hot (B, T, V) for chords,
             target_velocity (B, T, 1) normalized [0, 1]
     Output: Dict with guitar_stem, bass_stem, midi_metadata
             ({"guitar": …, "bass": …, "summary": …}), processing_report,
@@ -439,12 +443,21 @@ class StemMidiModel(nn.Module):
     def _prepare_pitch_target(
         target_pitch: torch.Tensor | None, pitch_logits: torch.Tensor
     ) -> torch.Tensor | None:
-        """Coerce pitch targets to (B, T) class indices for ``pitch_ce_loss_fn``.
+        """Coerce pitch targets for the pitch loss (CHORD-AWARE).
 
-        Accepts one-hot (B, T, V) / collated (B, 1, T, V) tensors (frames with
-        an all-zero row become ``ignore_index`` = -100, so frames without a
-        labeled pitch are excluded from the loss) and already-class-index
-        (B, T) tensors. Out-of-range values are ignored, not clamped (M-1).
+        Returns one of two formats, chosen per batch:
+
+        - **(B, T) class indices** for ``pitch_ce_loss_fn`` — when every
+          labeled frame carries exactly one pitch (one-hot rows collapse to
+          argmax; all-zero rows become ``ignore_index`` = -100; class-index
+          tensors pass through). Out-of-range values are ignored, not
+          clamped (M-1).
+        - **(B, T, V) multi-hot float** for ``pitch_bce_loss_fn`` — when ANY
+          frame labels more than one pitch (a chord). The previous behavior
+          argmax-collapsed such rows, silently destroying all but one note
+          of every chord in the training data even though
+          ``utils.midi_targets.midi_to_targets`` writes one-hot entries per
+          note_on (i.e. real chord frames arrive multi-hot).
         """
         if target_pitch is None:
             return None
@@ -454,7 +467,16 @@ class StemMidiModel(nn.Module):
         if t.dim() == 4 and t.shape[1] == 1:
             t = t.squeeze(1)
         if t.dim() == 3 and t.shape[-1] == vocab:
-            valid = t.sum(dim=-1) > 0
+            row_sum = t.sum(dim=-1)
+            if (row_sum > 1).any():
+                # Polyphonic (chord) labels present: keep the multi-hot grid.
+                t = (t > 0).float()
+                if t.shape[1] > n_pred:
+                    t = t[:, :n_pred]
+                elif t.shape[1] < n_pred:
+                    t = F.pad(t, (0, 0, 0, n_pred - t.shape[1]), value=0.0)
+                return t
+            valid = row_sum > 0
             t = t.argmax(dim=-1).masked_fill(~valid, -100)
         elif t.dim() > 2:
             t = t.reshape(t.shape[0], -1)
@@ -545,10 +567,15 @@ class StemMidiModel(nn.Module):
         per event (the channels are unnamed and the head is untrained -
         ARCH-11.4.4).
 
-        Single argmax pitch per onset frame - chords/polyphony are not modeled
-        by this head layout (see MambaTranscriber docstring). Assumes B=1 for
-        inference; batch >1 still returns all batches' events with onset frames
-        as-is.
+        Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold`` is set
+        (main's PR #19): every pitch whose sigmoid exceeds it at an accepted onset
+        frame emits its own note_on, and the argmax pitch is the fallback when none
+        does. ``duration_frames`` and the note-length logic above apply per onset
+        frame, so every note of a chord shares one duration - a chord is one event in
+        the audio timeline, and the refractory window is what bounds the density.
+
+        Assumes B=1 for inference; batch >1 still returns all batches' events with
+        onset frames as-is.
         """
         tcfg = self.cfg.get("transcriber", {})
         # Defaults keep hand-built configs (unit tests, backends) working: the
@@ -568,8 +595,20 @@ class StemMidiModel(nn.Module):
         pitches = torch.argmax(pitch_logits, dim=-1)
         vel_values = (velocity.squeeze(-1).clamp(0, 1) * 127).round().clamp(1, 127).long()
 
-        # Rising-edge selection: keep a candidate only when at least
+        pitch_threshold = self.cfg["transcriber"].get("pitch_threshold")
+        chord_probs = None
+        if pitch_threshold is not None:
+            if not 0.0 < float(pitch_threshold) < 1.0:
+                raise ValueError(
+                    f"transcriber.pitch_threshold must be in (0, 1) or null; "
+                    f"got {pitch_threshold!r}"
+                )
+            chord_probs = torch.sigmoid(pitch_logits)  # (B, T, V)
+
+        # Rising-edge selection (H-6): a candidate survives only when at least
         # `refractory` below-threshold frames separate it from the previous one.
+        # Accepted frames are collected per batch FIRST, because note length is
+        # derived from the inter-onset spacing (PR #13) and a gap needs two onsets.
         frames_by_batch: dict[int, list[int]] = {}
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():
@@ -579,7 +618,7 @@ class StemMidiModel(nn.Module):
                 continue
             frames_by_batch.setdefault(b, []).append(t)
 
-        events = []
+        events: list[dict] = []
         for b, frames in frames_by_batch.items():
             gaps = [
                 min(max_frames, max(min_frames, frames[i + 1] - frames[i]))
@@ -588,29 +627,47 @@ class StemMidiModel(nn.Module):
             default_dur = int(sorted(gaps)[len(gaps) // 2]) if gaps else min_frames
             for i, t in enumerate(frames):
                 dur = gaps[i] if i < len(gaps) else default_dur
-                event = {
-                    "note": pitches[b, t].item(),
-                    "onset_frame": t,
-                    "duration_frames": int(dur),
-                    "velocity": int(vel_values[b, t].item()),
-                    "confidence": confidence[b, t].item(),
-                }
+                if chord_probs is not None:
+                    frame_notes = (chord_probs[b, t] > pitch_threshold).nonzero().flatten().tolist()
+                else:
+                    frame_notes = []
+                if not frame_notes:
+                    # No pitch crossed the threshold (or multi-label decoding is
+                    # disabled): fall back to the argmax pitch so a fired onset
+                    # never produces an empty event set.
+                    frame_notes = [int(pitches[b, t].item())]
+                expr = None
                 if expression is not None and expression.dim() == 3:
-                    # Mean over the note, not just the onset frame (#13), keyed by the
-                    # head's declared names so utils/midi.py can map bend -> pitch-wheel,
-                    # vibrato -> CC1, slide -> CC74 (main's _expression_messages).
+                    # Mean over the note rather than the onset frame (PR #13), keyed by
+                    # the head's declared names so utils/midi.py can map bend ->
+                    # pitch-wheel, vibrato -> CC1, slide -> CC74. The head is sigmoid, so
+                    # each channel is already 0..1 with 0.5 neutral (the writer's
+                    # convention).
                     window = expression[b, t : t + dur]
                     if window.numel():
                         values = window.mean(dim=0).detach().cpu().tolist()
                         names = self.cfg["transcriber"].get(
                             "expression_heads", ["bend", "vibrato", "slide"]
                         )
-                        event["expression"] = {
-                            name: max(0.0, min(1.0, float(values[i])))
-                            for i, name in enumerate(names)
-                            if i < len(values)
+                        expr = {
+                            name: max(0.0, min(1.0, float(values[j])))
+                            for j, name in enumerate(names)
+                            if j < len(values)
                         }
-                events.append(event)
+                for note in frame_notes:
+                    event = {
+                        "note": int(note),
+                        "onset_frame": t,
+                        "duration_frames": int(dur),
+                        "velocity": int(vel_values[b, t].item()),
+                        "confidence": confidence[b, t].item(),
+                    }
+                    if expr is not None:
+                        # Tagged with where it came from: an untrained head's output must
+                        # never pass for learned phrasing.
+                        event["expression"] = dict(expr, source=_EXPRESSION_SOURCE)
+                    events.append(event)
+        # Deterministic order for a chord: frame, then pitch.
         events.sort(key=lambda e: (e["onset_frame"], e["note"]))
         return events
 

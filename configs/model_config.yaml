@@ -42,6 +42,9 @@ transcriber:
   onset_threshold: 0.5
   min_note_seconds: 0.05
   max_note_seconds: 4.0
+  # Chord-aware decoding: every pitch whose sigmoid exceeds this fires
+  # its own note_on at an accepted onset frame; null = legacy single-argmax.
+  pitch_threshold: 0.5
 
 # Mixed Precision & Distributed
 training:

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import itertools
+import math
 
 import numpy as np
 import pytest
@@ -747,9 +748,12 @@ def test_onset_refractory_suppresses_bursts_and_jitter(mock_config):
         assert 0 < e["velocity"] <= 127 and 0.0 < e["confidence"] <= 1.0
 
     # refractory 0 = escape hatch: pre-H-6 behavior (every above-threshold
-    # frame fires) is still reachable and only the honest threshold applies
+    # frame fires) is still reachable. pitch_threshold=None scopes this test
+    # to the refractory dimension — in chord mode frame 15 legitimately emits
+    # BOTH pitch 45 and the jittered 52 (see the chord tests below).
     cfg0 = _mamba_config(mock_config)
     cfg0["transcriber"]["onset_refractory_frames"] = 0
+    cfg0["transcriber"]["pitch_threshold"] = None
     model0 = StemMidiModel(cfg0)
     model0.eval()
     events0 = model0._logits_to_midi(onset, pitch, velocity, confidence)
@@ -821,3 +825,210 @@ def test_report_metric_renamed_from_si_sdr():
         low_confidence_notes=50,
     )
     assert noisy.quality_tier.value == "draft"
+
+
+def test_chord_decoding_emits_all_pitches_above_threshold(mock_config):
+    """Chords: at an accepted onset frame, EVERY pitch whose sigmoid exceeds
+    transcriber.pitch_threshold emits its own note_on. A plateau burst stays
+    collapsed by the refractory window (H-6) — one frame, two notes."""
+    from main import StemMidiModel
+
+    cfg = _mamba_config(mock_config)
+    cfg["transcriber"]["onset_threshold"] = 0.5
+    cfg["transcriber"]["pitch_threshold"] = 0.5
+    model = StemMidiModel(cfg)
+    model.eval()
+
+    T = 20
+    onset = torch.full((1, T, 1), -4.0)
+    onset[0, 10:14, 0] = 4.0  # one burst -> refractory collapses to frame 10
+
+    pitch = torch.full((1, T, 128), -4.0)  # sigmoid ~0.018 for all pitches
+    pitch[0, :, 45] = 4.0  # sigmoid ~0.982
+    pitch[0, :, 52] = 3.0  # sigmoid ~0.953
+    pitch[0, :, 60] = -1.0  # sigmoid ~0.27 -- below threshold, must NOT fire
+
+    velocity = torch.full((1, T, 1), 0.5)
+    confidence = torch.full((1, T), 0.9)
+
+    events = model._logits_to_midi(onset, pitch, velocity, confidence)
+    notes = [(e["note"], e["onset_frame"]) for e in events]
+    assert sorted(notes) == [
+        (45, 10),
+        (52, 10),
+    ], f"both chord members (45, 52) must fire once at frame 10; got {notes}"
+    for e in events:
+        # 0.5 * 127 = 63.5. The merged writer rounds and clamps to [1, 127]
+        # (`velocity == 0` is a note_off, so a mapped-to-zero note_on must never ship),
+        # where main truncated with `.long()` -> 63. Same defect class as MIDI-4's
+        # double truncation; the assertion follows the stricter mapping.
+        assert e["velocity"] == 64 and e["confidence"] == pytest.approx(0.9)
+
+
+def test_chord_decoding_falls_back_to_argmax_when_nothing_crosses(mock_config):
+    """A fired onset with no pitch above the threshold must still emit the
+    argmax pitch — never an empty event set (single-label-trained models)."""
+    from main import StemMidiModel
+
+    cfg = _mamba_config(mock_config)
+    cfg["transcriber"]["pitch_threshold"] = 0.5
+    model = StemMidiModel(cfg)
+    model.eval()
+
+    T = 12
+    onset = torch.full((1, T, 1), -4.0)
+    onset[0, 5, 0] = 4.0
+    pitch = torch.full((1, T, 128), -1.0)  # everything below sigmoid 0.5
+    pitch[0, :, 40] = -0.5  # argmax class, still sigmoid ~0.38 < threshold
+    velocity = torch.full((1, T, 1), 0.5)
+    confidence = torch.full((1, T), 0.8)
+
+    events = model._logits_to_midi(onset, pitch, velocity, confidence)
+    assert [(e["note"], e["onset_frame"]) for e in events] == [(40, 5)]
+
+
+def test_pitch_threshold_null_restores_single_argmax(mock_config):
+    """transcriber.pitch_threshold: null -> legacy single-argmax decoding,
+    even when two pitches are far above what would be the threshold."""
+    from main import StemMidiModel
+
+    cfg = _mamba_config(mock_config)
+    cfg["transcriber"]["pitch_threshold"] = None
+    model = StemMidiModel(cfg)
+    model.eval()
+
+    T = 10
+    onset = torch.full((1, T, 1), -4.0)
+    onset[0, 3, 0] = 4.0
+    pitch = torch.full((1, T, 128), -4.0)
+    pitch[0, :, 45] = 8.0
+    pitch[0, :, 52] = 6.0
+    velocity = torch.full((1, T, 1), 0.5)
+    confidence = torch.full((1, T), 0.8)
+
+    events = model._logits_to_midi(onset, pitch, velocity, confidence)
+    assert [(e["note"], e["onset_frame"]) for e in events] == [(45, 3)]
+
+
+def test_prepare_pitch_target_keeps_multihot_chords(mock_config):
+    """_prepare_pitch_target must NOT argmax-collapse multi-hot (chord) rows:
+    any batch containing a multi-hot frame returns the (B, T, V) float grid,
+    while single-pitch batches keep the (B, T) class-index contract."""
+    from main import StemMidiModel
+
+    B, T, V = 1, 6, 128
+    logits = torch.zeros(B, T, V)
+
+    # single-hot: frame 1 labels note 45 only -> class-index path
+    single = torch.zeros(B, T, V)
+    single[0, 1, 45] = 1.0
+    out = StemMidiModel._prepare_pitch_target(single, logits)
+    assert out.shape == (B, T) and out.dtype == torch.long
+    assert out[0, 1].item() == 45 and out[0, 0].item() == -100
+
+    # multi-hot: frame 3 labels notes 45 AND 52 -> multi-hot grid preserved
+    chord = torch.zeros(B, T, V)
+    chord[0, 1, 45] = 1.0
+    chord[0, 3, 45] = 1.0
+    chord[0, 3, 52] = 1.0
+    out = StemMidiModel._prepare_pitch_target(chord, logits)
+    assert out.shape == (B, T, V) and out.dtype == torch.float32
+    assert out[0, 3, 45].item() == 1.0 and out[0, 3, 52].item() == 1.0
+    assert out[0, 3].sum().item() == 2.0  # BOTH notes survive
+    assert out[0, 0].sum().item() == 0.0  # unlabeled rows are all-zero
+
+    # truncation to the prediction grid pads with zeros on the frame dim
+    short_logits = torch.zeros(B, 4, V)
+    out = StemMidiModel._prepare_pitch_target(chord, short_logits)
+    assert out.shape == (B, 4, V) and out[0, 3, 52].item() == 1.0
+
+
+def test_pitch_bce_loss_fn_masked_and_chord_balanced():
+    """pitch_bce_loss_fn: unlabeled rows excluded, gradient flows, and a
+    2-note chord frame is balanced against its negatives (not drowned)."""
+
+    from models.losses import pitch_bce_loss_fn
+
+    torch.manual_seed(0)
+    B, T, V = 1, 5, 128
+    logits = torch.randn(B, T, V, requires_grad=True)
+
+    targets = torch.zeros(B, T, V)
+    targets[0, 1, 45] = 1.0  # single note
+    targets[0, 3, 45] = 1.0  # chord: two notes at one frame
+    targets[0, 3, 52] = 1.0
+
+    loss = pitch_bce_loss_fn(logits, targets)
+    assert torch.isfinite(loss) and loss.item() > 0
+    loss.backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+    # unlabeled frames (0, 2, 4) must receive zero gradient
+    assert logits.grad[0, 0].abs().sum().item() == 0.0
+    assert logits.grad[0, 2].abs().sum().item() == 0.0
+    # labeled frames receive gradient on both the positive AND negative classes
+    assert logits.grad[0, 3].abs().sum().item() > 0.0
+
+    # all-zero targets -> zero loss that stays connected to the graph
+    empty = torch.zeros(B, T, V)
+    logits2 = torch.randn(B, T, V, requires_grad=True)
+    loss0 = pitch_bce_loss_fn(logits2, empty)
+    assert loss0.item() == 0.0
+    loss0.backward()
+    assert logits2.grad is not None
+
+    # class-index targets are rejected loudly (they belong to pitch_ce)
+    with pytest.raises(ValueError, match="multi-hot"):
+        pitch_bce_loss_fn(torch.randn(B, T, V), torch.zeros(B, T).long())
+
+    # balance check: pos_weight = (V-n)/n makes a frame's positive mass
+    # ~equal its negative mass, so a 2-note chord is NOT drowned by its 126
+    # negatives. At zero logits the expected means are (V*(V-n)/n... per
+    # frame: [n*(V-n)/n + (V-n)] * log(2) / V = 2*(V-n)*log(2)/V.
+    logits3 = torch.zeros(1, 1, V, requires_grad=True)
+    chord_t = torch.zeros(1, 1, V)
+    chord_t[0, 0, 45] = 1.0
+    chord_t[0, 0, 52] = 1.0
+    loss_chord = pitch_bce_loss_fn(logits3, chord_t)
+    single_t = torch.zeros(1, 1, V)
+    single_t[0, 0, 45] = 1.0
+    loss_single = pitch_bce_loss_fn(torch.zeros(1, 1, V, requires_grad=True), single_t)
+    expected_chord = 2 * (V - 2) * math.log(2) / V
+    expected_single = 2 * (V - 1) * math.log(2) / V
+    assert loss_chord.item() == pytest.approx(expected_chord, rel=1e-4)
+    assert loss_single.item() == pytest.approx(expected_single, rel=1e-4)
+    # both are ~2x log(2) (positives carry ~half the mass); unweighted BCE
+    # would give exactly log(2) — positives drowned at 1/64 of the mass
+    assert loss_chord.item() == pytest.approx(loss_single.item(), rel=2e-2)
+    assert loss_chord.item() > math.log(2) * 1.5
+
+
+def test_forward_trains_chords_end_to_end(mock_config):
+    """Full forward with multi-hot pitch targets: loss dispatches to the
+    multi-label BCE path, stays finite, and gradients reach pitch_head."""
+    from main import StemMidiModel
+
+    cfg = _mamba_config(mock_config)
+    cfg["transcriber"]["pitch_threshold"] = 0.5
+    model = StemMidiModel(cfg)
+    model.train()
+    B, T = 1, 8192
+    n_frames = T // 512
+
+    target_pitch = torch.zeros(B, 1, n_frames, 128)
+    target_pitch[0, 0, 3, 45] = 1.0
+    target_pitch[0, 0, 3, 52] = 1.0  # chord at frame 3
+    target_pitch[0, 0, 7, 57] = 1.0  # single note at frame 7
+
+    outputs = model(
+        torch.randn(B, 1, T),
+        target_guitar=torch.randn(B, 1, T),
+        target_bass=torch.randn(B, 1, T),
+        target_onsets=torch.zeros(B, 1, n_frames, 1),
+        target_pitch=target_pitch,
+    )
+    assert torch.isfinite(outputs["loss"])
+    assert outputs["loss_dict"]["pitch"] > 0
+    outputs["loss"].backward()
+    head = model.transcriber.pitch_head
+    grads = [p.grad for p in head.parameters() if p.grad is not None]
+    assert grads and any(torch.isfinite(g).all() and g.abs().sum() > 0 for g in grads)

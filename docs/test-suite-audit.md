@@ -11,16 +11,18 @@ late**, chords serialised into arpeggios), a `bass.mid` that was a copy of
 `guitar.mid`, silence transcribed as ~87 notes/second, and a pipeline needing
 **~14 GB** for the ten-minute upload its own API advertises.
 
-**Status: 20 defects found, 19 resolved, 1 open.** Resolution is split by *where*
+**Status: 20 defects found, all 20 resolved.** Resolution is split by *where*
 it landed, because `main` moved under this branch: an independent review pass
 (merged as PRs #11/#14) fixed the MIDI writer, tempo tracking, sample-rate
 conversion, the streaming path and the backend wiring — rows marked
 **upstream** in §3.1. The rest — input validation, silence/clipping/DC handling,
 chunked file processing, review-gate semantics and weights provenance — landed
 in this branch (**here**). Every defect is guarded by a test that failed on the
-old code; no `xfail` markers remain. The open item is expression output
-(BUG-MIDI-9, §7), which needs a product decision about the MIDI mapping rather
-than a bug fix. Everything below is the original audit, with resolution status
+old code. The last one — expression output (BUG-MIDI-9 / EXPR-1) — was resolved
+by porting PR #13's expression work: the head's channels are now carried per
+note and labelled as untrained, and the writer emits pitch-bend/CC1 on explicit
+opt-in (`include_expression=True`), because writing an untrained head's output by
+default would fabricate expression. Everything below is the original audit, with resolution status
 recorded in §3.1 and §6.
 
 ---
@@ -72,7 +74,7 @@ Legend: **✅ real** = exercises production code with meaningful assertions;
 | Mamba **end-to-end** (`StemMidiModel`) | via `mock_model` in most tests, always at `d_model=32` | ⚠️ thin — never at production dims, never checked for artefact plausibility |
 | **MIDI** onset timing | count, CC#127, ordering, velocity clamp **+ `test_midi_timing.py` (absolute ticks, chords, tempo, round-trip)** | ✅ covered — was absent at audit time |
 | **MIDI** pitch correctness | `test_midi_usability.py` (per-stem registers, bass range), `test_midi_to_targets_keeps_every_chord_pitch` | ✅ covered |
-| **MIDI** expression (bend/vibrato/slide) | `expression_head` output shape only | ❌ still absent — expression is computed and then **discarded** by `_logits_to_midi` (BUG-MIDI-9) |
+| **MIDI** expression (bend/vibrato/slide) | `expression_head` output shape only | ✅ written on request (`include_expression=True`), labelled untrained (BUG-MIDI-9 → EXPR-1) |
 | **MIDI** confidence | CC#127 == `int(conf*127)`; `needs_review` presence **+ `test_quality_gate_truthfulness.py` (flags vs gain, notes vs frames, summary agreement)** | ✅ covered |
 | **Quality gates** | `test_quality_gates.py` (pure functions) **+ `test_quality_gate_truthfulness.py` (report built by real inference, provenance)** | ✅ covered |
 | **Low memory / 4–8 GB target** | `test_perf_smoke.py` (1 s) **+ chunking test + 60 s RSS test** | ✅ covered for realistic input |
@@ -221,9 +223,11 @@ open and **goes red the moment it is fixed** (forcing the marker's removal).
 "Fixed in" distinguishes the independent review pass that landed on `main`
 (PRs #11/#14: `H-*`/`M-*`/`C-*` items) from the work in this branch. Where both
 sides fixed the same defect, the upstream implementation is the one kept — it is
-strictly better (e.g. the confidence controller is CC#16, not CC#127, because
-120–127 are Channel Mode messages; same-pitch overlaps are resolved rather than
-only sorted). "Verified by" names the test that failed before the change.
+strictly better (e.g. confidence no longer rides a channel CC at all: CC#127 was wrong
+because 120–127 are Channel Mode messages and CC#16 was wrong because a channel message
+cannot differ between simultaneous notes, so the merged writer emits per-note
+Polyphonic Key Pressure and an opt-in Marker track; same-pitch overlaps are resolved
+rather than only sorted). "Verified by" names the test that failed before the change.
 
 | ID | Fixed in | Fix | Verified by |
 |---|---|---|---|
@@ -234,7 +238,7 @@ only sorted). "Verified by" names the test that failed before the change.
 | BUG-MIDI-6 | upstream (H-8) | `main.py`: both stems transcribed; `midi_metadata["guitar"]`/`["bass"]` are distinct dicts | `test_bass_midi_contains_no_guitar_range_notes`, `test_guitar_and_bass_midi_are_different_files` |
 | BUG-MIDI-7 | upstream (H-6) | Rising-edge peak-picking with `transcriber.onset_refractory_frames` (default 4 ≈ 46 ms) | `test_note_density_is_musical` |
 | BUG-MIDI-8 | upstream (C-2) | Streaming recombines the stems, then transcribes once on the full timeline | `test_streaming_notes_are_not_all_pitch_zero` |
-| BUG-MIDI-9 | **open** | Expression heads still not written to MIDI (a mapping decision, not a bug) | — |
+| BUG-MIDI-9 | **here** | `_transcribe` carries the expression head; `_logits_to_midi` names its channels (`bend`, `vibrato`, `slide`) and labels each event `source: expression_head (untrained)`; `build_midi_from_events(include_expression=True)` writes pitch-wheel/CC1/CC74, off by default | `test_expression_head_output_reaches_the_midi_when_opted_in`, `test_expression_is_mapped_to_standard_midi_messages`, `scripts/verify_midi.py` |
 | BUG-GATE-1/3 | **here** | `needs_review = confidence < min_confidence`; alignment kept for diagnostics only | `test_review_flag_is_independent_of_output_gain`, `test_summary_counts_agree_with_events` |
 | BUG-GATE-4 | **here** | `low_confidence_count` counts notes, not frames | `test_low_confidence_count_counts_notes_not_frames` |
 | BUG-GATE-2 | **here** | `summary["total_notes"]` added to both stem payloads and the overall summary | `test_summary_exposes_total_note_count` |
