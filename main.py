@@ -1226,19 +1226,32 @@ class StemMidiModel(nn.Module):
                 pos += hop_len
                 n_chunks += 1
 
-        full_guitar = out_guitar / weight_sum.clamp(min=1e-8)
-        full_bass = out_bass / weight_sum.clamp(min=1e-8)
+            # Everything from here to the report is downstream of the model, so
+            # it stays inside `inference_mode`. Leaving it outside rebuilt an
+            # autograd graph over the RECOMBINED FULL-LENGTH stem on every
+            # transcriptions' backward-supporting tensors: a 60 s upload held
+            # ~4.5 MB per frame (5168 frames of 128-bin pitch logits plus the
+            # mamba activations kept alive through the graph) and was OOM-killed
+            # at 4 GB. Measured 875 MB -> this path, and it is what made the
+            # 60 s memory probe fail on CI (torch 2.15) while `main` stayed
+            # green: `main`'s file path kept `_finalize` inside
+            # `inference_mode`, and this method — a copy of it — did not.
+            #
+            # The chunk loop above was never the problem (measured flat at
+            # ~774 MB across 30 chunks); the transcribe call was.
+            full_guitar = out_guitar / weight_sum.clamp(min=1e-8)
+            full_bass = out_bass / weight_sum.clamp(min=1e-8)
 
-        final_metrics = torch.stack(metrics_acc).mean(dim=0)  # (2,) real per-chunk mean
+            final_metrics = torch.stack(metrics_acc).mean(dim=0)  # (2,) real per-chunk mean
 
-        # Transcribe the recombined stems once — real logits on the full
-        # timeline (C-2), no per-chunk frame-grid drift.
-        guitar_tr = self._transcribe(full_guitar, "guitar")
-        bass_tr = self._transcribe(full_bass, "bass")
-        self._ensure_finite(guitar_tr, "guitar")
-        self._ensure_finite(bass_tr, "bass")
-        guitar_meta, _ = self._enhance(guitar_tr, full_guitar)
-        bass_meta, _ = self._enhance(bass_tr, full_bass)
+            # Transcribe the recombined stems once — real logits on the full
+            # timeline (C-2), no per-chunk frame-grid drift.
+            guitar_tr = self._transcribe(full_guitar, "guitar")
+            bass_tr = self._transcribe(full_bass, "bass")
+            self._ensure_finite(guitar_tr, "guitar")
+            self._ensure_finite(bass_tr, "bass")
+            guitar_meta, _ = self._enhance(guitar_tr, full_guitar)
+            bass_meta, _ = self._enhance(bass_tr, full_bass)
 
         guitar_notes = len(guitar_meta["midi_events"])
         bass_notes = len(bass_meta["midi_events"])

@@ -567,3 +567,89 @@ def test_cpu_2_short_input_still_takes_the_single_forward_path(
     with torch.inference_mode():
         model.process_audio_file(str(path))
     assert len(calls) == 1, f"1 s input issued {len(calls)} forwards"
+
+
+# ---------------------------------------------------------------------------
+# PERF-1 / CPU-2 follow-up: the streaming path must not rebuild an autograd
+# graph over the recombined full-length stem.
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_transcribes_the_recombined_stem_inside_inference_mode(tmp_path, pipeline_config):
+    """A 60 s upload must not retain activations for a backward pass.
+
+    `process_audio_streaming` closed its `inference_mode` block after the chunk
+    loop, so the transcribe call on the recombined FULL-LENGTH stem ran with
+    grad enabled. Nothing calls backward, but every mamba activation and the
+    (1, T, 128) pitch logits stayed reachable from the graph: a 60 s upload
+    measured ~4.5 MB per frame and was OOM-killed at a 4 GB ceiling. The file
+    path on main kept `_finalize` inside `inference_mode`; this copy did not.
+
+    Guarded structurally -- no torch internals, no RSS threshold: a tensor that
+    escaped `inference_mode` reports `requires_grad`/is an inference tensor.
+    """
+    from main import StemMidiModel
+
+    cfg = {**pipeline_config, "audio": {**pipeline_config["audio"], "chunk_duration_sec": 2.0}}
+    model = StemMidiModel(cfg)
+    model.eval()
+
+    seen: list[dict] = []
+    real = model._transcribe
+
+    def spy(stem, instrument=None):
+        out = real(stem, instrument)
+        seen.append(out)
+        return out
+
+    model._transcribe = spy
+    sr = 44100
+    t = np.arange(4 * sr) / sr
+    path = tmp_path / "four.wav"
+    sf.write(path, (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32), sr)
+    model.process_audio_streaming(str(path), chunk_seconds=2.0)
+
+    assert seen, "streaming never transcribed"
+    for key in ("onset_logits", "pitch_logits", "velocity", "confidence"):
+        tensor = seen[0][key]
+        assert tensor is not None
+        # inference-mode tensors are either flagged as such or carry no grad;
+        # a graph-retaining tensor from an enabled-grad forward does the reverse
+        # of at least one of these.
+        assert getattr(tensor, "is_inference", lambda: False)() or not tensor.requires_grad, (
+            f"{key} was produced outside inference_mode (requires_grad="
+            f"{tensor.requires_grad}); the streaming path leaks an autograd graph "
+            "over the recombined stem"
+        )
+    # And the peak must stay bounded: measured 898 MB for 60 s after the fix,
+    # OOM (>4 GB) before it.
+    from tests import memprobe
+
+    if not memprobe.reset_peak():
+        pytest.skip("peak-RSS measurement is not resettable on this platform")
+    model.process_audio_file(str(path))
+    peak = memprobe.peak_mb()
+    assert peak is not None and peak < 4096, f"streaming a 4 s file peaked at {peak:.0f} MB"
+
+
+def test_memprobe_reports_this_measurements_peak_not_the_process_high_water():
+    """The shared probe must reset, or every later memory assertion inherits a peak.
+
+    CI showed the failure mode: four memory tests in three files all reported
+    ~14 GB because one of them got there first and `ru_maxrss` never decreases.
+    """
+    from tests import memprobe
+
+    if not memprobe.is_resettable():
+        pytest.skip("peak is not resettable on this platform")
+    big = [bytearray(200 * 1024 * 1024)]  # 200 MB
+    assert big[0][0] == 0
+    after_big = memprobe.peak_mb()
+    assert after_big is not None and after_big > 150
+    del big
+    assert memprobe.reset_peak()
+    after_reset = memprobe.peak_mb()
+    assert after_reset is not None and after_reset < after_big - 100, (
+        f"peak did not drop after reset ({after_big:.0f} -> {after_reset:.0f} MB); "
+        "memory tests will assert on the process high-water mark instead of their own"
+    )

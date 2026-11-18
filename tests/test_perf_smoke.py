@@ -27,25 +27,16 @@ import pytest
 
 
 def _peak_mb():
-    """Best available PEAK resident set, in MB. Never returns current RSS."""
-    try:
-        import psutil
+    """Best available PEAK resident set, in MB. Never returns current RSS.
 
-        proc = psutil.Process()
-        info = proc.memory_info()
-        # peak_wset is Windows-only; fall back to ru_maxrss on Linux.
-        for attr in ("peak_wset", "private_peak_pagefile_usage"):
-            if hasattr(info, attr):
-                return getattr(info, attr) / 1e6
-    except ImportError:
-        pass
-    try:
-        import resource
+    Uses ``tests.memprobe`` so the peak can be RESET at the start of each test.
+    Without that, a full-suite run makes these gates assert on whatever the
+    largest earlier test allocated: on CI four different memory tests all
+    reported ~14 GB for this reason (see tests/memprobe.py).
+    """
+    from tests import memprobe
 
-        # ru_maxrss is KiB on Linux, bytes on macOS. CI is Linux.
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1000
-    except ImportError:
-        return None
+    return memprobe.peak_mb()
 
 
 PERF_SECONDS = 8
@@ -70,10 +61,11 @@ def test_forward_smoke_at_the_shipped_shape():
     import yaml
 
     from main import StemMidiModel
+    from tests import memprobe
 
-    peak_before = _peak_mb()
-    if peak_before is None:
-        pytest.skip("no peak-RSS probe available (neither psutil nor resource)")
+    baseline = memprobe.current_mb()
+    if not memprobe.reset_peak():
+        pytest.skip("peak-RSS measurement is not resettable on this platform")
 
     root = __import__("pathlib").Path(__file__).resolve().parent.parent
     with open(root / "configs" / "model_config.yaml") as fh:
@@ -92,9 +84,10 @@ def test_forward_smoke_at_the_shipped_shape():
     assert "guitar_stem" in outputs
 
     peak = _peak_mb()
+    assert peak is not None and baseline is not None
     assert peak < PERF_BUDGET_MB, (
-        f"process peak RSS {peak:.0f} MB exceeds the {PERF_BUDGET_MB} MB CPU budget "
-        f"after a {PERF_SECONDS}s forward"
+        f"peak RSS {peak:.0f} MB (baseline {baseline:.0f} MB) exceeds the "
+        f"{PERF_BUDGET_MB} MB CPU budget after a {PERF_SECONDS}s forward"
     )
     assert elapsed < PERF_BUDGET_SECONDS, (
         f"{PERF_SECONDS}s forward took {elapsed:.1f}s "
@@ -112,9 +105,10 @@ def test_chunked_processing_stays_inside_the_budget():
     import yaml
 
     from main import StemMidiModel
+    from tests import memprobe
 
-    if _peak_mb() is None:
-        pytest.skip("no peak-RSS probe available")
+    if not memprobe.reset_peak():
+        pytest.skip("peak-RSS measurement is not resettable on this platform")
 
     root = __import__("pathlib").Path(__file__).resolve().parent.parent
     with open(root / "configs" / "model_config.yaml") as fh:
@@ -141,13 +135,12 @@ def test_chunked_processing_stays_inside_the_budget():
         path.unlink(missing_ok=True)
 
     assert "report" in out
-    # ru_maxrss is PROCESS-wide and monotonic, so in a full-suite run it already
-    # reflects every earlier test. Comparing the absolute peak against a budget
-    # measures the suite's high-water mark, not this test's. Compare instead
-    # against what the process had already reached before the chunked work.
+    # The peak was reset just above, so this is the high-water mark reached
+    # DURING the chunked run, not the suite's.
     peak = _peak_mb()
+    assert peak is not None
     assert peak < PERF_BUDGET_MB, (
-        f"process peak RSS {peak:.0f} MB exceeds the {PERF_BUDGET_MB} MB budget "
+        f"peak RSS {peak:.0f} MB exceeds the {PERF_BUDGET_MB} MB budget "
         f"after chunked processing of a {seconds}s file"
     )
     assert elapsed < PERF_BUDGET_SECONDS

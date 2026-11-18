@@ -139,16 +139,59 @@ code, not by assuming either side:
 | **SHIM-1, FAKE-1, REPRO-1, IO-2, IO-3, IO-4, BATCH-1, PERF-1, GATE-4** | Not on main. All kept. |
 | **§9 knob** | **Upstream made a different, documented decision**: renamed to `min_separation_proxy`, marked it "deprecated metadata only", and removed it from the tier. That is not the inert-knob bug (the name is honest and the docs say so). Took theirs and dropped my re-activation. |
 
-### Environment note (not a code defect)
+### The 60 s memory probe: a real defect hiding behind an "environment note"
 
-`tests/test_audio_adversarial.py::test_one_minute_upload_fits_in_2gb` — a new
-upstream test that builds the full 768×12 model on 60 s of audio — passes alone
-(54 s) and passes as the only heavy test in the process, but OOM-stalls when run
-in the same process after ~400 other tests on this 3.9 GB sandbox. Verified both
-halves pass separately (413 passed in 26 s, then the probe in 54 s). This is
-sandbox memory, not a defect; CI (which has more RAM) runs it as part of
-`pytest -m "not cuda"`. To reproduce locally: run that file with
-`--deselect ...::test_one_minute_upload_fits_in_2gb`, or run that test alone.
+An earlier revision of this section blamed the sandbox for
+`test_one_minute_upload_fits_in_2gb` stalling after ~400 tests. That was wrong,
+and the correction is worth recording because the *shape* of the mistake is
+general: a test that fails only inside a long run looks like an environment
+problem, so the probe got deselected instead of read.
+
+CI (torch 2.15, 16 GB) failed it outright, together with three other memory
+tests that all reported ~14 GB — the same number, which is impossible for
+independent tests and was the clue. Two separate defects:
+
+**1. `process_audio_streaming` transcribed outside `inference_mode`.** The chunk
+loop was correctly wrapped, but the block closed *before* `_transcribe` ran on
+the recombined full-length stem, so the transcribe call built an autograd graph:
+every mamba activation plus the `(1, T, 128)` pitch logits stayed reachable via
+`grad_fn`. On `main` this was invisible because `process_audio_file` kept
+`_finalize` **inside** `inference_mode`; the streaming method — a near-copy —
+did not. CPU-2 (honouring `chunk_duration_sec` in `process_audio_file`) routed
+long files into that latent bug and exposed it. Measured before/after on 60 s at
+44.1 kHz:
+
+| | peak RSS | time |
+|---|---|---|
+| transcribe inside `inference_mode` | **898 MB** | ~25 s |
+| outside (the bug) | **OOM-killed at 4 GB** | killed |
+
+A control run showed the severity of the retention: one grad-enabled forward of
+the 60 s stem was still running after 188 s (versus ~2 s inside
+`inference_mode`), because autograd also disables the fast path used for the
+mamba scan. The chunk loop itself was never the problem — it measured flat at
+774 MB across all 30 chunks.
+
+The new guard asserts the *structural* signature rather than a RSS threshold:
+inside `inference_mode` a tensor reports `is_inference=True` /
+`requires_grad=False`, while the pre-fix call site produced
+`requires_grad=True, is_inference=False, grad_fn=ViewBackward0`. Verified by
+reproducing that exact control flow.
+
+**2. `ru_maxrss` is a monotonic process-wide high-water mark.** Every memory
+test read the same never-decreasing number, so once any earlier test reached
+14 GB, all four memory gates inherited it and each blamed its own code path
+("60 s upload grew peak RSS by 12434 MB" was not about the upload). Fixed with
+`tests/memprobe.py`, which reads `VmHWM` from `/proc/self/status` and resets it
+through `/proc/self/clear_refs`, so a test measures *its own* peak; non-Linux
+spots skip rather than assert on a monotonic value.
+
+After both fixes the whole suite, including the 60 s probe, runs in **one
+process**: 429 passed, 4 skipped, 6 xfailed, 0 failed in 42 s — versus an OOM
+kill at the same point before. CI's exact command
+(`pytest -m "not cuda" --strict-deps --fail-on-skip`) passes in 44 s. The probe
+is no longer deselected anywhere.
+
 
 ## Verification standard
 
