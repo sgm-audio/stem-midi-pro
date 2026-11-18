@@ -6,6 +6,14 @@ import torch.nn as nn
 
 from models._mamba_compat import MAMBA_BACKEND, Mamba
 
+
+def _dt_clamp_kwargs(section: dict) -> dict:
+    """``dt_max`` is a fallback-only kwarg (the upstream kernel has no such arg)."""
+    if MAMBA_BACKEND != "pure-torch":
+        return {}
+    return {"dt_max": float(section.get("dt_max", 0.1))}
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,11 +31,26 @@ class MambaSeparator(nn.Module):
             cache yet - see C-2.5), metrics (B, 2) =
             [centroid_separation_proxy, phase_coherence]
 
-    NOTE: Streaming inference with SSM state caching is not yet implemented.
-    The original prototype used activation concatenation (not real SSM state),
-    which was structurally incorrect. See C-2.5 in TODO.md for the full design
-    when real SSM state caching is added. For now, each forward call is
-    independent - overlap-add in main.py works at the waveform level only.
+    Layer structure is a pre-norm residual stack: every mixer is wrapped as
+    ``h = h + mix(norm(h))`` with a final LayerNorm. Stacking bare mixers (the
+    original behaviour) multiplied the activation RMS by ~0.02 per block, so a
+    12-layer stack collapsed to ~1e-20 and every mask saturated at
+    sigmoid(0) = 0.5 - i.e. the "separator" was a flat 0.5x gain. See C-1 in
+    AUDIT_REPORT.md and tests/test_numerics.py.
+
+    Masks are softmax-normalised across stems by default
+    (``separator.mask_normalization: softmax``), so guitar + bass + residual
+    reconstruct the mixture by construction; ``independent`` restores per-stem
+    sigmoids.
+
+    Streaming (C-2.5): ``forward(audio, state=...)`` threads the real SSM
+    accumulator and the causal convolution's history between calls, which makes
+    a chunk-contiguous stream numerically identical to one long call
+    (``tests/test_streaming_state.py`` measures 4e-9). ``return_state=True``
+    hands the next state back in the fourth return slot. The default file path
+    still separates overlapping windows and crossfades them: with 50 % overlap
+    there is no single recurrence to continue, so state threading there would be
+    meaningless.
     """
 
     def __init__(self, cfg: dict):
@@ -77,10 +100,25 @@ class MambaSeparator(nn.Module):
                     d_conv=cfg["separator"]["d_conv"],
                     expand=cfg["separator"]["expand"],
                     gradient_checkpointing=gradient_checkpointing,
+                    **_dt_clamp_kwargs(cfg["separator"]),
                 )
                 for _ in range(n_layers)
             ]
         )
+
+        # Pre-norm partners for the residual stack (C-1) + final norm.
+        self.block_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(n_layers)])
+        self.final_norm = nn.LayerNorm(d_model)
+
+        # Mask normalisation: "softmax" (default) makes the three masks sum to 1
+        # at every bin - mixture consistency, and an untrained model can no
+        # longer emit stems whose total energy is ~0.26x the mix (C-1).
+        self.mask_normalization = cfg["separator"].get("mask_normalization", "softmax")
+        if self.mask_normalization not in ("softmax", "independent"):
+            raise ValueError(
+                "separator.mask_normalization must be 'softmax' or 'independent', "
+                f"got {self.mask_normalization!r}"
+            )
 
         # Multi-head output: guitar, bass, residual masks
         self.mask_heads = nn.ModuleDict(
@@ -101,12 +139,20 @@ class MambaSeparator(nn.Module):
 
         logger.info("MambaSeparator built: backend=%s n_layers=%d", MAMBA_BACKEND, n_layers)
 
-    def forward(self, audio: torch.Tensor):
+    def forward(self, audio: torch.Tensor, state: list | None = None, return_state: bool = False):
         if audio.dim() != 3:
             raise ValueError(
                 f"MambaSeparator expects audio (B, C, T), got shape {tuple(audio.shape)}"
             )
         _B, C, T = audio.shape
+        # NaN/Inf survives the STFT, the masks and the ISTFT, so a corrupt
+        # upload becomes a delivered NaN stem (IO-3). Rejecting here also covers
+        # callers that bypass audio_io (backends, tests, notebooks).
+        if not torch.isfinite(audio).all():
+            raise ValueError(
+                "MambaSeparator received non-finite audio (NaN/Inf); the render would be "
+                "non-finite too. Validate the input before separation."
+            )
         if C != 1:
             raise ValueError(f"MambaSeparator expects mono input (C=1), got C={C}")
         if self.n_fft > T:
@@ -152,9 +198,19 @@ class MambaSeparator(nn.Module):
                 f"hidden dim {hidden.shape[-1]} != d_model {self.mamba_blocks[0].d_model}"
             )
 
-        # Mamba blocks
-        for block in self.mamba_blocks:
-            hidden = block(hidden)
+        # Pre-norm residual Mamba stack (C-1). In streaming mode (C-2.5) each
+        # block hands back its SSM accumulator + conv history, so the next call
+        # continues the same recurrence instead of restarting it.
+        next_state: list | None = [] if (return_state or state is not None) else None
+        for i, (norm, block) in enumerate(zip(self.block_norms, self.mamba_blocks, strict=True)):
+            if next_state is None:
+                hidden = hidden + block(norm(hidden))
+            else:
+                block_state = None if state is None else state[i]
+                mix, carried = block(norm(hidden), state=block_state, return_state=True)
+                hidden = hidden + mix
+                next_state.append(carried)
+        hidden = self.final_norm(hidden)
 
         # Apply masks directly to the complex spectrogram: mask_mag * spec is
         # equivalent to (mask_mag * mag) * exp(i*phase). Reuses the cached STFT.
@@ -162,17 +218,32 @@ class MambaSeparator(nn.Module):
         # everything but the reduced centroid - so peak memory stays O(two
         # spectrograms) instead of O(three masks + three magnitudes + spec)
         # on the 4-8 GB CPU target.
+        # Mask logits for all stems (needed together for a softmax across
+        # stems). One (B, T_f, F) f32 tensor per stem: ~21 MB at a 60 s segment.
+        logits = {name: head(hidden) for name, head in self.mask_heads.items()}
+        if self.mask_normalization == "softmax":
+            stacked = torch.stack(list(logits.values()), dim=0)  # (S, B, T_f, F)
+            probs = torch.softmax(stacked, dim=0)
+            masks = {name: probs[i] for i, name in enumerate(logits)}
+            del stacked, probs
+        else:
+            masks = {name: torch.sigmoid(v) for name, v in logits.items()}
+        del logits
+
+        # Apply masks directly to the complex spectrogram: mask * spec is
+        # equivalent to (mask * mag) * exp(i*phase), so the cached STFT is
+        # reused. Each stem is reduced to audio (and, for guitar/bass, a
+        # windowed centroid) and then dropped, so peak memory stays O(two
+        # spectrograms) instead of O(three masks + three magnitudes + spec).
         stems = {}
         centroids = {}
-        for name in self.mask_heads:
-            mask_tf = self.mask_heads[name](hidden).sigmoid_()  # (B, T_f, F)
+        for name, mask in masks.items():
             # Only guitar and bass feed the centroid metric; the residual's
             # magnitude used to be computed and never read.
             if name in ("guitar", "bass"):
-                centroids[name] = self._masked_centroid(mask_tf, spec)
-            stems[name] = self._masked_stem(mask_tf, spec, length=T).unsqueeze(1)
-            del mask_tf
-        del spec
+                centroids[name] = self._masked_centroid(mask, spec)
+            stems[name] = self._masked_stem(mask, spec, length=T).unsqueeze(1)
+        del masks, spec
 
         phase_score = self.phase_head(hidden.mean(dim=1))  # (B, 1)
 
@@ -181,11 +252,14 @@ class MambaSeparator(nn.Module):
         centroid_metric = self._centroid_separation(centroids["guitar"], centroids["bass"])
         metrics = torch.stack([centroid_metric, phase_score.squeeze(-1)], dim=-1)
 
+        # ``new_state`` is None unless the caller asked for streaming: the
+        # chunked file path overlaps 50% of the waveform, which makes a single
+        # recurrence across chunks ill-defined (the crossfade handles it).
         return (
             stems["guitar"],
             stems["bass"],
             stems["residual"],
-            None,  # new_state_cache placeholder (C-2.5: real SSM state TBD)
+            next_state,
             metrics,
         )
 

@@ -90,9 +90,12 @@ def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     # has been retiring them, so this number falls every time a defect is fixed.
     # It exists to catch a BROKEN SCAN (a refactor moving the markers out of the
     # files `_marked_ids` walks would otherwise silently pass with zero), so it
-    # only needs to be well below the real count.
+    # only needs to be well below the real count -- and it has to be raised only
+    # when the count RISES. Down to 3 while 4 locks remain (CONF-1, GATE-4,
+    # SEP-2, TRANS-1), all of which need trained weights, a corpus, or an
+    # architectural change rather than a patch.
     assert (
-        len(marked) >= 5
+        len(marked) >= 3
     ), f"marker scan found only {sorted(marked)} — the scan broke, not the suite"
     missing = sorted(set(marked) - _open_entry_ids())
     assert not missing, (

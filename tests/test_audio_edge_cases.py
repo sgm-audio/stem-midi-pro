@@ -358,6 +358,7 @@ def test_validation_accepts_supported_shapes(make_wav, synth):
 
 
 def test_zero_frame_wav_is_rejected(tmp_path):
+    """Regression guard for IO-2: a zero-frame file is a 400, not a torch traceback."""
     import wave
 
     from audio_io import AudioValidationError, load_audio
@@ -373,6 +374,7 @@ def test_zero_frame_wav_is_rejected(tmp_path):
 
 
 def test_non_finite_audio_is_rejected(make_wav, synth):
+    """Regression guard for IO-3: non-finite samples are refused at the decoder."""
     from audio_io import AudioValidationError, load_audio
 
     nan_path = make_wav(synth.with_nan(synth.tone(seconds=0.5)), name="nan.wav", subtype="FLOAT")
@@ -385,7 +387,7 @@ def test_non_finite_audio_is_rejected(make_wav, synth):
 
 
 def test_non_finite_input_never_leaks_into_stems(nonfinite_corpus, separator):
-    """NaN/Inf must be rejected or sanitised — never propagated into the render."""
+    """Regression guard for IO-3: NaN/Inf is rejected, never rendered."""
     for name, sig in nonfinite_corpus.items():
         x = torch.from_numpy(np.asarray(sig, dtype=np.float32))[None, None]
         try:

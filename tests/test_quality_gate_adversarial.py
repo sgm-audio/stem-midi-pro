@@ -38,12 +38,16 @@ def _report(
     flags=("none",),
     low_confidence_notes: int = 0,
     note_count: int | None = 1,
+    total_notes: int | None = 1,
 ):
-    """Build a report. `note_count=1` by default so the sample is a *render*.
+    """Build a report. Both counters default to 1 so the sample is a *render*.
 
     GATE-3 makes a zero-note render COMPLEX regardless of its numbers, so a
-    helper that left `note_count` unset would silently test a case the gate no
-    longer reaches. Tests that mean "an empty render" pass `note_count=0`.
+    helper that left a counter unset would silently test a case the gate never
+    reaches. Two counters exist because upstream added `total_notes` (which
+    drives the `empty_render` flag) while this branch carries `note_count`
+    (which also rejects a negative count); tests that mean "an empty render"
+    pass 0 for both.
     """
     from utils.quality_gates import ProcessingReport
 
@@ -54,6 +58,7 @@ def _report(
         artifact_flags=list(flags),
         low_confidence_notes=low_confidence_notes,
         note_count=note_count,
+        total_notes=total_notes,
         config={"quality_gates": dict(GATES)},
     )
 
@@ -167,11 +172,13 @@ def test_badges_and_actions_agree_with_the_tier():
 
 
 def test_a_render_with_no_notes_is_never_routed_as_a_result():
+    """Regression guard for GATE-3: an empty render is never offered for download."""
     tier, route = _tier(
         centroid_separation_db=25.0,
         avg_confidence=0.95,
         low_confidence_notes=0,
         note_count=0,  # the render contains no notes at all
+        total_notes=0,
     )
     assert (
         route["action"] != "direct_download"

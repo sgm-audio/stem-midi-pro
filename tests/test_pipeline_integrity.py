@@ -499,7 +499,7 @@ def test_zero_onsets_never_produce_notes(pipeline_config):
 
 
 def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
-    """0 notes with happy metrics must route to fallback_options, not direct_download."""
+    """Regression guard for GATE-3: 0 notes routes to fallback_options, never direct_download."""
     # A 220 Hz TONE, not torch.full(...): a constant is pure DC, and once
     # _detect_artifacts flags input DC offset this fixture routes to COMPLEX for
     # that reason instead of exercising the empty-render path this test pins.
@@ -515,20 +515,15 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
         f"avg_confidence={report.avg_confidence:.2f} / "
         f"centroid_separation_db={report.centroid_separation_db:.1f}"
     )
-    # COMPLEX routes to `manual_review` upstream (the two COMPLEX actions --
-    # `fallback_options` and `manual_review` -- were merged into one).
-    assert out["routing_decision"]["action"] == "manual_review"
+    # An empty render is caught BEFORE the tiers and routed to its own action, so
+    # the user is offered something actionable (download the raw stems / discard)
+    # rather than a generic review. A non-empty COMPLEX render still routes to
+    # `manual_review`; this assertion pins the empty case specifically.
+    assert report.artifact_flags.count("empty_render") == 1
+    assert out["routing_decision"]["action"] == "fallback_options"
+    assert out["routing_decision"]["badge"] == "No notes detected"
 
 
-@pytest.mark.real_mamba
-@known_bug(
-    "SEP-1",
-    "the separator learns three INDEPENDENT sigmoid masks (guitar/bass/residual), so "
-    "guitar+bass+residual != mix: measured relative error 0.46-0.51 across seeds 0-3 (i.e. "
-    "the three stems together account for ~half the mixture's energy). Users hear holes in "
-    "the mix and 'sum to mix' checks in a DAW fail. Either define residual = mix - guitar - "
-    "bass or add a sum-consistency term, and assert it here.",
-)
 def test_stems_sum_back_to_the_mix(pipeline_config, synth):
     from main import StemMidiModel
 

@@ -49,7 +49,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from audio_io import AudioValidationError, open_and_validate
+from audio_io import AudioValidationError, check_finite, open_and_validate
 from utils.midi import build_midi_from_events
 from utils.template_engine import list_templates, render_template
 
@@ -245,6 +245,7 @@ def _import_model():
 
 
 _model_ready = False
+_model_trained = False  # False => random weights (H-6); surfaced by /ready
 _processing_sem: asyncio.Semaphore | None = None  # API-6.4 concurrency cap
 
 SUPPORTED_FORMATS = {".wav", ".flac", ".mp3"}
@@ -262,8 +263,14 @@ ALLOWED_TEMPLATES = frozenset(list_templates())  # API-6.14 allowlist (7 files)
 
 
 def load_model():
-    """Load StemMidiModel from config/checkpoint. Imports lazily (T-8.2.1)."""
-    global model_config
+    """Load StemMidiModel from config/checkpoint. Imports lazily (T-8.2.1).
+
+    Refuses to serve a model with random weights: without ``MODEL_CHECKPOINT_PATH``
+    the previous behaviour was to serve an untrained network whose "stems" and
+    "MIDI" are noise (H-6). ``ALLOW_UNTRAINED_MODEL=1`` (or
+    ``inference.allow_untrained_model: true``) overrides this for smoke tests.
+    """
+    global model_config, _model_trained
 
     config_path = os.getenv("MODEL_CONFIG_PATH", "configs/model_config.yaml")
     if not os.path.exists(config_path):
@@ -286,6 +293,7 @@ def load_model():
         log_event("info", "loading_checkpoint", checkpoint=checkpoint_path)
         m = load_from_checkpoint(checkpoint_path, config_path)
         m.eval()
+        _model_trained = True
         return m
 
     # Demucs + Basic Pitch can be safe without a project state_dict because
@@ -308,7 +316,23 @@ def load_model():
             "Install the selected dependencies or provide MODEL_CHECKPOINT_PATH."
         )
     m.eval()
+    _log_backend_info()
     return m
+
+
+def _log_backend_info() -> None:
+    """Log which Mamba implementation is live and its scan chunk (M-1)."""
+    info: dict = {}
+    try:
+        from models import _mamba_compat as compat
+
+        info["mamba_backend"] = getattr(compat, "MAMBA_BACKEND", "unknown")
+        mamba_cls = getattr(compat, "Mamba", None)
+        info["scan_chunk"] = getattr(mamba_cls, "SCAN_CHUNK", None)
+    except Exception as e:  # pragma: no cover - diagnostics only
+        info["mamba_backend"] = f"unavailable: {e}"
+    info["env_MAMBA_BACKEND"] = os.getenv("MAMBA_BACKEND", "auto")
+    log_event("info", "backend_info", **info)
 
 
 async def warmup() -> None:
@@ -430,6 +454,30 @@ def _oom_exceptions() -> tuple:
     except ImportError:
         pass
     return tuple(excs)
+
+
+def _is_oom_error(exc: BaseException) -> bool:
+    """True for out-of-memory failures of any backend.
+
+    On CPU, torch raises a plain ``RuntimeError`` ("DefaultCPUAllocator: can't
+    allocate memory" / "[enforce fail at alloc_cpu.cpp]"), which the exception
+    tuple above does not match - so a CPU OOM escaped as a 500 with a stack
+    trace instead of a 503 (API-6.7). Detect it by message.
+    """
+    if isinstance(exc, _oom_exceptions()):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "defaultcpuallocator",
+            "can't allocate memory",
+            "cannot allocate memory",
+            "out of memory",
+            "alloc_cpu.cpp",
+            "not enough memory",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +614,7 @@ async def ready():
             detail="Model not ready",
             headers={"Retry-After": RETRY_AFTER_SECONDS},
         )
-    return {"status": "ready", "model_loaded": True}
+    return {"status": "ready", "model_loaded": True, "trained_weights": _model_trained}
 
 
 @app.get("/health", include_in_schema=False)
@@ -626,6 +674,26 @@ def _stem_midi_data(midi_pkg: Any, stem: str) -> dict[str, Any]:
     return midi_pkg  # legacy flat shape
 
 
+def _include_expression() -> bool:
+    """Whether exported MIDI carries the expression head's values (H-4).
+
+    Off by default: the head is untrained (ARCH-11.4.4), so writing bend /
+    vibrato values into every export would invent phrasing the model never
+    learned. ``midi.include_expression: true`` opts in; each event still carries
+    ``expression.source``, so a consumer can see the values are unlearnt.
+    """
+    return bool(((model_config or {}).get("midi") or {}).get("include_expression", False))
+
+
+def _finite(value: float, default: float = 0.0) -> float:
+    """Coerce a metric to a finite float (JSON has no NaN/Infinity)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 def create_response_zip(outputs: dict) -> io.BytesIO:
     """Create a ZIP in memory: stems (wav) + MIDI + processing report."""
     zip_buffer = io.BytesIO()
@@ -649,11 +717,25 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
         bass_midi = _stem_midi_data(midi_pkg, "bass")
         zip_file.writestr(
             "guitar.mid",
-            build_midi_from_events(guitar_midi, "guitar", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                guitar_midi,
+                "guitar",
+                hop_length=hop_length,
+                sample_rate=sr,
+                tempo_us=guitar_midi.get("tempo_us"),
+                include_expression=_include_expression(),
+            ),
         )
         zip_file.writestr(
             "bass.mid",
-            build_midi_from_events(bass_midi, "bass", hop_length=hop_length, sample_rate=sr),
+            build_midi_from_events(
+                bass_midi,
+                "bass",
+                hop_length=hop_length,
+                sample_rate=sr,
+                tempo_us=bass_midi.get("tempo_us"),
+                include_expression=_include_expression(),
+            ),
         )
 
         report = outputs["report"]
@@ -680,6 +762,10 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             return fvalue if math.isfinite(fvalue) else None
 
         report_json = {
+            # `_safe` (not the module's `_finite`) on purpose: `_finite`
+            # substitutes 0.0, which would report an unmeasurable metric as a
+            # real reading of zero. null says "we could not measure this",
+            # which is what a silent or non-finite render actually means.
             "separation_proxy": _safe(separation_proxy),
             # Deprecated compatibility alias. This value is not SI-SDR and
             # must not be read as a reference-based dB certification.
@@ -701,6 +787,10 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
         }
         zip_file.writestr(
             "processing_report.json",
+            # NaN/Infinity are not valid JSON (RFC 8259) and break browsers'
+            # JSON.parse(): every numeric is sanitised to null above and the
+            # dump itself refuses non-finite values, so a survivor is a hard
+            # error rather than a silently-invalid paid artefact.
             json.dumps(report_json, indent=2, allow_nan=False),
         )
 
@@ -768,6 +858,14 @@ async def _do_process(tmp_file_path: str, quantize: bool = False) -> io.BytesIO:
             sample_rate=info["sample_rate"],
             channels=info["channels"],
         )
+
+    # The header check above cannot see NaN/Inf samples, and a model that does
+    # not re-validate (a backend, a test double) would happily deliver a
+    # corrupt render (IO-3). Stream the samples once, O(1) memory.
+    try:
+        await asyncio.to_thread(check_finite, tmp_file_path)
+    except AudioValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     outputs = await asyncio.to_thread(model.process_audio_file, tmp_file_path, quantize)
     return create_response_zip(outputs)
@@ -841,6 +939,15 @@ async def process_audio(
     except AudioValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
+        if _is_oom_error(e):
+            # CPU allocator failures arrive as RuntimeError, not MemoryError
+            # (API-6.7): report capacity, not a broken request.
+            log_event("error", "out_of_memory", error=str(e))
+            raise HTTPException(
+                status_code=503,
+                detail="Out of memory; retry after resources free up",
+                headers={"Retry-After": RETRY_AFTER_SECONDS},
+            ) from e
         log_event("error", "processing_failed", error=str(e))
         raise HTTPException(status_code=500, detail=f"Processing failed: {e!s}") from e
     finally:
@@ -923,6 +1030,7 @@ async def get_model_info():
         "mamba_backend": getattr(model, "mamba_backend", None),
         "weights_loaded": bool(getattr(model, "weights_loaded", False)),
         "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
+        "trained_weights": _model_trained,
         "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),
         "separator_config": cfg.get("separator", {}),

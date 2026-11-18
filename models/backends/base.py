@@ -56,12 +56,27 @@ def empty_metrics(batch: int, device: torch.device) -> torch.Tensor:
 
 
 def device_from_cfg(cfg: dict) -> torch.device:
-    """Resolve inference device from config / env."""
+    """Resolve the inference device from config / env, defaulting to CPU.
+
+    Auto-selecting CUDA whenever a GPU happens to be visible contradicted the
+    project's stated CPU-only target (and started a model on a device the rest
+    of the pipeline was not sized for). A device is used only when it is asked
+    for explicitly; a request that cannot be honoured raises instead of silently
+    falling back, because a silent fallback is how "it ran on CPU" surprises
+    show up in production.
+    """
+    import logging
     import os
 
-    name = (
-        (cfg.get("backends") or {}).get("device")
-        or os.getenv("INFERENCE_DEVICE")
-        or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
-    return torch.device(name)
+    name = (cfg.get("backends") or {}).get("device") or os.getenv("INFERENCE_DEVICE") or "cpu"
+    device = torch.device(name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"Device {device} was requested but CUDA is not available. "
+            "Set backends.device / INFERENCE_DEVICE to 'cpu'."
+        )
+    if device.type != "cpu":
+        logging.getLogger(__name__).warning(
+            "Inference device %s requested; this project is certified on CPU only.", device
+        )
+    return device

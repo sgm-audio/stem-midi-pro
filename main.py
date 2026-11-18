@@ -22,8 +22,43 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def _resolve_thread_count(env: str | None = None) -> int:
+    """Threads for torch (M-8: no oversubscription by default).
+
+    ``os.cpu_count()`` reports the *host's* cores, not the ones this process may
+    run on: inside a container or a co-hosted service it oversubscribes by
+    several times and the scan gets slower, not faster. Order of preference:
+
+    1. ``OMP_NUM_THREADS`` when it is a positive integer (explicit wins),
+    2. the CPU affinity mask, when the platform exposes it,
+    3. ``os.cpu_count()``,
+
+    capped at 4 because the pure-PyTorch scan scales poorly past that and the
+    target box has 2-4 usable cores.
+    """
+    if env is None:
+        env = os.environ.get("OMP_NUM_THREADS")
+    if env is not None:
+        try:
+            requested = int(str(env).strip())
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            return requested
+    available = 0
+    try:
+        available = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        available = 0
+    if available <= 0:
+        available = os.cpu_count() or 1
+    return max(1, min(4, available))
+
+
 # CPU inference tuning (PERF-7.4 / PERF-7.9). Override thread count via OMP_NUM_THREADS.
-torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", os.cpu_count() or 1)))
+TORCH_THREADS = _resolve_thread_count()
+torch.set_num_threads(TORCH_THREADS)
 torch.set_float32_matmul_precision("high")  # allows TF32/AVX-512 matmul where available
 
 # Import our custom components (after torch thread config above — intentional E402)
@@ -266,8 +301,8 @@ class StemMidiModel(nn.Module):
         guitar_stem, bass_stem, sep_metrics = self._separate(audio)
 
         # Transcription per stem (H-8: bass gets its own transcription)
-        guitar_tr = self._transcribe(guitar_stem, "guitar")
-        bass_tr = self._transcribe(bass_stem, "bass")
+        guitar_tr = self._transcribe_segmented(guitar_stem, "guitar")
+        bass_tr = self._transcribe_segmented(bass_stem, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
 
@@ -307,6 +342,8 @@ class StemMidiModel(nn.Module):
             },
         }
 
+        self._attach_tempo(midi_metadata, audio)
+
         # 3. Processing report for quality gating (batch element 0 — B=1 is the
         #    supported inference shape; M-12). The public metric is a named
         #    heuristic proxy, not reference-based SI-SDR.
@@ -324,9 +361,13 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
-            # GATE-3: the gate must be able to refuse an empty render.
+            # GATE-3: the gate must be able to refuse an empty render. Both
+            # counters are set: `total_notes` is upstream's canonical field and
+            # drives `empty_render`, `note_count` is this branch's stricter one
+            # (it also rejects a negative count).
             note_count=len(midi_metadata["guitar"].get("midi_events") or [])
             + len(midi_metadata["bass"].get("midi_events") or []),
+            total_notes=midi_metadata["summary"]["total_notes"],
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -376,12 +417,9 @@ class StemMidiModel(nn.Module):
         bass part previously slipped past a guitar-only guard.
         """
         confidence = tr["confidence"]
+        conf_flat, energy = self._match_frame_grid(confidence, stem)
         if self._stem_is_silent(stem):
-            empty = self.confidence_injector.inject_midi_metadata(
-                [],
-                confidence.reshape(-1),
-                self._frame_energy(stem).reshape(-1),
-            )
+            empty = self.confidence_injector.inject_midi_metadata([], conf_flat, energy)
             return empty, confidence
         events = None
         if tr.get("events"):
@@ -394,12 +432,29 @@ class StemMidiModel(nn.Module):
                 confidence,
                 tr.get("expression"),
             )
-        enhanced = self.confidence_injector.inject_midi_metadata(
-            events or [],
-            confidence.reshape(-1),
-            self._frame_energy(stem).reshape(-1),
-        )
+        enhanced = self.confidence_injector.inject_midi_metadata(events or [], conf_flat, energy)
         return enhanced, confidence
+
+    def _match_frame_grid(
+        self, confidence: torch.Tensor, stem: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (confidence, stem energy) flattened onto one frame grid.
+
+        The STFT produces ``1 + T//hop`` frames (centre padding) while the
+        ``ceil_mode`` energy pooling produces ``ceil(T/hop)``; when ``T`` is a
+        multiple of ``hop`` they differ by one frame and the injector would
+        (rightly) refuse the mismatch. Pooled energy is padded/truncated to the
+        confidence grid here so both the silent-stem short circuit and the
+        normal path agree.
+        """
+        conf_flat = confidence.reshape(-1)
+        energy = self._frame_energy(stem).reshape(-1)
+        n_frames = conf_flat.numel()
+        if energy.numel() > n_frames:
+            energy = energy[:n_frames]
+        elif energy.numel() < n_frames:
+            energy = F.pad(energy, (0, n_frames - energy.numel()))
+        return conf_flat, energy
 
     # ------------------------------------------------------------------
     # Target preparation (C-3)
@@ -543,39 +598,54 @@ class StemMidiModel(nn.Module):
         Onset peak-picking (H-6): sigmoid probability is thresholded and an
         event fires at each RISING EDGE (first frame of an above-threshold
         run). A new onset can only fire after
-        ``transcriber.onset_refractory_frames`` (default 4 ≈ 46 ms at 86 fps)
+        ``transcriber.onset_refractory_frames`` (default 4 - 46 ms at 86 fps)
         consecutive below-threshold frames, so one physical onset whose
-        activation plateaus for many frames — or wiggles across the
-        threshold — emits ONE note_on, not several. Same-pitch duplicates
+        activation plateaus for many frames - or wiggles across the
+        threshold - emits ONE note_on, not several. Same-pitch duplicates
         are also dropped downstream, but without peak-picking a jittered
         argmax pitch mid-burst (e.g. 45,45,52,45) leaks a spurious extra
-        note. Velocity/confidence are sampled at the crossing frame.
+        note. Velocity/confidence are sampled at the crossing frame;
+        ``onset_refractory_frames: 0`` disables the suppression entirely
+        (every above-threshold frame fires - the pre-H-6 behavior).
 
         Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold``
         is set (production configs set 0.5): every pitch whose sigmoid
         probability exceeds it at the accepted onset frame emits its own
         note_on, so polyphonic frames produce chords. If no pitch crosses
         the threshold at a fired onset, the argmax pitch is emitted as a
-        fallback — a fired onset always yields at least one note (important
-        for single-label-trained models whose runner-up logits stay low).
-        Unset/None (the default for bare config dicts) keeps legacy
-        single-argmax decoding: untrained noise-centered logits split ~50/50
-        around any fixed threshold, which would otherwise decode one noisy
-        frame into dozens of phantom chord notes (caught by
-        test_onset_refractory_caps_note_density).
+        fallback - a fired onset always yields at least one note. Unset/None
+        keeps legacy single-argmax decoding: untrained noise-centered logits
+        split ~50/50 around any fixed threshold, which would otherwise decode
+        one noisy frame into dozens of phantom chord notes.
 
-        Assumes B=1 for inference; batch >1 still returns all batches' events
-        with onset frames as-is. ``onset_refractory_frames: 0`` disables the
-        suppression entirely (every above-threshold frame fires — the
-        pre-H-6 behavior).
+        Each event also carries ``duration_frames`` estimated from the spacing
+        to the next onset (clamped to ``transcriber.min/max_note_seconds``), so
+        the MIDI writer emits note lengths that follow the performance instead
+        of a fixed 1/16 note; the final note uses the median length.
+
+        B=1 only: a batch that produces any onset raises (BATCH-1), because the
+        return value is ONE flat list whose frames cannot be attributed to an
+        item. A batched call with no onsets has nothing to merge and is allowed.
         """
+        tcfg = self.cfg.get("transcriber", {})
+        # Defaults keep hand-built configs (unit tests, backends) working: the
+        # decoder only needs the frame rate to convert seconds to frames.
+        acfg = self.cfg.get("audio", {})
+        sr = int(acfg.get("sample_rate", 44100))
+        hop = int(acfg.get("hop_length", 512))
+        frames_per_second = sr / hop
+        min_frames = max(1, round(tcfg.get("min_note_seconds", 0.05) * frames_per_second))
+        max_frames = max(min_frames, round(tcfg.get("max_note_seconds", 4.0) * frames_per_second))
+
         onset_prob = torch.sigmoid(onset_logits).squeeze(-1)  # (B, T)
-        refractory = int(self.cfg["transcriber"].get("onset_refractory_frames", 4))
+        refractory = int(tcfg.get("onset_refractory_frames", 4))
         candidates = torch.nonzero(
-            onset_prob > self.cfg["transcriber"].get("onset_threshold", 0.5)
+            onset_prob > tcfg.get("onset_threshold", 0.5)
         )  # (N, 2): [batch_idx, frame], sorted by batch then frame
         pitches = torch.argmax(pitch_logits, dim=-1)
-        vel_values = (velocity * 127).long().squeeze(-1)
+        # Truncate (not round) like main, but keep the floor at 1: a note_on
+        # with velocity 0 is a note_off on the wire.
+        vel_values = (velocity.squeeze(-1).clamp(0, 1) * 127).long().clamp(1, 127)
 
         # BATCH-1: this function returns ONE flat list whose events carry the raw
         # per-item `onset_frame`. For B>1 that merges separate recordings into a
@@ -598,7 +668,7 @@ class StemMidiModel(nn.Module):
 
         # Chord (polyphony) decoding, added upstream while this branch was in
         # flight. Independent of the batch guard above.
-        pitch_threshold = self.cfg["transcriber"].get("pitch_threshold")
+        pitch_threshold = tcfg.get("pitch_threshold")
         chord_probs = None
         if pitch_threshold is not None:
             if not 0.0 < float(pitch_threshold) < 1.0:
@@ -608,51 +678,62 @@ class StemMidiModel(nn.Module):
                 )
             chord_probs = torch.sigmoid(pitch_logits)  # (B, T, V)
 
-        events = []
+        # Rising-edge selection: keep a candidate only when at least
+        # `refractory` below-threshold frames separate it from the previous one.
+        frames_by_batch: dict[int, list[int]] = {}
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():
-            if b not in last_above:
-                accepted = True  # first above-threshold frame of the batch
-            else:
-                # below-threshold frames between this candidate and the
-                # previous one; a rising edge needs >= refractory of them
-                below_gap = t - last_above[b] - 1
-                accepted = below_gap >= refractory
+            previous = last_above.get(b)
             last_above[b] = t
-            if not accepted:
+            if previous is not None and (t - previous - 1) < refractory:
                 continue
-            if chord_probs is not None:
-                frame_notes = (chord_probs[b, t] > pitch_threshold).nonzero().flatten().tolist()
-            else:
-                frame_notes = []
-            if not frame_notes:
-                # No pitch crossed the threshold (or multi-label decoding is
-                # disabled): fall back to the argmax pitch so a fired onset
-                # never produces an empty event set.
-                frame_notes = [int(pitches[b, t].item())]
-            for note in frame_notes:
-                event = {
-                    "note": int(note),
-                    "onset_frame": t,
-                    "velocity": vel_values[b, t].item(),
-                    "confidence": confidence[b, t].item(),
-                }
-                if expression is not None:
-                    values = expression[b, t].detach().cpu().flatten().tolist()
-                    names = self.cfg["transcriber"].get(
-                        "expression_heads", ["bend", "vibrato", "slide"]
-                    )
-                    # The head is sigmoid, so every channel is already 0..1 with
-                    # 0.5 neutral (the writer's convention). The value is tagged
-                    # with where it came from: an untrained head's output must
-                    # never pass for learned phrasing.
-                    event["expression"] = {
-                        name: max(0.0, min(1.0, float(values[i])))
-                        for i, name in enumerate(names)
-                        if i < len(values)
+            frames_by_batch.setdefault(b, []).append(t)
+
+        events = []
+        for b, frames in frames_by_batch.items():
+            # Duration follows the performance: the gap to the next onset,
+            # clamped to min/max_note_seconds; the last note takes the median.
+            gaps = [
+                min(max_frames, max(min_frames, frames[i + 1] - frames[i]))
+                for i in range(len(frames) - 1)
+            ]
+            default_dur = int(sorted(gaps)[len(gaps) // 2]) if gaps else min_frames
+            for i, t in enumerate(frames):
+                dur = gaps[i] if i < len(gaps) else default_dur
+                if chord_probs is not None:
+                    frame_notes = (chord_probs[b, t] > pitch_threshold).nonzero().flatten().tolist()
+                else:
+                    frame_notes = []
+                if not frame_notes:
+                    # No pitch crossed the threshold (or multi-label decoding is
+                    # disabled): fall back to the argmax pitch so a fired onset
+                    # never produces an empty event set.
+                    frame_notes = [int(pitches[b, t].item())]
+                for note in frame_notes:
+                    event = {
+                        "note": int(note),
+                        "onset_frame": t,
+                        "duration_frames": int(dur),
+                        "velocity": vel_values[b, t].item(),
+                        "confidence": confidence[b, t].item(),
                     }
-                    event["expression"]["source"] = _EXPRESSION_SOURCE
-                events.append(event)
+                    if expression is not None:
+                        values = expression[b, t].detach().cpu().flatten().tolist()
+                        names = self.cfg["transcriber"].get(
+                            "expression_heads", ["bend", "vibrato", "slide"]
+                        )
+                        # The head is sigmoid, so every channel is already 0..1
+                        # with 0.5 neutral (the writer's convention). The value
+                        # is tagged with where it came from: an untrained head's
+                        # output must never pass for learned phrasing.
+                        event["expression"] = {
+                            name: max(0.0, min(1.0, float(values[j])))
+                            for j, name in enumerate(names)
+                            if j < len(values)
+                        }
+                        event["expression"]["source"] = _EXPRESSION_SOURCE
+                    events.append(event)
+        events.sort(key=lambda e: (e["onset_frame"], e["note"]))
         return events
 
     @staticmethod
@@ -763,6 +844,41 @@ class StemMidiModel(nn.Module):
         flags.extend(f for f in input_flags if f not in flags)
         return flags if flags else ["none"]
 
+    def _segment_seconds(self, default: float = 60.0) -> float:
+        return float((self.cfg.get("inference") or {}).get("segment_seconds", default))
+
+    def _transcribe_segmented(self, stem: torch.Tensor, instrument: str | None = None) -> dict:
+        """Run the transcriber in frame segments for long stems.
+
+        Peak memory for the decode stage becomes a function of
+        ``inference.segment_seconds`` rather than of the stem length. Segments
+        are independent (no SSM state carry, C-2.5); the concatenation is
+        trimmed to the frame count the STFT grid produces.
+        """
+        acfg = self.cfg.get("audio", {})
+        sr = int(acfg.get("sample_rate", 44100))
+        hop = int(acfg.get("hop_length", 512))
+        seg_len = max(1, int(self._segment_seconds() * sr))
+        total = stem.shape[-1]
+        # Backends, unconfigured segment sizes and short stems take one pass.
+        if self._use_backends or not self.cfg.get("inference") or total <= seg_len:
+            return self._transcribe(stem, instrument)
+
+        parts = [
+            self._transcribe(stem[:, :, pos : pos + seg_len], instrument)
+            for pos in range(0, total, seg_len)
+        ]
+        merged: dict = {}
+        for key in ("onset_logits", "pitch_logits", "velocity", "confidence", "expression"):
+            tensors = [p.get(key) for p in parts]
+            if any(t is None for t in tensors):
+                merged[key] = None
+            else:
+                merged[key] = torch.cat(tensors, dim=1)[:, : 1 + total // hop]
+        # Expression is not part of the dict returned by _transcribe; keep None.
+        merged["events"] = None
+        return merged
+
     @staticmethod
     def _input_flags(source: torch.Tensor) -> list[str]:
         """Artifact flags visible only in the original upload, not in the stems."""
@@ -785,9 +901,12 @@ class StemMidiModel(nn.Module):
     def _get_quantized_self(self) -> "StemMidiModel":
         """Lazily build and cache an INT8 dynamic-quantized clone (PERF-7.7).
 
-        Dynamic quantization is applied to nn.Linear layers only, which keeps
-        masks/logits numerically close to the fp32 model while cutting CPU
-        matmul cost. The fp32 original is left untouched.
+        Dynamic quantization is applied to nn.Linear layers only. Measured on
+        the CPU target it does NOT speed inference up (0.21 s fp32 vs 0.22 s
+        INT8 for a 3 s clip at d_model 128 / 4 layers / 2 threads): the Python
+        selective scan, not the matmuls, is the cost. Stems stay within 5.9e-3
+        of fp32. The flag is kept for completeness and is documented as such in
+        API_DOCUMENTATION.md and FIXES.md (M-6); the fp32 original is untouched.
         """
         quantized = getattr(self, "_quantized_model", None)
         if quantized is None:
@@ -857,6 +976,10 @@ class StemMidiModel(nn.Module):
             },
         }
 
+        # Beat grid from the source audio (M-4); the full mix is the right
+        # signal to measure a pulse on.
+        self._attach_tempo(midi_metadata, source if source is not None else guitar)
+
         m = metrics.detach().float()
         if m.dim() == 2:  # (B, 2) from _separate; (2,) from _separate_chunked
             m = m.mean(dim=0)
@@ -869,6 +992,7 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
+            total_notes=midi_metadata["summary"]["total_notes"],
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -946,6 +1070,59 @@ class StemMidiModel(nn.Module):
             weights_loaded=self.weights_loaded,
         )
         return midi_metadata, report, route_by_quality(report)
+
+    def _attach_tempo(self, midi_metadata: dict, audio_t: torch.Tensor) -> None:
+        """Estimate the tempo and attach it to the MIDI metadata (M-4).
+
+        The writer used to place every export on a fixed 120 BPM grid, so a
+        DAW's bars did not line up with the recording. The estimate only moves
+        the *beat grid*: onset ticks are computed with the same tempo that is
+        written into ``set_tempo``, so absolute note times are unchanged.
+
+        ``midi.tempo`` selects the behaviour:
+        ``"auto"`` (default) estimates and falls back to the fixed grid when
+        there is no measurable pulse; ``"fixed"`` keeps 120 BPM; an integer is
+        read as BPM and written verbatim.
+        """
+        from utils.tempo import DEFAULT_TEMPO_US, estimate_tempo_bpm, tempo_us_from_bpm
+
+        setting = (self.cfg.get("midi") or {}).get("tempo", "auto")
+        tempo_us: int | None = None
+        source = "fixed"
+        bpm: float | None = None
+        confidence = 0.0
+
+        if isinstance(setting, int | float) and not isinstance(setting, bool):
+            bpm = float(setting)
+            tempo_us = tempo_us_from_bpm(bpm)
+            source = "configured"
+        elif str(setting).lower() == "auto":
+            sr = int(self.cfg["audio"]["sample_rate"])
+            hop = int(self.cfg["audio"]["hop_length"])
+            samples = audio_t.detach().reshape(-1).cpu().numpy()
+            if samples.size >= sr:  # under a second there is no pulse to find
+                bpm, confidence = estimate_tempo_bpm(samples, sr, hop)
+            if bpm is not None:
+                tempo_us = tempo_us_from_bpm(bpm)
+                source = "detected"
+
+        if tempo_us is None:
+            tempo_us = DEFAULT_TEMPO_US
+
+        for stem in ("guitar", "bass"):
+            if stem in midi_metadata:
+                midi_metadata[stem]["tempo_us"] = tempo_us
+                midi_metadata[stem]["tempo_source"] = source
+        midi_metadata.setdefault("summary", {})["timing"] = {
+            "source": source,
+            "tempo_us": tempo_us,
+            "bpm": round(60_000_000.0 / tempo_us, 2),
+            "confidence": round(float(confidence), 4),
+            "note": (
+                "detected beat grid; onset ticks use the same tempo, so absolute "
+                "note times do not depend on the estimate"
+            ),
+        }
 
     def _separate_chunked(
         self, audio_t: torch.Tensor, chunk_seconds: float
@@ -1293,9 +1470,13 @@ class StemMidiModel(nn.Module):
             avg_confidence=avg_confidence,
             artifact_flags=stream_artifacts,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
-            # GATE-3: the gate must be able to refuse an empty render.
+            # GATE-3: the gate must be able to refuse an empty render. Both
+            # counters are set: `total_notes` is upstream's canonical field and
+            # drives `empty_render`, `note_count` is this branch's stricter one
+            # (it also rejects a negative count).
             note_count=len(midi_metadata["guitar"].get("midi_events") or [])
             + len(midi_metadata["bass"].get("midi_events") or []),
+            total_notes=midi_metadata["summary"]["total_notes"],
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -1371,7 +1552,19 @@ def load_from_checkpoint(checkpoint_path: str, config_path: str | None = None) -
         raise ValueError(
             "Checkpoint must contain a state_dict/model_state_dict mapping or be a bare state_dict"
         )
-    model.load_state_dict(state_dict)
+    # Checkpoints written before the pre-norm residual stack (C-1) lack the
+    # block_norms/final_norm parameters. Fill those with identity — the only
+    # sensible initialisation — and fail loudly on anything else.
+    from models.checkpoint_compat import load_state_dict_compat
+
+    report = load_state_dict_compat(model, state_dict)
+    if report["legacy"]:
+        logger.warning(
+            "Loaded a pre-C-1 checkpoint: filled %d LayerNorm parameter(s) "
+            "(block_norms/final_norm) with identity. Fine-tune before shipping "
+            "weights from it — the residual stack was untrained in that file.",
+            len(report["filled"]),
+        )
     model.mark_weights_loaded()
     return model
 

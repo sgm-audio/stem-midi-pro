@@ -100,6 +100,7 @@ def build_midi_from_events(
     hop_length: int = HOP_LENGTH,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     include_expression: bool = False,
+    tempo_us: int | None = None,
 ) -> bytes:
     """Convert MIDI event metadata to SMF bytes.
 
@@ -113,6 +114,11 @@ def build_midi_from_events(
     ``duration_frames`` is honored when available; otherwise the function
     falls back to ``default_duration_beats`` (environment variable
     ``MIDI_DEFAULT_NOTE_DURATION_BEATS``, default 0.25 beats).
+
+    ``tempo_us`` (microseconds per beat) sets the written ``set_tempo`` and the
+    tick conversion together, so a detected tempo (utils/tempo.py, M-4) moves
+    the beat grid without moving the notes: absolute onset times are identical
+    whichever tempo is passed.
     """
     if default_duration_beats is None:
         default_duration_beats = DEFAULT_NOTE_DURATION_BEATS
@@ -120,12 +126,19 @@ def build_midi_from_events(
         raise ValueError("default_duration_beats must be positive")
     if hop_length <= 0 or sample_rate <= 0 or ticks_per_beat <= 0:
         raise ValueError("hop_length, sample_rate, and ticks_per_beat must be positive")
+    if tempo_us is None:
+        tempo_us = DEFAULT_TEMPO_US
+    if not isinstance(tempo_us, int | float) or not 1 <= tempo_us <= 16_777_215:
+        raise ValueError(
+            f"tempo_us must be an integer microsecond-per-beat in [1, 16777215], got {tempo_us!r}"
+        )
+    tempo_us = round(tempo_us)
 
     mid = MidiFile(ticks_per_beat=ticks_per_beat)
     track = MidiTrack()
     mid.tracks.append(track)
 
-    track.append(MetaMessage("set_tempo", tempo=DEFAULT_TEMPO_US))
+    track.append(MetaMessage("set_tempo", tempo=tempo_us))
     track.append(MetaMessage("time_signature", numerator=4, denominator=4))
     track.append(MetaMessage("track_name", name=f"{stem_type} transcription"))
     instrument = "Electric Guitar" if stem_type == "guitar" else "Electric Bass"
@@ -133,7 +146,7 @@ def build_midi_from_events(
     track.append(MetaMessage("marker", text=f"{stem_type.capitalize()} - Stem+MIDI Pro"))
 
     # tempo is microseconds per beat; no extra factor of 60 is needed.
-    ticks_per_second = ticks_per_beat * 1_000_000.0 / DEFAULT_TEMPO_US
+    ticks_per_second = ticks_per_beat * 1_000_000.0 / tempo_us
 
     # Scheduled entries are (absolute_tick, priority, sequence, message).
     # Note-offs precede note-ons at the same tick; note-specific metadata and
