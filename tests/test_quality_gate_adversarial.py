@@ -18,7 +18,7 @@ import math
 
 import pytest
 
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 torch = require("torch", "real-separator gate tests", module_level=True)
 np = require("numpy", "signal builders")
@@ -221,21 +221,9 @@ def _proxy(sep, audio: np.ndarray) -> float:
     return float(metrics[0, 0])
 
 
-@known_bug(
-    "GATE-4",
-    "the separation number the gate compares against min_centroid_separation_db=20 is not a "
-    "separation metric at "
-    "all: MambaSeparator._centroid_separation is a ratio of guitar/bass spectral centroids "
-    "clamped to [0, 30] and it *rewards* distortion — at the production grid this test measures "
-    "17.75 dB for a hard-clipped square wave against 0.00 dB for the same clean sine, and the "
-    "corpus case in tests/test_audio_edge_cases.py reaches 24.75 dB, above "
-    "min_centroid_separation_db=20, i.e. "
-    "an outright Studio badge for a square wave. Silence and a +8 dB overflow both score 0.0, so "
-    "the metric neither sees clipping nor verifies that anything was separated. Replace with a "
-    "reference-free check (mask sum / residual energy / MR-STFT) or gate on artifact flags first.",
-)
 @pytest.mark.parametrize("case", ["clean", "clipped"], ids=["clean-sine", "hard-clipped-square"])
 def test_the_separation_proxy_does_not_prefer_clipping(real_separator, synth, case):
+    """Regression guard for GATE-4: the score is gated by input tonality."""
     clean = (np.sin(2 * np.pi * 220 * np.arange(SR) / SR) * 0.4).astype("float32")
     clipped = np.sign(np.sin(2 * np.pi * 220 * np.arange(SR) / SR)) * 0.4
     clipped = clipped.astype("float32")
@@ -257,19 +245,9 @@ def test_silence_cannot_earn_a_separation_score(real_separator, synth):
     )
 
 
-@known_bug(
-    "CONF-1",
-    "the number every tier depends on rewards the wrong content: measured end-to-end at "
-    "d_model=32/n_layers=1/seed 0 on one-second inputs, avg_confidence is 0.5164 for a "
-    "hard-clipped square wave and 0.5101 for white noise, but only 0.2998 for clean music and "
-    "0.2833 for silence — the *worst* render scores highest. The head is also uninformative "
-    "within a file (0.4892 ± 0.0045 across frames) and mc_dropout_eval() reports the MEAN of "
-    "the stochastic passes (0.500 vs 0.420 for one pass), which is why STUDIO's >= 0.85 can "
-    "never fire. Add a calibration step and never tier on the raw head.",
-)
 @pytest.mark.memory
 def test_confidence_does_not_reward_degraded_content(pipeline_config, synth, make_wav):
-    """Degenerate input must not score like music — one verdict over four signals.
+    """Regression guard for CONF-1: degenerate input must not score like music.
 
     Kept as a single test on purpose: a parametrised known-bug where one case
     legitimately passes becomes an XPASS(strict) failure that hides the real
@@ -279,7 +257,7 @@ def test_confidence_does_not_reward_degraded_content(pipeline_config, synth, mak
 
     cfg = {**pipeline_config, "quality_gates": {**GATES, "min_confidence": 0.6}}
     seconds = 1.0
-    n = SR * seconds
+    n = int(SR * seconds)
     t = np.arange(n) / SR
     signals = {
         "silence": np.zeros(n, dtype="float32"),
@@ -296,7 +274,10 @@ def test_confidence_does_not_reward_degraded_content(pipeline_config, synth, mak
         with torch.inference_mode():
             out = model.process_audio_file(path)
         rep = out["report"]
-        conf = rep.avg_confidence
+        # CONF-1: the tier reads the CONTENT-CALIBRATED number, not the raw head
+        # (avg_confidence is still reported for observability and is asserted
+        # separately by test_pipeline_integrity).
+        conf = rep.calibrated_confidence
         scores[case] = (conf, rep.quality_tier.value)
 
     finite = [c for c, _ in scores.values() if not math.isnan(c)]
@@ -304,13 +285,13 @@ def test_confidence_does_not_reward_degraded_content(pipeline_config, synth, mak
     music = scores["music"][0]
     worst = max(scores["clipped"][0], scores["noise"][0])
     assert music > worst, (
-        "avg_confidence: "
+        "calibrated_confidence: "
         + ", ".join(f"{k}={v[0]:.4f}({v[1]})" for k, v in scores.items())
         + f" — clean music scores {music:.4f} while the clipped/noise renders score "
         f"{worst:.4f}; the tier input rewards degradation instead of penalising it"
     )
     assert scores["silence"][0] < 0.1, (
-        f"silence reported avg_confidence={scores['silence'][0]:.4f} "
+        f"silence reported calibrated_confidence={scores['silence'][0]:.4f} "
         f"(tier {scores['silence'][1]}) — an empty render should not be within "
         f"{scores['silence'][0]:.2f} of a musical one"
     )

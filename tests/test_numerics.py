@@ -24,8 +24,6 @@ import sys
 
 import pytest
 
-from tests.honesty import known_bug
-
 torch = pytest.importorskip("torch", reason="requires torch")
 yaml = pytest.importorskip("yaml", reason="requires pyyaml")
 
@@ -69,26 +67,18 @@ def _separator_hidden_rms(cfg, audio):
         )
         hidden = sep.input_proj(torch.abs(spec).transpose(1, 2))
         rms = [float(hidden.pow(2).mean().sqrt())]
-        # This separator applies each block directly (no per-block norm, no
-        # residual add); replay exactly what forward() does.
-        for block in sep.mamba_blocks:
-            hidden = block(hidden)
+        # Replay exactly what forward() does: pre-norm residual blocks plus a
+        # final LayerNorm (C-1). Replaying the pre-fix `hidden = block(hidden)`
+        # form here would measure a stack the model no longer has.
+        for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
+            hidden = hidden + block(norm(hidden))
             rms.append(float(hidden.pow(2).mean().sqrt()))
+        rms.append(float(sep.final_norm(hidden).pow(2).mean().sqrt()))
     return rms
 
 
-@known_bug(
-    "SEP-2",
-    "The separator's hidden state decays geometrically through the Mamba stack: measured "
-    "per-block RMS 1 -> 0.0485 -> 1.2e-3 -> 2.9e-5 -> 7.4e-7 -> 1.7e-8 -> 4.0e-10 on the small "
-    "CPU config (6 blocks, ~2.5e9 total collapse; ~12x per block). By the last block the mask "
-    "heads read activations ~9 orders of magnitude below the input, so the masks are driven by "
-    "numerical residue rather than by the audio. Ported from PR #13, which fixed this in its own "
-    "separator rewrite (residual + per-block norm); this repo's separator still applies each "
-    "block directly, so it stays pinned here.",
-)
 def test_block_rms_ladder_stays_order_one(cfg, audio):
-    """C-1: no geometric decay across the residual stack."""
+    """Regression guard for SEP-2: no geometric decay across the residual stack."""
     rms = _separator_hidden_rms(cfg, audio)
     for i, value in enumerate(rms):
         assert 0.05 < value < 20.0, f"block {i} RMS {value:.3e} left [0.05, 20]"
@@ -111,8 +101,9 @@ def test_masks_carry_content(cfg, audio):
             return_complex=True,
         )
         hidden = sep.input_proj(torch.abs(spec).transpose(1, 2))
-        for block in sep.mamba_blocks:
-            hidden = block(hidden)
+        for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
+            hidden = hidden + block(norm(hidden))
+        hidden = sep.final_norm(hidden)
         # Independent sigmoid masks (see the mixture-consistency note above).
         masks = torch.stack([head(hidden).sigmoid() for head in sep.mask_heads.values()], dim=0)
 

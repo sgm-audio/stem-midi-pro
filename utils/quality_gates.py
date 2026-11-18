@@ -43,6 +43,13 @@ class ProcessingReport:
     separation_proxy: float | None = None
     phase_coherence: float = 0.0
     avg_confidence: float = 0.0
+    # Content-calibrated confidence (CONF-1): ``avg_confidence`` scaled by the
+    # evidence that the stems actually carry notes (tonality x crest factor).
+    # This is the ONLY confidence the tier decision reads — the raw head is
+    # uninformative and, measured, ranks a clipped square above clean music.
+    # ``None`` means "not calibrated" and falls back to ``avg_confidence`` so
+    # hand-built reports keep working.
+    calibrated_confidence: float | None = None
     artifact_flags: list[str] | None = None
     low_confidence_notes: int = 0
     # Number of notes in the render. ``None`` = unknown (a hand-built report);
@@ -107,6 +114,8 @@ class ProcessingReport:
         ]
         if self.invalid and "non_finite" not in self.artifact_flags:
             self.artifact_flags.append("non_finite")
+        if self.calibrated_confidence is None:
+            self.calibrated_confidence = float(self.avg_confidence)
         if self.total_notes == 0 and "empty_render" not in self.artifact_flags:
             self.artifact_flags.append("empty_render")
 
@@ -161,12 +170,13 @@ class ProcessingReport:
         # STUDIO additionally requires that no individual note was unreliable:
         # a render whose average confidence clears 0.85 while dozens of notes
         # are individually doubtful is not studio-ready (review §9).
+        # Tiers read the CALIBRATED number, never the raw head (CONF-1).
         if (
-            self.avg_confidence >= self.studio_confidence_threshold
+            self.calibrated_confidence >= self.studio_confidence_threshold
             and self.low_confidence_notes == 0
         ):
             return QualityTier.STUDIO
-        if self.avg_confidence >= self.draft_confidence_threshold:
+        if self.calibrated_confidence >= self.draft_confidence_threshold:
             return QualityTier.DRAFT
         return QualityTier.COMPLEX
 
@@ -190,6 +200,7 @@ class ProcessingReport:
             "centroid_separation_is_proxy": True,
             "phase_coherence": _safe(self.phase_coherence),
             "avg_confidence": _safe(self.avg_confidence),
+            "calibrated_confidence": _safe(self.calibrated_confidence),
             "artifact_flags": list(self.artifact_flags),
             "low_confidence_notes": int(self.low_confidence_notes),
             # GATE-3: two names, both truthful. `total_notes` is upstream's
