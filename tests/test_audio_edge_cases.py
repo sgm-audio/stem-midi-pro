@@ -22,7 +22,7 @@ import math
 import pytest
 
 from tests.doubles import frame_count
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 torch = require("torch", "audio edge-case tests", module_level=True)
 np = require("numpy", "audio edge-case tests", module_level=True)
