@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pass-today regression guards for defects fixed in the 2026-11-17 remediation.
 
 Each test names the id of the defect it guards, so the join between TODO.md
