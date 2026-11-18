@@ -191,6 +191,13 @@ class MambaSeparator(nn.Module):
 
         # Project to Mamba dim: (B, T_f, F) → (B, T_f, D)
         x = mag  # already (B, T_f, F)
+        # Tonality of the INPUT (1 - Wiener entropy of the magnitude spectrum),
+        # averaged over frames. Used to weight the separation score: a
+        # centroid-ratio alone rewards broadband/distorted content, so a
+        # hard-clipped square scored HIGHER than the clean sine it was made from
+        # (GATE-4). Tonality is ~1 for a pure tone, lower for a square (odd
+        # harmonics), ~0 for white noise and 0 for silence.
+        tonality = self._tonality(x)
         hidden = self.input_proj(x)  # (B, T_f, D)
         del mag  # input_proj output kept; raw magnitude no longer needed
         if hidden.shape[-1] != self.mamba_blocks[0].d_model:
@@ -250,7 +257,13 @@ class MambaSeparator(nn.Module):
         # Perceptual metric (spectral centroid separation proxy - NOT real SI-SDR).
         # No additional STFT (C-2.6 / PERF-7.1).
         centroid_metric = self._centroid_separation(centroids["guitar"], centroids["bass"])
-        metrics = torch.stack([centroid_metric, phase_score.squeeze(-1)], dim=-1)
+        # Gate by the input's tonality so distortion cannot earn a better score
+        # than the clean signal it came from (GATE-4). Cubed because the gate has
+        # to out-run the centroid term: a hard-clipped square wave saturates that
+        # term at its 30 dB clamp (measured 30.0 x tonality 0.64) while a clean
+        # sine sits near 12 dB, so a linear weight still ranked the square higher.
+        separation_metric = centroid_metric * tonality.pow(3)
+        metrics = torch.stack([separation_metric, phase_score.squeeze(-1)], dim=-1)
 
         # ``new_state`` is None unless the caller asked for streaming: the
         # chunked file path overlaps 50% of the waveform, which makes a single
@@ -357,6 +370,24 @@ class MambaSeparator(nn.Module):
             if take_hi > take_lo:
                 out[:, out_lo + take_lo : out_lo + take_hi] = audio[:, take_lo:take_hi]
         return out
+
+    def _tonality(self, mag: torch.Tensor) -> torch.Tensor:
+        """Per-batch tonality in [0, 1]: ``1 -`` Wiener entropy of the spectrum.
+
+        Wiener entropy is the geometric mean over the arithmetic mean of the
+        magnitude spectrum: ~0 for a pure tone (all energy in one bin), ~1 for
+        flat noise. Silence has no spectrum to speak of and returns 0, so a
+        zero-energy input cannot earn any separation score.
+        """
+        power = mag.clamp(min=0) + 1e-12
+        log_mean = torch.log(power).mean(dim=-1)  # (B, T_f)
+        arith_mean = power.mean(dim=-1)
+        flatness = torch.exp(log_mean) / arith_mean.clamp(min=1e-12)  # (B, T_f)
+        energy = mag.pow(2).sum(dim=-1)  # (B, T_f)
+        tonality = (1.0 - flatness).clamp(0.0, 1.0)
+        # Frames with no energy carry no tonality information.
+        tonality = tonality * (energy > 1e-12).to(tonality.dtype)
+        return tonality.mean(dim=-1)  # (B,)
 
     def _centroid_separation(
         self, guitar_centroid: torch.Tensor, bass_centroid: torch.Tensor

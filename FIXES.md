@@ -12,7 +12,7 @@ fallback (`models/_mamba_compat.py`), `configs/model_config.yaml`.
 Reproduce with:
 
 ```bash
-python3 -m pytest -q                                  # 400 passed, 4 skipped, 28 xfailed
+python3 -m pytest -q                                  # 464 passed, 4 skipped, 0 xfailed
 python3 scripts/verify_numerics.py                    # block-RMS ladder, masks, mixture consistency
 python3 scripts/verify_midi.py                        # clock, polyphony, durations, CC
 python3 scripts/verify_api.py                         # OOM mapping, untrained gate, JSON guard
@@ -81,6 +81,23 @@ Still-open `@known_bug` ids at this commit (**28 xfail markers**, each an open T
 measured decision (e.g. `CONF-1` — the head scores *degraded* renders *highest*, so a fix means
 calibration, not a threshold).
 
+
+## Round 4 — the last five `@known_bug` locks are closed (backlog now empty)
+
+Measured on this tree, 2 threads, CPU only, pure-torch Mamba, `pipeline_config` grid (n_fft 2048 /
+hop 512).
+
+| ID | Defect (as measured before) | Fix | Evidence after |
+|----|-----------------------------|-----|----------------|
+| **SEP-2** | separator hidden state collapsed geometrically: `1 -> 0.0485 -> 1.2e-3 -> … -> 4.0e-10` (≈2.5e9 total) | the pre-norm residual stack is in `models/mamba_separator.py`; the *guard* was still replaying the pre-fix `hidden = block(hidden)` form, so it measured a stack the model no longer has. It now replays `forward()` exactly (`h = h + block(norm(h))` + final LayerNorm) | 6-block RMS ladder **1.000 → 1.002 → 1.013 → 1.005 → 1.010 → 1.020 → 1.021** |
+| **TRANS-1** | no content test in the decoder: an above-threshold onset field became notes on a silent stem; only the refractory window bounded density | `_logits_to_midi(..., frame_energy=...)` gates every onset on `>= transcriber.content_floor` (default 1e-3) of the loudest frame; wired from `_enhance` with the injector's frame-grid energy; a zero-energy stem returns `[]` before decoding | saturated field (every frame above threshold) on zero energy → **0 notes**; the same field with one loud frame still emits there |
+| **GATE-4** | the "separation" number rewarded distortion: a hard-clipped square scored 17.75 dB vs 0.00 dB for the clean sine it came from, clearing `min_centroid_separation_db=20` on other material | the score is now `centroid_gap × tonality³`, tonality = 1 − Wiener entropy of the input spectrum (the cube is needed because the centroid term saturates at its 30 dB clamp) | clean sine **12.17 dB**, hard-clipped square **7.90 dB**, white noise **0.11 dB**, silence **0.00 dB** |
+| **CONF-1** | the number every tier reads rewarded the wrong content: clipped square 0.5164 and noise 0.5101 vs clean music 0.2998 | tiers now read a new `ProcessingReport.calibrated_confidence` = note-weighted `avg_confidence × content_factor`, where `content_factor` = stem tonality × crest-factor margin (0 for a clipped square, ~0 for noise). `avg_confidence` keeps its contract (mean of emitted-note confidence, per `test_model_confidence_reaches_poly_pressure_unchanged`) and is reported for observability | music **avg 0.9789 / calibrated 0.9771 with 119 notes**; silence, clipped and noise **0.0000 calibrated, 0 notes** (the content gate removes their notes, so the head never gets a vote) |
+
+`TODO.md` §18.1 now has **no open `@known_bug` entries**; the bookkeeping tests were updated for an
+empty backlog (no floor on the marker count — the reverse check, "an open entry must be locked by
+a test", still runs).
+
 ## Still open (deliberately not claimed as fixed)
 
 | # | Item | Why it is still open |
@@ -95,7 +112,7 @@ calibration, not a threshold).
 
 ## Test suite
 
-`pytest -q` → **400 passed, 4 skipped, 28 xfailed, 0 failed** (`main` alone: 345 passed, 37 xfailed).
+`pytest -q` → **464 passed, 4 skipped, 0 xfailed, 0 failed**. The known-bug backlog is empty.
 The 4 skipped tests are `mamba_ssm`-only. The one local failure is the sandbox RSS probe
 (`test_peak_rss_probe_runs_at_all`, it asserts a ceiling this container cannot meet); it passes in CI. `ruff check .` and `black --check .` are clean.
 

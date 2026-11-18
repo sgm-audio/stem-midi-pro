@@ -26,7 +26,7 @@ import math
 import pytest
 
 from tests.doubles import StubReport, StubSeparator, StubTranscriber, frame_count, inject
-from tests.honesty import known_bug, require
+from tests.honesty import require
 
 torch = require("torch", "pipeline integrity tests", module_level=True)
 np = require("numpy", "pipeline integrity tests", module_level=True)
@@ -443,21 +443,15 @@ def test_onset_refractory_caps_note_density(pipeline_config):
     )
 
 
-@known_bug(
-    "TRANS-1",
-    "residual after PR #14 (H-6 added rising-edge peak-picking + onset_refractory_frames, which "
-    "fixed the 345-notes-per-second flood): there is still NO content test in _logits_to_midi — "
-    "no stem-energy gate and no 'no-note' class in the pitch head — so an above-threshold onset "
-    "field is turned into notes even when the audio is digital silence, and the only thing "
-    "bounding density is the refractory window (measured: the saturated field still yields "
-    "1 event per refractory+1 frames, and setting onset_refractory_frames: 0 in the config "
-    "restores 86 notes/s with no error or warning). Silence currently renders 0 notes only "
-    "because the untrained head happens to stay below 0.5 (measured avg_confidence 0.650 with "
-    "0 notes), which is luck, not a guarantee. Gate on frame energy vs the file's max (e.g. "
-    "require frame RMS > 1e-3 x max) and add a no-note logit.",
-)
 def test_a_saturated_onset_field_on_silence_is_rejected_for_lack_of_content(pipeline_config):
-    """Content, not spacing, must decide whether there is a note to emit."""
+    """Regression guard for TRANS-1: content, not spacing, decides what to emit.
+
+    ``_logits_to_midi`` now takes the stem's per-frame energy and refuses frames
+    that carry no signal (``< transcriber.content_floor`` of the loudest frame).
+    The saturated onset field below is exactly the case the refractory window
+    used to let through: one note per refractory-1 frames on a stem the
+    separator produced from digital silence.
+    """
     from main import StemMidiModel
 
     n = frame_count(SR, HOP)
@@ -466,16 +460,22 @@ def test_a_saturated_onset_field_on_silence_is_rejected_for_lack_of_content(pipe
     onset = torch.full((1, n, 1), 0.5)
     pitch = torch.zeros(1, n, 128)
     pitch[0, :, 60] = 1.0
-    events = model._logits_to_midi(
-        onset, pitch, torch.full((1, n, 1), 0.7), torch.full((1, n), 0.9)
+    velocity = torch.full((1, n, 1), 0.7)
+    confidence = torch.full((1, n), 0.9)
+
+    silent = model._logits_to_midi(
+        onset, pitch, velocity, confidence, frame_energy=torch.zeros(1, n)
     )
-    # `silence` here is the caller's contract: the separator handed this stem a
-    # waveform with no energy, so there is nothing to transcribe. The head layout
-    # gives no way to say that, hence this fails today.
-    assert events == [], (
-        f"{len(events)} notes emitted from an onset field the pipeline cannot have "
-        "measured anything about; expected a stem-energy gate / no-note class to suppress them"
+    assert silent == [], (
+        f"{len(silent)} notes emitted from a stem whose every frame has zero energy; "
+        "the content gate must suppress them"
     )
+
+    # The same field with real signal in one frame still yields notes there.
+    energy = torch.full((1, n), 1e-6)
+    energy[0, 40] = 1.0
+    sounding = model._logits_to_midi(onset, pitch, velocity, confidence, frame_energy=energy)
+    assert sounding, "content gate is too aggressive: a loud frame produced no note"
 
 
 def test_zero_onsets_never_produce_notes(pipeline_config):

@@ -94,9 +94,10 @@ def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     # when the count RISES. Down to 3 while 4 locks remain (CONF-1, GATE-4,
     # SEP-2, TRANS-1), all of which need trained weights, a corpus, or an
     # architectural change rather than a patch.
-    assert (
-        len(marked) >= 3
-    ), f"marker scan found only {sorted(marked)} — the scan broke, not the suite"
+    # No floor on the marker count: an empty backlog is a success, not a broken
+    # scan. `test_no_open_todo_entry_claims_a_guard_that_does_not_exist` below
+    # is what catches a scan that silently stopped finding anything.
+
     missing = sorted(set(marked) - _open_entry_ids())
     assert not missing, (
         f"{missing} lock tests with @known_bug but are not open entries in TODO.md 18.1. "
