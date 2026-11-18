@@ -66,8 +66,8 @@ tier" contract was corrected. Suite: 336 passed, 42 xfailed (known-bug),
 - Renamed `data/canadian_datasets.py` → `data/datasets.py`; classes renamed (`AudioDataset`, `Slakh2100YourMT3Dataset`, `MUSDB18HQDataset`, `get_data_loaders`).
 
 ### API hardening (TODO Section 6)
-- Upload streaming with a 50 MiB cap and `413` responses; audio validation (format, duration, sample rate).
-- Optional API-key auth (`X-API-Key`) and configurable CORS allowlist.
+- Buffered/chunked upload reading with a 500 MB cap and `413` responses; audio validation (format, duration, sample rate).
+- Optional API-key auth (`Authorization: Bearer <key>` via `API_KEYS`) and configurable CORS allowlist.
 - Template rendering endpoints with path-traversal protection.
 
 ### Documentation (TODO Section 10)
@@ -77,8 +77,8 @@ tier" contract was corrected. Suite: 336 passed, 42 xfailed (known-bug),
 - User-facing templates in `user_content/` audited against the real processing-report keys.
 
 ### Known outstanding work
-- NeMo/PyTorch-Lightning removal from the training loop (TR-12.3), dataset-class collapse (RF-3.1.1)
-- True streaming SSM state passing (C-2.5/ARCH-11.8.1), coverage gate hardening (T-8.1.3/T-8.4.1)
+- Dataset-class collapse (RF-3.1.1), pitch/velocity/duration training wiring, and coverage-gate hardening remain open.
+- True streaming SSM state passing (C-2.5/ARCH-11.8.1), trained-checkpoint quality evaluation, target-hardware benchmarking, optional-backend validation, and DAW evidence remain open.
 
 ### Maintenance pass 2026-10-07 (automated review fixes)
 - Deleted the stale `stem_midi_pro/` mirror tree (root files are canonical).

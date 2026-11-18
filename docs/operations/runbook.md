@@ -15,12 +15,12 @@ Common issues and fixes for a small CPU deployment (bare-metal i5, systemd or di
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `503 Model not loaded` | hit before startup finished | retry after startup completes |
-| `401 Invalid or missing X-API-Key` | auth enabled, wrong/missing key | set header or unset `API_KEY` |
-| `413 Upload exceeds maximum size` | file > 50 MiB | trim/compress, or raise `MAX_UPLOAD_BYTES` (watch RAM) |
+| `503 Model not loaded` | startup failed or no validated checkpoint/backend weights are configured | set `MODEL_CHECKPOINT_PATH` (or use the explicit pretrained CPU backend config), then retry after `/ready` returns 200 |
+| `401/403 Invalid or missing API key` | `API_KEYS` is enabled and the Bearer token is missing or wrong | send `Authorization: Bearer <key>` or unset `API_KEYS` |
+| `413 Upload exceeds maximum size` | file exceeds the configured `MAX_UPLOAD_BYTES` (default 500 MB) | trim/compress, or lower/raise the limit deliberately (watch RAM) |
 | `400 Sample rate not supported` | not 44.1/48 kHz | resample the file |
 | `500 Processing failed` | model bug (see TODO Section 2) | check logs; if reproducible, file an issue with the input characteristics |
-| Request takes minutes | normal on CPU | ~30–60 s per minute of audio; inform users |
+| Request takes minutes | CPU inference is synchronous and the target hardware is not benchmark-certified | record a baseline with the deployed checkpoint; do not rely on historical seconds-per-minute estimates |
 
 ## Resource problems
 
@@ -31,11 +31,11 @@ Common issues and fixes for a small CPU deployment (bare-metal i5, systemd or di
 
 - Development: uvicorn stdout.
 - Production (systemd): `journalctl -u stem-midi-pro -f` (unit file is TODO BLD-9.2.9).
-- JSON structured logging (`structlog`, `LOG_FORMAT=json`) is planned (TODO API-6.10).
+- When installed, `structlog` emits JSON logs; otherwise set `LOG_FORMAT=json` for the stdlib fallback. OpenTelemetry tracing remains planned (TODO API-6.19).
 
 ## First-response checklist
 
-1. `curl localhost:8000/health` → 200?
-2. Check process RAM (`ps` / Task Manager) — near 8 GB limit?
+1. `curl localhost:8000/live` → 200; then `curl localhost:8000/ready` → 200 only when validated weights are loaded.
+2. Check process RAM (`ps` / Task Manager) — near the declared memory budget?
 3. Check the last request in the logs for a `500` detail message.
 4. Restart the service; model reload is the cheapest reset.

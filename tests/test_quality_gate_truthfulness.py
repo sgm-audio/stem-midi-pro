@@ -56,11 +56,11 @@ def test_gate_inputs_come_from_real_inference(mock_model):
     assert 0.0 <= report.avg_confidence <= 1.0
     assert 0.0 <= report.phase_coherence <= 1.0
     assert np.isfinite(report.centroid_separation_db)
-    assert routing["action"] in {"direct_download", "editor_launch", "fallback_options"}
+    assert routing["action"] in {"direct_download", "manual_review"}
     expected = {
         QualityTier.STUDIO: "direct_download",
-        QualityTier.DRAFT: "editor_launch",
-        QualityTier.COMPLEX: "fallback_options",
+        QualityTier.DRAFT: "manual_review",
+        QualityTier.COMPLEX: "manual_review",
     }[report.quality_tier]
     assert routing["action"] == expected
 
@@ -107,7 +107,8 @@ def test_gate_thresholds_are_config_driven():
     )
     assert lenient.quality_tier is QualityTier.STUDIO
     assert strict.quality_tier is not QualityTier.STUDIO
-    assert route_by_quality(strict)["editor_launch"] is True
+    assert route_by_quality(strict)["review_in_daw"] is True
+    assert route_by_quality(strict)["editor_launch"] is False
 
 
 def test_any_artifact_flag_blocks_studio():
