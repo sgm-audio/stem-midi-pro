@@ -86,17 +86,20 @@ def main():
     print(f"  Badge: {routing['badge']}")
     print(f"  Message: {routing['message']}")
 
-    # MIDI metadata sample
+    # MIDI metadata sample — orchestrator returns the nested per-stem shape
+    # {"guitar": …, "bass": …, "summary": …} (see api._stem_midi_data).
     midi_meta = outputs["midi_metadata"]
+    guitar_events = midi_meta["guitar"]["midi_events"]
     print("\nMIDI Metadata:")
-    print(f"  Total Events: {len(midi_meta['midi_events'])}")
+    print(f"  Guitar Events: {len(guitar_events)}")
+    print(f"  Bass Events: {len(midi_meta['bass']['midi_events'])}")
     print(f"  Avg Confidence: {midi_meta['summary']['avg_confidence']:.0%}")
     print(f"  Low Confidence Count: {midi_meta['summary']['low_confidence_count']}")
     print(f"  Alignment Warnings: {midi_meta['summary']['alignment_warnings']}")
 
-    if midi_meta["midi_events"]:
+    if guitar_events:
         print("\nSample MIDI Event:")
-        event = midi_meta["midi_events"][0]
+        event = guitar_events[0]
         print(f"  Note: {event['note']} (MIDI)")
         print(f"  Onset Frame: {event['onset_frame']}")
         print(f"  Velocity: {event['velocity']}")
