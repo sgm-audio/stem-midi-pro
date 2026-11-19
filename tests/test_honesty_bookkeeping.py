@@ -86,17 +86,16 @@ def _closed_entry_ids() -> set[str]:
 def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     """An xfail reason scrolls off a CI log; TODO.md 18.1 is the durable record."""
     marked = _marked_ids()
-    # Floor, not an exact count: the audit opened 65 locks and the remediation
-    # has been retiring them, so this number falls every time a defect is fixed.
-    # It exists to catch a BROKEN SCAN (a refactor moving the markers out of the
-    # files `_marked_ids` walks would otherwise silently pass with zero), so it
-    # only needs to be well below the real count -- and it has to be raised only
-    # when the count RISES. Down to 3 while 4 locks remain (CONF-1, GATE-4,
-    # SEP-2, TRANS-1), all of which need trained weights, a corpus, or an
-    # architectural change rather than a patch.
-    assert (
-        len(marked) >= 3
-    ), f"marker scan found only {sorted(marked)} — the scan broke, not the suite"
+    # No floor on the marker count: an empty backlog is a success, not a broken scan.
+    # There used to be one (the audit opened 65 locks, and a refactor moving the markers
+    # out of the files `_marked_ids` walks would otherwise pass with zero), but PR #24
+    # closed the last four and a floor that has to be lowered every time something is
+    # fixed measures the backlog, not the scan. `test_no_open_todo_entry_claims_a_guard_
+    # that_does_not_exist` below, plus this branch's
+    # `test_every_open_entry_is_locked_by_a_test_or_says_why_not`, are what catch a scan
+    # that silently stopped finding anything: they go the other way, from the TODO to the
+    # markers, so an empty TODO with an unexplained zero still fails.
+
     missing = sorted(set(marked) - _open_entry_ids())
     assert not missing, (
         f"{missing} lock tests with @known_bug but are not open entries in TODO.md 18.1. "

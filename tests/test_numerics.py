@@ -84,6 +84,10 @@ def _separator_hidden_rms(cfg, audio):
         )
         hidden = sep.input_proj(torch.abs(spec).transpose(1, 2))
         rms = [float(hidden.pow(2).mean().sqrt())]
+        # Replay exactly what forward() does: pre-norm residual blocks plus a final
+        # LayerNorm (C-1/SEP-2). Replaying the pre-fix `hidden = block(hidden)` form here
+        # would measure a stack the model no longer has - which is how this file's SEP-2
+        # pin came to certify a collapse that had already been fixed.
         for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
             hidden = hidden + block(norm(hidden))
             rms.append(float(hidden.pow(2).mean().sqrt()))
@@ -93,12 +97,14 @@ def _separator_hidden_rms(cfg, audio):
 
 
 def test_block_rms_ladder_stays_order_one(cfg, audio):
-    """C-1 / SEP-2: no geometric decay across the residual stack.
+    """Regression guard for SEP-2: no geometric decay across the residual stack.
 
-    The defect main pinned (SEP-2) measured 1 -> 4.9e-2 -> 1.2e-3 -> ... -> 4.0e-10
-    because each block was applied directly. This branch's separator (PR #13's C-1 fix)
-    wraps every block in a LayerNorm and adds the residual, which is what holds the
-    ladder at O(1); the assertion below is therefore a pass-today guard, not a wish.
+    The defect read 1 -> 4.9e-2 -> 1.2e-3 -> ... -> 4.0e-10 while each block was applied
+    directly. PR #24 landed the pre-norm residual stack (per-block LayerNorm + residual add
+    + a final norm), and that is what holds the ladder at O(1) - so this is a pass-today
+    guard, not a wish. It is a *replay* rather than a call to ``forward()`` only because it
+    needs the RMS between blocks; ``_separator_hidden_rms`` asserts the structure it replays
+    so the two cannot drift apart again.
     """
     rms = _separator_hidden_rms(cfg, audio)
     for i, value in enumerate(rms):
@@ -127,7 +133,11 @@ def test_masks_carry_content(cfg, audio):
         hidden = sep.final_norm(hidden)
         stacked = torch.stack([head(hidden) for head in sep.mask_heads.values()], dim=0)
         # Same normalisation forward() applies, so the numbers below describe the
-        # masks that actually reach the stems (SEP-1's softmax partition).
+        # masks that actually reach the stems (SEP-1's softmax partition). main's
+        # version assumed independent sigmoids, which is only true under
+        # `separator.mask_normalization: independent` - at the shipped default the mask
+        # heads are softmax-partitioned, and a test that models the other branch measures
+        # a model that is not running.
         masks = (
             torch.softmax(stacked, dim=0)
             if sep.mask_normalization == "softmax"

@@ -548,6 +548,47 @@ def test_the_documented_confidence_lane_is_the_one_the_writer_emits():
     ), "docs promise CC#127 for confidence, which the writer never emits:\n" + "\n".join(offenders)
 
 
+def test_field_names_named_around_the_schema_are_delivered_keys():
+    """DOC-3: a field name in prose is as much a contract as a row in the table.
+
+    PR #24's confidence section explained that ``avg_confidence`` and
+    ``calibrated_confidence`` are both 0.0 for an empty render "and ``notes_total`` /
+    ``total_notes`` say whether the render carried anything" - and ``notes_total`` is a
+    key no code path emits. The schema guard above could not see it: it parses the rows
+    under ``## Processing Report Schema`` only, so a field named in any other section was
+    free to be fictional. This closes that gap by treating every backticked
+    snake_case token in the report/confidence sections as a claimed key.
+
+    Three tokens in the schema section are documented *values*, not keys, and are named
+    here rather than excluded by a fuzzier rule: ``null`` is the JSON literal the
+    non-finite policy delivers, and ``centroid_separation_proxy_not_si_sdr`` /
+    ``polyphonic_key_pressure`` are the strings ``metric_semantics`` and
+    ``confidence_encoding`` carry. A dotted name (``main._content_factor``,
+    ``processing_report.json``) is a module or a file, and the token regex skips it.
+    """
+    doc = (ROOT / "API_DOCUMENTATION.md").read_text(encoding="utf-8")
+    emitted = set(_report().as_dict())
+    documented_table = set(re.findall(r"^\|\s*`([a-z_]+)`\s*\|", doc, re.M))
+    values_not_keys = {
+        "null",
+        "centroid_separation_proxy_not_si_sdr",
+        "polyphonic_key_pressure",
+    }
+    stale: list[str] = []
+    for section in re.split(r"^## ", doc, flags=re.M):
+        title = section.splitlines()[0].strip() if section.strip() else ""
+        if not title or not any(w in title.lower() for w in ("report", "confidence")):
+            continue
+        for token in set(re.findall(r"`([a-z][a-z0-9_]*)`", section)):
+            if token in emitted | documented_table | values_not_keys:
+                continue
+            stale.append(f"## {title}: `{token}`")
+    assert not stale, (
+        "API_DOCUMENTATION.md names field(s) the report does not deliver - an integrator "
+        "that codes against this line gets a KeyError:\n" + "\n".join(sorted(stale))
+    )
+
+
 def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path, monkeypatch):
     """`processing_report.json` is a paid artefact; its key set is a contract.
 

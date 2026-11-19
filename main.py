@@ -15,6 +15,7 @@ their own stems, not one copied to both.
 """
 
 import logging
+import math
 import os
 
 import numpy as np
@@ -359,6 +360,9 @@ class StemMidiModel(nn.Module):
             separation_proxy=float(torch.nanmean(sep_metrics[:, 0].float()).item()),
             phase_coherence=float(torch.nanmean(sep_metrics[:, 1].float()).item()),
             avg_confidence=avg_confidence,
+            calibrated_confidence=self._calibrated_confidence(
+                guitar_meta, bass_meta, guitar_stem, bass_stem
+            ),
             artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             # GATE-3: the gate must be able to refuse an empty render. Both
@@ -406,6 +410,81 @@ class StemMidiModel(nn.Module):
 
         return outputs
 
+    def _calibrated_confidence(
+        self,
+        guitar_meta: dict,
+        bass_meta: dict,
+        guitar_stem: torch.Tensor,
+        bass_stem: torch.Tensor,
+    ) -> float:
+        """Note-weighted confidence after the content guard (CONF-1).
+
+        Each stem's raw ``avg_confidence`` is weighted by the evidence that the
+        stem carries notes at all — tonality x crest factor, see
+        :meth:`_content_factor`. Silence keeps 0; a clipped square or white
+        noise is discounted to near zero; clean material is untouched.
+        """
+        weighted = 0.0
+        notes = 0
+        for meta, stem in ((guitar_meta, guitar_stem), (bass_meta, bass_stem)):
+            n = int(meta["summary"]["total_notes"])
+            if n == 0:
+                continue
+            weighted += float(meta["summary"]["avg_confidence"]) * n * self._content_factor(stem)
+            notes += n
+        return weighted / notes if notes else 0.0
+
+    def _content_factor(self, stem: torch.Tensor) -> float:
+        """How much evidence there is that this stem carries real notes (CONF-1).
+
+        The confidence head is untrained, and measured on the small CPU config
+        it scores a hard-clipped square (0.52) and white noise (0.51) *above*
+        clean music (0.30). Every quality tier reads that number, so it cannot
+        be reported raw. Two reference-free measurements - both already computed
+        elsewhere in the pipeline - decide how much of the head's opinion to
+        keep:
+
+        * **tonality** (1 - Wiener entropy of the stem's spectrum): ~1 for a
+          tone or a chord, ~0.7 for a square wave, ~0.2 for white noise;
+        * **crest factor** (peak/RMS in dB): 3 dB for a sine, 10-20 dB for
+          music, ~0 dB for a clipped square.
+
+        The product is in [0, 1] and multiplies the per-frame confidence, so
+        silence stays 0, distortion cannot outrank material and noise is
+        discounted to near zero. It is a guard on *evidence*, not a
+        calibration: it cannot make the head trustworthy, it only stops the
+        head from rewarding degradation.
+        """
+        stem = stem.detach().float()
+        if stem.numel() == 0:
+            return 0.0
+        peak = float(stem.abs().max())
+        rms = float(torch.sqrt(torch.mean(stem**2)))
+        if peak <= 0.0 or rms <= 0.0:
+            return 0.0
+        crest_db = 20.0 * math.log10(peak / rms)
+        crest_factor = max(0.0, min(1.0, (crest_db - 0.5) / 2.5))
+        if crest_factor == 0.0:
+            return 0.0
+        try:
+            n_fft = int(self.cfg["audio"]["n_fft"])
+            hop = int(self.cfg["audio"]["hop_length"])
+            window = torch.hann_window(n_fft)
+            spec = torch.stft(
+                stem.reshape(1, -1), n_fft=n_fft, hop_length=hop, window=window, return_complex=True
+            )
+            mag = torch.abs(spec).transpose(1, 2)  # (1, T_f, F)
+            power = mag.clamp(min=0) + 1e-12
+            flatness = torch.exp(torch.log(power).mean(dim=-1)) / power.mean(dim=-1).clamp(
+                min=1e-12
+            )
+            energy = mag.pow(2).sum(dim=-1)
+            tonality = (1.0 - flatness).clamp(0.0, 1.0) * (energy > 1e-12).to(flatness.dtype)
+            tonality = float(tonality.mean())
+        except (RuntimeError, ValueError):  # stem shorter than one window
+            tonality = 0.0
+        return max(0.0, min(1.0, tonality)) * crest_factor
+
     def _enhance(self, tr: dict, stem: torch.Tensor) -> tuple[dict, torch.Tensor]:
         """Convert a transcription dict into injector-enhanced MIDI metadata.
 
@@ -431,6 +510,7 @@ class StemMidiModel(nn.Module):
                 tr["velocity"],
                 confidence,
                 tr.get("expression"),
+                frame_energy=energy,
             )
         enhanced = self.confidence_injector.inject_midi_metadata(events or [], conf_flat, energy)
         return enhanced, confidence
@@ -592,7 +672,15 @@ class StemMidiModel(nn.Module):
     # Decoding
     # ------------------------------------------------------------------
 
-    def _logits_to_midi(self, onset_logits, pitch_logits, velocity, confidence, expression=None):
+    def _logits_to_midi(
+        self,
+        onset_logits,
+        pitch_logits,
+        velocity,
+        confidence,
+        expression=None,
+        frame_energy=None,
+    ):
         """Convert network outputs to a FLAT MIDI event list.
 
         Onset peak-picking (H-6): sigmoid probability is thresholded and an
@@ -607,6 +695,18 @@ class StemMidiModel(nn.Module):
         note. Velocity/confidence are sampled at the crossing frame;
         ``onset_refractory_frames: 0`` disables the suppression entirely
         (every above-threshold frame fires - the pre-H-6 behavior).
+
+        Content gate (TRANS-1): when ``frame_energy`` is passed - it always is, from
+        :meth:`_enhance` - a candidate frame must also carry signal, defined as
+        ``energy >= transcriber.content_floor * peak`` (default ``1e-3`` of the loudest
+        frame in the stem). An onset head that fires on digital silence therefore cannot
+        become a note, which is the half of TRANS-1 the refractory window did not address:
+        before the gate, silence rendered 0 notes only because the untrained head happened
+        to sit under 0.5 (measured: avg_confidence 0.650 with 0 notes) - luck, not a
+        decision. A stem whose peak energy is 0 returns ``[]`` outright. Note the floor is
+        relative to the *loudest* frame, so a very quiet but real performance is not
+        gated away; it is deliberately a code default and appears in no
+        ``configs/model_config*.yaml``, so setting it there does nothing until someone adds it.
 
         Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold``
         is set (production configs set 0.5): every pitch whose sigmoid
@@ -681,13 +781,29 @@ class StemMidiModel(nn.Module):
                 )
             chord_probs = torch.sigmoid(pitch_logits)  # (B, T, V)
 
-        # Rising-edge selection (H-6): a candidate survives only when at least
+        content_ok = None
+        if frame_energy is not None:
+            energy = frame_energy.detach()
+            # Accept (T,), (B, T) or (B, 1, T): the callers pass the injector's
+            # flat per-frame energy, which has no batch dimension.
+            energy = (
+                energy.reshape(1, -1) if energy.dim() <= 1 else energy.reshape(energy.shape[0], -1)
+            )
+            peak = float(energy.max()) if energy.numel() else 0.0
+            if peak <= 0.0:
+                return []  # nothing but silence: no frame can carry a note
+            floor = float(tcfg.get("content_floor", 1e-3)) * peak
+            content_ok = energy >= floor  # (N, T) bool
+
+        # Rising-edge selection (H-6): keep a candidate only when at least
         # `refractory` below-threshold frames separate it from the previous one.
         # Accepted frames are collected per batch FIRST, because note length is
         # derived from the inter-onset spacing (PR #13) and a gap needs two onsets.
         frames_by_batch: dict[int, list[int]] = {}
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():
+            if content_ok is not None and not bool(content_ok[b, min(t, content_ok.shape[1] - 1)]):
+                continue  # no signal in this frame: nothing to transcribe
             previous = last_above.get(b)
             last_above[b] = t
             if previous is not None and (t - previous - 1) < refractory:
@@ -1011,6 +1127,7 @@ class StemMidiModel(nn.Module):
             artifact_flags=artifact_flags,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             total_notes=midi_metadata["summary"]["total_notes"],
+            calibrated_confidence=self._calibrated_confidence(guitar_meta, bass_meta, guitar, bass),
             config=self.cfg,
             model_weights_loaded=self._weights_loaded,
             backend=self.backend_name,
@@ -1486,6 +1603,9 @@ class StemMidiModel(nn.Module):
             separation_proxy=float(final_metrics[0].item()),
             phase_coherence=float(final_metrics[1].item()),
             avg_confidence=avg_confidence,
+            calibrated_confidence=self._calibrated_confidence(
+                guitar_meta, bass_meta, full_guitar, full_bass
+            ),
             artifact_flags=stream_artifacts,
             low_confidence_notes=midi_metadata["summary"]["low_confidence_count"],
             # GATE-3: the gate must be able to refuse an empty render. Both

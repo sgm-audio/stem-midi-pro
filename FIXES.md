@@ -12,7 +12,7 @@ fallback (`models/_mamba_compat.py`), `configs/model_config.yaml`.
 Reproduce with:
 
 ```bash
-python3 -m pytest -q                                  # 400 passed, 4 skipped, 28 xfailed
+python3 -m pytest -q                                  # 464 passed, 4 skipped, 0 xfailed
 python3 scripts/verify_numerics.py                    # block-RMS ladder, masks, mixture consistency
 python3 scripts/verify_midi.py                        # clock, polyphony, durations, CC
 python3 scripts/verify_api.py                         # OOM mapping, untrained gate, JSON guard
@@ -81,6 +81,23 @@ Still-open `@known_bug` ids at this commit (**28 xfail markers**, each an open T
 measured decision (e.g. `CONF-1` — the head scores *degraded* renders *highest*, so a fix means
 calibration, not a threshold).
 
+
+## Round 4 — the last five `@known_bug` locks are closed (backlog now empty)
+
+Measured on this tree, 2 threads, CPU only, pure-torch Mamba, `pipeline_config` grid (n_fft 2048 /
+hop 512).
+
+| ID | Defect (as measured before) | Fix | Evidence after |
+|----|-----------------------------|-----|----------------|
+| **SEP-2** | separator hidden state collapsed geometrically: `1 -> 0.0485 -> 1.2e-3 -> … -> 4.0e-10` (≈2.5e9 total) | the pre-norm residual stack is in `models/mamba_separator.py`; the *guard* was still replaying the pre-fix `hidden = block(hidden)` form, so it measured a stack the model no longer has. It now replays `forward()` exactly (`h = h + block(norm(h))` + final LayerNorm) | 6-block RMS ladder **1.000 → 1.002 → 1.013 → 1.005 → 1.010 → 1.020 → 1.021** |
+| **TRANS-1** | no content test in the decoder: an above-threshold onset field became notes on a silent stem; only the refractory window bounded density | `_logits_to_midi(..., frame_energy=...)` gates every onset on `>= transcriber.content_floor` (default 1e-3) of the loudest frame; wired from `_enhance` with the injector's frame-grid energy; a zero-energy stem returns `[]` before decoding | saturated field (every frame above threshold) on zero energy → **0 notes**; the same field with one loud frame still emits there |
+| **GATE-4** | the "separation" number rewarded distortion: a hard-clipped square scored 17.75 dB vs 0.00 dB for the clean sine it came from, clearing `min_centroid_separation_db=20` on other material | the score is now `centroid_gap × tonality³`, tonality = 1 − Wiener entropy of the input spectrum (the cube is needed because the centroid term saturates at its 30 dB clamp) | clean sine **12.17 dB**, hard-clipped square **7.90 dB**, white noise **0.11 dB**, silence **0.00 dB** |
+| **CONF-1** | the number every tier reads rewarded the wrong content: clipped square 0.5164 and noise 0.5101 vs clean music 0.2998 | tiers now read a new `ProcessingReport.calibrated_confidence` = note-weighted `avg_confidence × content_factor`, where `content_factor` = stem tonality × crest-factor margin (0 for a clipped square, ~0 for noise). `avg_confidence` keeps its contract (mean of emitted-note confidence, per `test_model_confidence_reaches_poly_pressure_unchanged`) and is reported for observability | music **avg 0.9789 / calibrated 0.9771 with 119 notes**; silence, clipped and noise **0.0000 calibrated, 0 notes** (the content gate removes their notes, so the head never gets a vote) |
+
+`TODO.md` §18.1 now has **no open `@known_bug` entries**; the bookkeeping tests were updated for an
+empty backlog (no floor on the marker count — the reverse check, "an open entry must be locked by
+a test", still runs).
+
 ## Still open (deliberately not claimed as fixed)
 
 | # | Item | Why it is still open |
@@ -95,7 +112,7 @@ calibration, not a threshold).
 
 ## Test suite
 
-`pytest -q` → **400 passed, 4 skipped, 28 xfailed, 0 failed** (`main` alone: 345 passed, 37 xfailed).
+`pytest -q` → **464 passed, 4 skipped, 0 xfailed, 0 failed**. The known-bug backlog is empty.
 The 4 skipped tests are `mamba_ssm`-only. The one local failure is the sandbox RSS probe
 (`test_peak_rss_probe_runs_at_all`, it asserts a ceiling this container cannot meet); it passes in CI. `ruff check .` and `black --check .` are clean.
 
@@ -316,3 +333,68 @@ reviewer and fails only if something checks.
 | `scripts/verify_midi.py` | 60 events → polytouch `{60: 114, 64: 51}`; no CC 120–127; marker row `confidence note=60 onset_tick=0 value=0.898`; durations 223 / 4458 ticks; tempo round trip at 500 000 and 1 000 000 µs (960 and 480 ticks/s); tempo map drives frame↔tick at 120 and 60 BPM |
 | `scripts/verify_api.py` | refusal without the override, serving with it, `trained_weights=false`, `model_info` weights-name-only, RFC-8259 JSON guard (`valid=True` / `invalid=True metrics=None`) |
 | `main` @ `c2f960b` measured for comparison | the same four failures this branch fixes are latent there: no test covers the deleted lane guard, and `test_guards_cited_in_the_todo_still_exist` / the `No test lock:` rule do not exist to fail |
+
+
+---
+
+## Round 4 — merging `main` @ `4301891` (PR #24: "close the last four known-bug locks")
+
+`main` moved a fourth time, one day later, and this time it moved *toward* this branch: PR #24
+landed the content gate (TRANS-1), the content-calibrated confidence that the tier now reads
+instead of the raw head (CONF-1), a reference-free separation score (GATE-4) and closed SEP-2 by
+making `tests/test_numerics.py` replay the pre-norm residual stack — the criticism this branch
+raised in round 3. So the conflict surface collapsed to **3 files / 5 hunks**, against 38 in
+round 3, and most of the work was in the *auto*-merged files, where git reports no conflict at
+all and is still wrong.
+
+| File | Hunks | Resolution |
+| --- | ---: | --- |
+| `main.py` | 1 | **main's** side: the `frame_energy` content gate (`content_ok = energy >= transcriber.content_floor * peak`, `return []` when the stem's peak energy is 0), with this branch's `(H-6)` attribution put back on the rising-edge comment main reworded. The grafts from round 3 all survived main's insertion — gap-derived `dur` with the median fallback for the last note, `events.sort((onset_frame, note))`, `round().clamp(1, 127).long()` velocity, the `expression` window `[t, t+dur)` — and there is exactly **one** call site of `_logits_to_midi` (`_enhance`, line 507), so the gate is on by construction everywhere, including the segmented path |
+| `tests/test_numerics.py` | 3 | (a) the ladder replay: **main's** version, whose comment says why replaying the pre-fix form certifies nothing, plus this branch's two-line `final_norm` shape and the structural assert that sits outside the hunk; (b) the docstring: rewritten — main's one-liner plus this branch's history, corrected so the fix is attributed to PR #24 rather than "this branch's separator", and stating that it is a *replay* (it needs the RMS between blocks) guarded by `assert len(sep.block_norms) == len(sep.mamba_blocks)`, not a call to `forward()`; (c) **this branch's** mask block, because main's `# Independent sigmoid masks` is only true under `separator.mask_normalization: independent` — the model reads the config and branches (`models/mamba_separator.py:116-120, 231`, default `softmax`), so a test that hard-codes the other branch measures a model that is not running, which is the identical defect main just fixed two lines above it |
+| `TODO.md` | 1 | the `SEP-2` line, closed on both sides with different words: merged into one entry — this branch's measured body (flat ladder `1.00e+00 … 1.01e+00`, mixture consistency `1.15e-07`) with main's `**RESOLVED**` framing, and its parenthetical corrected: the guard does not "replay `forward()`", it replays *the same structure* and asserts that fact |
+
+### Auto-merged, but still checked
+
+* `tests/test_honesty_bookkeeping.py` merged main's removal of the `@known_bug` **count floor**
+  (`assert len(marked) >= 3`) *below* the eight-line comment this branch wrote explaining that
+  floor — so the file documented a rule it no longer had. Kept main's side (with 0 locks left, a
+  floor is now just a number reviewers are asked to lower every time something is fixed), and
+  rewrote the comment to say who catches a broken scan instead: the two TODO→marker direction
+  rules, which fail on an unexplained zero rather than on a low count.
+* `tests/test_quality_gate_adversarial.py`, `tests/test_pipeline_integrity.py`,
+  `utils/quality_gates.py` (`calibrated_confidence` field + tier reads it, `None` → falls back to
+  `avg_confidence` so hand-built reports keep working), `models/mamba_separator.py`
+  (`centroid_gap × tonality³`), `API_DOCUMENTATION.md`, `README.md` — clean.
+* `TODO.md` §18.1 came out with **no** duplicated ids this time and exactly one open entry
+  (`CPU-3`, which carries its `No test lock:` reason), verified by the duplicate-id scan rather
+  than by eye.
+
+### A new defect in `main`, found and fixed here (DOC-3)
+
+PR #24's new "Confidence: raw head vs the number the tier uses" section told integrators that
+"`notes_total` / `total_notes` say whether the render carried anything at all" — `notes_total` is
+a key **no code path emits** (`grep -c notes_total` over `utils/quality_gates.py`, `api.py`,
+`main.py` → 0, 0, 0; the report delivers `total_notes` and `note_count`). It slipped through the
+existing schema guard because that guard parses only the rows under `## Processing Report Schema`,
+so prose in any other section was unchecked. Fixed twice over: the sentence now names the two real
+keys, and `tests/test_api_zip.py::test_field_names_named_around_the_schema_are_delivered_keys`
+treats every backticked snake_case token in a report/confidence section as a claimed key, naming
+the three documented *values* (`null`, `centroid_separation_proxy_not_si_sdr`,
+`polyphonic_key_pressure`) explicitly instead of excluding them with a fuzzy rule. It fails on the
+old text — that was verified by running it before the prose fix.
+
+`_logits_to_midi`'s docstring also gained the paragraph main's diff did not have: what the content
+gate is, that `frame_energy` is always passed from `_enhance`, why "silence renders 0 notes" went
+from luck (measured: avg_confidence 0.650 with 0 notes) to a decision, and the honest caveat that
+`content_floor` exists only as a code default — it is in no `configs/model_config*.yaml`, so
+setting it there does nothing until someone adds it.
+
+### Measured
+
+| Command | Round 3 (`c2f960b`) | Round 4 (`4301891`) |
+| --- | --- | --- |
+| `pytest -q -m "not cuda" --strict-deps --fail-on-skip` | 472 passed / 1 skipped / 4 xfailed / 0 failed | **477 passed, 1 skipped, 3 deselected, 0 xfailed, 0 failed** (61.7 s) |
+| `main` alone, same venv | 465 / 39 xfailed / 405 collected (round-2 measurement) | **465 passed, 1 skipped, 3 deselected** (62.7 s) |
+| `ruff check .` / `black --fast --check .` / SPDX sweep | clean | clean / clean / 0 missing |
+| `scripts/verify_numerics.py` | ladder flat, proxy `26.62` | ladder flat, mixture consistency `1.15e-07`, chunked-vs-1-pass `0.00e+00`, **proxy `0.1`** for the same random-noise input — the drop *is* GATE-4 working: a noise input no longer scores as separation |
+| `scripts/verify_midi.py` / `scripts/verify_api.py` | exit 0 | exit 0 (polytouch `{60: 114, 64: 51}`, marker row, `tempo_us` at 500 000 / 1 000 000 µs; refusal → override → `trained_weights=false`) |
