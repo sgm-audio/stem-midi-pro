@@ -55,6 +55,22 @@ class MultiResolutionSTFTLoss(nn.Module):
         return loss / len(self.resolutions)
 
 
+def _as_bt(t: torch.Tensor, name: str) -> torch.Tensor:
+    """Coerce an onset-shaped tensor to ``(B, T)`` or explain why it cannot be.
+
+    Onsets are produced as ``(B, T, 1)`` and carried as ``(B, T)``; both are
+    valid, and mixing them broadcasts to ``(B, T, T)`` instead of failing. This
+    is the one place that ambiguity is resolved.
+    """
+    if t.dim() == 3 and t.shape[-1] == 1:
+        return t.squeeze(-1)
+    if t.dim() == 1:
+        return t.unsqueeze(0)
+    if t.dim() != 2:
+        raise ValueError(f"{name} must be (B, T) or (B, T, 1); got {tuple(t.shape)}")
+    return t
+
+
 class PerceptualAudioLoss(nn.Module):
     """Composite loss: MR-STFT + spectral flatness + crest factor + onset alignment.
 
@@ -158,12 +174,15 @@ class PerceptualAudioLoss(nn.Module):
                     pred_confidence.dtype
                 )
                 target_hit = target_onsets_for_confidence.to(pred_confidence.dtype)
+                # Normalise BOTH sides to (B, T) BEFORE comparing. The onset
+                # logits are (B, T, 1) and the dataset target is (B, T), and
+                # `(B, T, 1) == (B, T)` broadcasts to (B, T, T) rather than
+                # raising -- so the "correctness" tensor would be a frame-pair
+                # matrix, the shapes would disagree downstream, and the term
+                # would be silently useless.
+                predicted_hit = _as_bt(predicted_hit, "pred_onsets_for_confidence")
+                target_hit = _as_bt(target_hit, "target_onsets_for_confidence")
                 correct = (predicted_hit == target_hit).to(pred_confidence.dtype)
-                # Normalise to (B, T) so it lines up with the confidence tensor.
-                if correct.dim() == 3 and correct.shape[-1] == 1:
-                    correct = correct.squeeze(-1)
-                if correct.dim() == 1:
-                    correct = correct.unsqueeze(0)
             # A shape mismatch used to fall through SILENTLY, leaving the term at
             # zero -- a loss that quietly does nothing is precisely the defect
             # CONF-1 is about, so it raises instead.

@@ -623,7 +623,7 @@ def test_expression_head_output_reaches_the_midi_when_opted_in(pipeline_config):
 # ---------------------------------------------------------------------------
 
 
-def _saturated_decode(frame_energy=None, refractory=0, floor_db=-60.0):
+def _saturated_decode(frame_energy=None, refractory=0, content_floor=1e-3):
     from main import StemMidiModel
 
     n = 200
@@ -632,7 +632,7 @@ def _saturated_decode(frame_energy=None, refractory=0, floor_db=-60.0):
         "transcriber": {
             "onset_threshold": 0.0,
             "onset_refractory_frames": refractory,
-            "energy_floor_db": floor_db,
+            "content_floor": content_floor,
         }
     }
     onset = torch.full((1, n, 1), 0.5)
@@ -669,7 +669,7 @@ def test_the_energy_gate_removes_only_frames_that_carry_no_energy():
 def test_the_energy_gate_is_level_independent():
     """A quiet but real recording must not be gated away.
 
-    The floor is relative to the stem's own peak frame, so scaling the whole
+    The floor is a FRACTION of the stem's own peak frame, so scaling the whole
     take down by six orders of magnitude changes nothing: an absolute floor
     would delete quiet music, which is the mistake this avoids.
     """
@@ -690,8 +690,13 @@ def test_frames_far_below_peak_are_dropped():
 
 
 def test_the_energy_floor_is_configurable():
-    """A stricter floor removes more; the knob is honoured."""
+    """A stricter floor removes more; the knob is honoured.
+
+    ``transcriber.content_floor`` is a fraction of the loudest frame, so it is
+    expressed in amplitude: 1e-3 is -60 dB and 0.1 is -20 dB.
+    """
     energy = torch.full((1, 200), 0.1)
-    energy[0, 150:] = 1e-4  # 30 dB down
-    assert len(_saturated_decode(frame_energy=energy, floor_db=-60.0)) == 200
-    assert len(_saturated_decode(frame_energy=energy, floor_db=-20.0)) == 150
+    energy[0, 150:] = 1e-3  # 40 dB below the peak, i.e. ratio 1e-2
+    # Default floor 1e-3 keeps it; a floor of 0.1 is 100x stricter and drops it.
+    assert len(_saturated_decode(frame_energy=energy, content_floor=1e-3)) == 200
+    assert len(_saturated_decode(frame_energy=energy, content_floor=0.1)) == 150

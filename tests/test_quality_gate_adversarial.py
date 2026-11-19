@@ -257,7 +257,7 @@ def test_silence_cannot_earn_a_separation_score(real_separator, synth):
 
 @pytest.mark.memory
 def test_confidence_does_not_reward_degraded_content(pipeline_config, synth, make_wav):
-    """CONF-1 (fixed): degenerate input must not earn a better tier than music.
+    """Regression guard for CONF-1: degenerate input must not score like music.
 
     The original finding was that the confidence head had no loss term, so it
     reported ~0.9555 for everything and the *worst* renders scored no worse than
@@ -290,28 +290,40 @@ def test_confidence_does_not_reward_degraded_content(pipeline_config, synth, mak
         with torch.inference_mode():
             out = model.process_audio_file(path)
         rep = out["report"]
-        conf = rep.avg_confidence
+        # CONF-1: the tier reads the CONTENT-CALIBRATED number, not the raw head
+        # (avg_confidence is still reported for observability and is asserted
+        # separately by test_pipeline_integrity).
+        conf = rep.calibrated_confidence
         scores[case] = (conf, rep.quality_tier.value)
 
     finite = [c for c, _ in scores.values() if not math.isnan(c)]
     assert len(finite) == len(scores), f"a metric went non-finite: {scores}"
+    # (a) ORDERING: the number the tier reads must rank music above degenerate
+    # input. This is what CONF-1 was about -- the raw head ranked a clipped
+    # square above clean music, so the calibrated number is what gets pinned.
+    music = scores["music"][0]
+    worst = max(scores["clipped"][0], scores["noise"][0])
+    assert music > worst, (
+        "calibrated_confidence: "
+        + ", ".join(f"{k}={v[0]:.4f}({v[1]})" for k, v in scores.items())
+        + f" — clean music scores {music:.4f} while the clipped/noise renders score "
+        f"{worst:.4f}; the tier input rewards degradation instead of penalising it"
+    )
 
-    # The TIER is what the user experiences, and with an untrained checkpoint it
-    # is where honesty has to live: no degenerate render may be offered as
-    # deliverable. Confidence ordering alone cannot be asserted here, because a
-    # randomly initialised head (this fixture) genuinely has no opinion -- that
-    # is the finding, and it is now handled by requiring corroboration instead
-    # of trusting the number.
+    # (b) THE BADGE: whatever the number says, no degenerate render may be
+    # offered as deliverable. Belt and braces with (a) on purpose -- a future
+    # recalibration that preserves ordering but still grants a badge would slip
+    # past (a) alone, and the badge is what the user sees.
     for case in ("silence", "clipped", "noise"):
         assert (
             scores[case][1] != "studio"
-        ), f"{case} was graded studio (avg_confidence={scores[case][0]:.4f}): " + ", ".join(
+        ), f"{case} was graded studio (confidence={scores[case][0]:.4f}): " + ", ".join(
             f"{k}={v[0]:.4f}({v[1]})" for k, v in scores.items()
         )
     # Silence specifically must never clear the confidence bar at all: an empty
     # render is not a render that the model can be confident about.
     assert scores["silence"][0] < 0.1, (
-        f"silence reported avg_confidence={scores['silence'][0]:.4f} "
+        f"silence reported calibrated_confidence={scores['silence'][0]:.4f} "
         f"(tier {scores['silence'][1]}) — an empty render should not be within "
         f"{scores['silence'][0]:.2f} of a musical one"
     )

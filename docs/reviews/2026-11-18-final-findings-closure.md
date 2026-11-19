@@ -4,7 +4,8 @@
 **Branch:** `arena/f0de80e9-stem-midi-pro` (from `c2f960b`)
 **Scope:** `TRANS-1`, `CONF-1`, `GATE-4`, `SEP-1`, `SEP-2`, `CPU-3`, `EXPR-1` — the
 seven findings the previous remediation left open.
-**Result:** `493 passed, 4 skipped, 0 failed, 0 xfailed`; `ruff` and `black` clean.
+**Result:** `496 passed, 4 skipped, 0 failed, 0 xfailed`; `ruff` and `black` clean.
+The 4 skips are `mamba_ssm` (a CUDA-only optional dependency) and nothing else.
 
 The previous document closed 36 findings and left seven open, each with a reason.
 The reasons were reasonable *at the time* and four of them turned out to be wrong.
@@ -311,3 +312,96 @@ Each guard was mutation-tested: reverting the fix and confirming the guard fails
 * **CPU-3's** decision rests on the shipped 50%-overlap crossfaded path. A
   different chunking strategy (no overlap, or much longer chunks) would want its
   own measurement.
+
+---
+
+## Addendum: reconciling with PR #24 (merged upstream mid-work)
+
+While this branch was open, `main` gained PR #24, which independently closed the
+same four findings (`SEP-2`, `TRANS-1`, `GATE-4`, `CONF-1`) by different routes.
+Both branches are now one, and the merge is not a coin flip — where the two
+implementations differ they were measured against each other.
+
+### GATE-4: the metric vs. the patch
+
+| | upstream (PR #24) | this branch |
+|---|---|---|
+| reported number | `centroid_gap × tonality³` | mask crosstalk |
+| fixes the clipping inversion? | yes — tonality suppresses distorted input | yes — crosstalk does not respond to it |
+| bounded / orientation | no; still 0–30 dB, higher-better | yes; [0, 1], lower-better |
+| can distinguish separation from non-separation? | yes (oracle 28.6 vs flat 0.0) | yes (oracle 0.244 vs flat 0.667) |
+
+Both work. The merged code reports **crosstalk** — not because the tonality gate
+is wrong, but because crosstalk has a defined scale (flat masks are exactly
+2/3 by arithmetic) whereas the centroid term remains an affine map of a
+bin-unit distance clamped to an arbitrary [0, 30]. The tonality value and the
+gated centroid proxy are still computed and exposed as
+`last_tonality` / `last_tonality_gated_proxy`, so the comparison above is
+reproducible rather than a claim.
+
+**One thing worth recording about the upstream fix:** clipping is not the only
+thing that lowers tonality — a full chord does too. Gating the score by
+`tonality³` therefore discounts genuinely good separations of harmonically rich
+material. Measured: a two-tone signal reads tonality 0.995, so the effect is
+small for tones, but it is a coupling between *what the input is* and *how well
+it was separated*. Crosstalk has no such coupling. That is the whole reason to
+prefer it, and it is a small difference, not a large one.
+
+### CONF-1: two halves, and both were needed
+
+Upstream added `ProcessingReport.calibrated_confidence` = raw head × tonality ×
+crest factor, and the tiers now read that. This is a real improvement: it makes
+the bad cases (clipped, noise, silence) score near zero, and the ordering
+assertion in `test_confidence_does_not_reward_degraded_content` passes.
+
+But it does not fix the head, and upstream says so in its own docstring: *"It is
+a guard on evidence, not a calibration: it cannot make the head trustworthy."*
+The head still had no loss term, so it would have stayed at its random
+initialisation forever.
+
+The merge keeps both:
+
+* `calibrated_confidence` decides the tier (upstream's contribution);
+* the `confidence` loss term now **actually reaches the head** (this branch's).
+
+The second half exposed a further defect that neither branch had caught. The
+loss term existed and `tests/test_confidence_honesty.py` passed, but
+`StemMidiModel._forward_impl` never passed `pred_confidence` or the onset
+targets to `PerceptualAudioLoss` — so in the *real training loop* the term was
+dead code and the head would still have received no gradient. A green test
+covering a function nothing calls is not coverage.
+
+Fixed by wiring it through, and the new `tests/test_confidence_is_trained.py`
+asserts the wiring rather than the formula: the term appears in a real
+`forward()` loss dict, is non-zero, and `backward()` puts a gradient on every
+`confidence_head` weight (measured: 4.1e+00, 2.6e-01, 2.9e+00, 4.2e-01). Two of
+its three tests fail if the wiring is removed.
+
+Wiring it also surfaced the `(B,T,1) == (B,T)` broadcast bug for the second
+time in this finding: the comparison expanded to `(B,T,T)`, and the shape guard
+added earlier is what caught it. Both sides are now normalised through
+`_as_bt()` before any comparison.
+
+### TRANS-1: same mechanism, different unit
+
+Upstream's `transcriber.content_floor` (default `1e-3`) and this branch's
+`transcriber.energy_floor_db` (default −60 dB) are the same gate: −60 dB in
+amplitude *is* 1e-3. Upstream's is kept (it was already wired and tested) and
+this branch's five tests were ported onto it, adding the cases upstream did not
+cover: a 10-frame silent gap inside real audio (200 → 190, exactly the gap),
+level-independence across six orders of magnitude, and a configurable floor.
+
+### SEP-2
+
+Same conclusion, reached twice, from the same mistake: the guard replayed the
+bare mixer chain instead of `forward()`'s residual stack. Upstream fixed the
+guard too. Both sets of assertions are kept.
+
+### What the merge cost, honestly
+
+`git merge` reported seven conflicted files and `main.py` ended up with **two
+independent TRANS-1 gates** — one per branch — both applied to every frame. That
+is a live bug that neither branch's tests could see, because each branch only
+tested its own gate. It was caught by reading the merged file, not by the suite.
+The duplicate was removed and the remaining implementation now carries both
+branches' test coverage.

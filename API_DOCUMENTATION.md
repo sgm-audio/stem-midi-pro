@@ -152,6 +152,18 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 
 **Numeric values may be `null` rather than `NaN`.** A non-finite metric (which the pipeline really produces for silent, DC-offset and non-finite input) is delivered as `null` so the document stays valid RFC 8259 — bare `NaN` is not JSON and makes `JSON.parse()` reject the whole download.
 
+## Confidence: raw head vs the number the tier uses
+
+`processing_report.json` carries two confidences:
+
+| Field | Meaning |
+|---|---|
+| `avg_confidence` | Mean of the emitted notes' confidence, exactly as the head produced it. Observability only — measured on the small CPU config the untrained head ranks a clipped square (0.52) and white noise (0.51) *above* clean music (0.30). |
+| `calibrated_confidence` | `avg_confidence` scaled by a content factor (stem tonality × crest factor, `main._content_factor`). **This is the only number the quality tier reads.** Silence and distortion-calibrated material land near 0; clean material is unchanged. |
+
+Both are `0.0` when no notes were emitted, and `notes_total` / `total_notes` say whether the render
+carried anything at all.
+
 ## Quality Tiers
 
 1. **Studio gate** — `avg_confidence ≥ 0.85`, no artifact flags, and `low_confidence_notes == 0`: direct download with a warning to verify; the reported proxy is observability only and this is not SI-SDR certification.

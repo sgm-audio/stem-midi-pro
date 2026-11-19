@@ -76,6 +76,9 @@ def _separator_hidden_rms(cfg, audio):
         )
         hidden = sep.input_proj(torch.abs(spec).transpose(1, 2))
         rms = [float(hidden.pow(2).mean().sqrt())]
+        # Replay exactly what forward() does: pre-norm residual blocks plus a
+        # final LayerNorm (C-1). Replaying the pre-fix `hidden = block(hidden)`
+        # form here would measure a stack the model no longer has.
         for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
             hidden = hidden + block(norm(hidden))
             rms.append(float(hidden.pow(2).mean().sqrt()))
