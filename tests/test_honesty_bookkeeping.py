@@ -43,6 +43,7 @@ OWNED = (
     "test_quality_gate_adversarial",
     "test_checkpoint_load",
     "test_dataset_loaders",
+    "test_numerics",
 )
 
 _ID = r"[A-Z]{2,6}-\d{1,3}"
@@ -266,6 +267,92 @@ def test_guards_cited_in_the_todo_still_exist() -> None:
         f"TODO.md 18.1 cites guards that no longer exist: {missing}. Either the test was "
         "renamed (update the citation) or the regression coverage was deleted (put it back "
         "— a fixed defect without its guard is a defect on loan)"
+    )
+
+
+# `importorskip` on a *declared* dependency is the audit's founding defect: torch, numpy,
+# soundfile, mido, pyyaml, fastapi, httpx, librosa are all in requirements*.txt, so a host
+# missing one has a broken environment and must be told, not handed a green skip. The ten
+# OWNED files above are held to zero. The rest of the suite still carries
+# _LEGACY_IMPORTORSKIP sites, because converting 31 files in one PR would bury the fixes
+# it ships beside - so the debt is capped instead, and the cap only moves down. The count
+# is taken from the syntax tree, not from grep: a docstring that *mentions* importorskip
+# (this file does) must not be part of the measurement.
+_LEGACY_IMPORTORSKIP = 65  # AST-counted, 2026-11-20, 29 files
+_DECLARED = (
+    "torch",
+    "numpy",
+    "soundfile",
+    "librosa",
+    "mido",
+    "yaml",
+    "fastapi",
+    "httpx",
+)
+
+
+def test_importorskip_on_declared_deps_does_not_grow() -> None:
+    """A ratchet over the files 18.1's audit has not converted yet.
+
+    `mamba_ssm` is genuinely optional (it needs CUDA to build) and is not counted; every
+    name in `_DECLARED` is in requirements*.txt, so gating on it converts "the host is
+    broken" into "these N tests were skipped" (TODO.md FAKE-2). The fix is
+    `tests.honesty.require(name,
+    purpose, module_level=True)`, which fails under `--strict-deps` and skip-with-reasons
+    otherwise. 65 sites across 29 files remain (test_api_validation.py and
+    test_review_fixes.py carry 7 each). Lower `_LEGACY_IMPORTORSKIP` in the same commit as
+    each conversion; a count below the cap is a leftover, not a licence to stop.
+    """
+    found: list[str] = []
+    for path in sorted(TESTS.glob("*.py")):
+        if path.stem in OWNED:
+            continue  # zero tolerance there, checked by test_no_escape_hatches_in_the_tests_i_own
+        source = path.read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call) or not _dotted(node.func).endswith("importorskip"):
+                continue
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Constant) and first.value in _DECLARED:
+                found.append(f"{path.name}:{node.lineno}: importorskip({first.value!r})")
+    assert len(found) <= _LEGACY_IMPORTORSKIP, (
+        f"{len(found)} importorskip sites on declared dependencies, cap is "
+        f"{_LEGACY_IMPORTORSKIP}. Use tests.honesty.require(...) instead - a declared dep "
+        "going missing has to fail, not skip:\n" + "\n".join(found[:12])
+    )
+
+
+def test_181_lists_each_defect_id_exactly_once() -> None:
+    """Regression guard for DOC-4: a duplicated row forks the index, and merging branches
+    is how it happens.
+
+    Two branches that each append to 18.1 concatenate cleanly: git sees no conflict when
+    the two copies of an entry land on different lines, so the file ends up with ``MIDI-5``
+    twice - which is what `main` @ `abd261f` carried, both rows `- [x]`, one justifying
+    itself with a pointer to the remediation plan and the other with "upstream did it in
+    `api.py`". A reader cannot tell which is authoritative, and the id stops being a join
+    key: a test docstring saying "regression guard for MIDI-5", a commit message and the
+    index are supposed to agree through exactly one row.
+
+    Round 3 removed four such duplicates (`MIDI-4`, `MIDI-7`, `EXPR-1`, `MIDI-5`) by hand
+    with no rule behind the repair, so the class came back with the next merge. This is
+    that rule. The two idioms to fix a failure here: keep ONE row per id, and when the two
+    halves disagree about *why* it is closed, merge the justifications rather than picking
+    a side - the measured one wins if only one of them has a number in it.
+    """
+    seen: dict[str, list[str]] = {}
+    for line in _todo_181():
+        head = re.match(r"^- \[[ x]\] \*\*([^*]+)\*\*", line.strip())
+        if head is None:
+            continue
+        for tok in head.group(1).split("/"):
+            if re.fullmatch(_ID, tok):
+                seen.setdefault(tok, []).append(line.strip())
+    forked = {i: rows for i, rows in seen.items() if len(rows) > 1}
+    assert not forked, (
+        f"TODO.md 18.1 lists {sorted(forked)} more than once - the id is the join key "
+        "between a guard's docstring, the commit that fixed it and this index, so a "
+        "duplicate makes them disagree:\n"
+        + "\n".join(f"  {i}: {r[:120]}" for i, rows in sorted(forked.items()) for r in rows)
     )
 
 

@@ -634,18 +634,21 @@ def test_expression_head_output_reaches_the_midi_when_opted_in(pipeline_config):
 # ---------------------------------------------------------------------------
 
 
+_UNSET = object()
+
+
 def _saturated_decode(frame_energy=None, refractory=0, content_floor=1e-3):
     from main import StemMidiModel
 
     n = 200
-    model = StemMidiModel.__new__(StemMidiModel)
-    model.cfg = {
-        "transcriber": {
-            "onset_threshold": 0.0,
-            "onset_refractory_frames": refractory,
-            "content_floor": content_floor,
-        }
+    tr = {
+        "onset_threshold": 0.0,
+        "onset_refractory_frames": refractory,
     }
+    if content_floor is not _UNSET:  # _UNSET = key absent, so the code's fallback is what runs
+        tr["content_floor"] = content_floor
+    model = StemMidiModel.__new__(StemMidiModel)
+    model.cfg = {"transcriber": tr}
     onset = torch.full((1, n, 1), 0.5)
     pitch = torch.zeros(1, n, 128)
     pitch[0, :, 60] = 1.0
@@ -698,6 +701,61 @@ def test_frames_far_below_peak_are_dropped():
     frames = {int(e["onset_frame"]) for e in events}
     assert len(events) == 150, f"expected 150 notes, got {len(events)}"
     assert not frames & set(range(150, 200))
+
+
+def test_a_content_floor_outside_the_unit_interval_is_a_config_error():
+    """Regression guard for CFG-1 (domain): the floor is a fraction of the loudest frame, so
+    5.0 is not "stricter" - it is silence.
+
+    1.0 already means "only the peak frame of the stem can carry a note", and 0.0 means
+    "no gate". A value above 1 makes every frame fail (`energy >= 5 * peak`) and the render
+    comes back empty with no error anywhere, which is a worse failure than refusing to start.
+    The sibling knob `pitch_threshold` has validated its own domain for the same reason.
+    """
+    energy = torch.full((1, 200), 0.5)
+    for bad in (5.0, 1.0001, -0.5):
+        with pytest.raises(ValueError, match="content_floor"):
+            _saturated_decode(frame_energy=energy, content_floor=bad)
+    # The two ends of the legal range stay legal, with their documented meanings.
+    assert len(_saturated_decode(frame_energy=energy, content_floor=0.0)) == 200
+    assert len(_saturated_decode(frame_energy=energy, content_floor=1.0)) == 200
+
+
+def test_the_shipped_content_floor_is_the_fallback_the_code_uses():
+    """Regression guard for CFG-1 (agreement): configs/*.yaml advertise 0.001 and the code
+    default has to agree, or the docs lie.
+
+    `_logits_to_midi` reads `transcriber.content_floor` with a `1e-3` fallback, so a render
+    from a config that omits the key (the CLI's tiny fixtures, a hand-built dict in a test)
+    is supposed to decode exactly like the shipped configs. Two probes, one either side of
+    the boundary, so a default drifting up OR down fails: frames at 5e-3 of the peak must
+    survive, frames at 5e-5 must not - and the config-less path must match the yaml value
+    in both cases.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    shipped = {}
+    for name in ("model_config.yaml", "model_config.cpu.yaml", "model_config.mamba.yaml"):
+        cfg = yaml.safe_load((root / "configs" / name).read_text(encoding="utf-8"))
+        shipped[name] = cfg["transcriber"]["content_floor"]
+    assert set(shipped.values()) == {0.001}, shipped
+
+    loud = torch.full((1, 200), 0.1)
+    above = loud.clone()
+    above[0, 100:] = 0.1 * 5e-3  # 5e-3 of the peak: over the 1e-3 floor
+    below = loud.clone()
+    below[0, 100:] = 0.1 * 5e-5  # 5e-5: under it
+    assert len(_saturated_decode(frame_energy=above, content_floor=_UNSET)) == 200
+    assert len(_saturated_decode(frame_energy=below, content_floor=_UNSET)) == 100
+    assert _saturated_decode(frame_energy=above, content_floor=_UNSET) == _saturated_decode(
+        frame_energy=above, content_floor=0.001
+    )
+    assert _saturated_decode(frame_energy=below, content_floor=_UNSET) == _saturated_decode(
+        frame_energy=below, content_floor=0.001
+    )
 
 
 def test_the_energy_floor_is_configurable():

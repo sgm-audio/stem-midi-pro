@@ -47,6 +47,11 @@ transcriber:
   # Chord-aware decoding: every pitch whose sigmoid exceeds this fires
   # its own note_on at an accepted onset frame; null = legacy single-argmax.
   pitch_threshold: 0.5
+  # Content gate (TRANS-1): a fired onset also needs energy in its frame, measured as
+  # `energy >= content_floor * (loudest frame in this stem)`. Level-independent by
+  # construction, so a quiet take is not gated away. 0 disables the gate; outside
+  # [0, 1] is a config error, not an empty render.
+  content_floor: 0.001
 
 training:
   precision: "fp32"

@@ -184,6 +184,7 @@ often enough that this is a normal path, not a corner case).
 | Setting (model config) | Default | Effect |
 |---|---|---|
 | `midi.tempo` | `auto` | `auto` estimates the beat grid from the upload (`utils/tempo.py`; falls back to 120 BPM when there is no measurable pulse), `fixed` always writes 120 BPM, a number is read as BPM. The estimate never changes absolute note times — onset ticks are converted with the same tempo that is written into `set_tempo`. |
+| `transcriber.content_floor` | `0.001` | Fraction of the stem's loudest frame a candidate onset must reach to become a note (TRANS-1). Level-independent, so a quiet take keeps its notes; `0` disables the gate, and a value outside `[0, 1]` is refused at startup instead of returning an empty render. Present in all three `configs/model_config*.yaml`; `main.py` falls back to the same `1e-3` when a config omits the key. |
 | `midi.include_expression` | `false` | When `true`, exported files carry the expression head's bend/vibrato/slide as pitch-wheel + CC. The head is untrained, so each event tags `expression.source`; values are omitted by default rather than invented. |
 
 `/model-info` and the processing report stay unchanged; the detected tempo is reported per stem

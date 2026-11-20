@@ -727,8 +727,9 @@ class StemMidiModel(nn.Module):
         to sit under 0.5 (measured: avg_confidence 0.650 with 0 notes) - luck, not a
         decision. A stem whose peak energy is 0 returns ``[]`` outright. Note the floor is
         relative to the *loudest* frame, so a very quiet but real performance is not
-        gated away; it is deliberately a code default and appears in no
-        ``configs/model_config*.yaml``, so setting it there does nothing until someone adds it.
+        gated away. The key is ``transcriber.content_floor``, present in all three
+        ``configs/model_config*.yaml`` at its default ``0.001``; ``0`` disables the gate and
+        anything outside ``[0, 1]`` raises instead of silently returning no notes.
 
         Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold``
         is set (production configs set 0.5): every pitch whose sigmoid
@@ -805,6 +806,19 @@ class StemMidiModel(nn.Module):
 
         content_ok = None
         if frame_energy is not None:
+            # The floor is a FRACTION of the stem's own loudest frame, which is what makes
+            # it level-independent (a quiet take keeps its notes) and what bounds it: 0
+            # means "no gate", 1.0 means "only the peak frame". Anything outside [0, 1] is
+            # a config error rather than a silently empty render - the same treatment
+            # `pitch_threshold` gets above.
+            floor_ratio = float(tcfg.get("content_floor", 1e-3))
+            if not 0.0 <= floor_ratio <= 1.0:
+                raise ValueError(
+                    f"transcriber.content_floor must be a fraction of the loudest frame's "
+                    f"energy, in [0, 1]; got {floor_ratio}. Above 1.0 no frame can pass and "
+                    "every render comes back with zero notes; below 0 is meaningless because "
+                    "0 already means 'gate disabled'."
+                )
             energy = frame_energy.detach()
             # Accept (T,), (B, T) or (B, 1, T): the callers pass the injector's
             # flat per-frame energy, which has no batch dimension.
@@ -814,7 +828,7 @@ class StemMidiModel(nn.Module):
             peak = float(energy.max()) if energy.numel() else 0.0
             if peak <= 0.0:
                 return []  # nothing but silence: no frame can carry a note
-            floor = float(tcfg.get("content_floor", 1e-3)) * peak
+            floor = floor_ratio * peak
             content_ok = energy >= floor  # (N, T) bool
 
         # Rising-edge selection (H-6): keep a candidate only when at least
