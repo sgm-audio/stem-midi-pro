@@ -30,8 +30,14 @@ import sys
 
 import pytest
 
-torch = pytest.importorskip("torch", reason="requires torch")
-yaml = pytest.importorskip("yaml", reason="requires pyyaml")
+from tests.honesty import require
+
+# torch and pyyaml are declared in requirements.txt, so a missing one is a broken
+# environment, not a reason to report this module as "skipped". `require` fails loudly
+# (or skip-with-reason only when --strict-deps is off); `importorskip` here used to turn
+# the whole numerics file green-by-absence, which is the class this suite exists to catch.
+torch = require("torch", "the numerics proofs", module_level=True)
+yaml = require("yaml", "reading configs/model_config.cpu.yaml", module_level=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

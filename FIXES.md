@@ -398,3 +398,39 @@ setting it there does nothing until someone adds it.
 | `ruff check .` / `black --fast --check .` / SPDX sweep | clean | clean / clean / 0 missing |
 | `scripts/verify_numerics.py` | ladder flat, proxy `26.62` | ladder flat, mixture consistency `1.15e-07`, chunked-vs-1-pass `0.00e+00`, **proxy `0.1`** for the same random-noise input — the drop *is* GATE-4 working: a noise input no longer scores as separation |
 | `scripts/verify_midi.py` / `scripts/verify_api.py` | exit 0 | exit 0 (polytouch `{60: 114, 64: 51}`, marker row, `tempo_us` at 500 000 / 1 000 000 µs; refusal → override → `trained_weights=false`) |
+
+
+---
+
+## Round 5 — post-merge hardening on `main` @ `abd261f` (this branch)
+
+PR #22 landed, and `main` then took PR #25. Before touching anything, the merged result was
+audited rather than trusted: the sandbox had reset again (HEAD back at `f3888a5`, and `30cbe1b`
+had even been pruned from the object store), so "did my work actually land?" could not be answered
+from the commit graph. It was answered from **content** instead — `git show abd261f:<path>` plus
+grep for each deliverable (`include_confidence_track` 4 refs, `check_writer_params` 2, the stale
+`CC#16` promise **0**, `ALLOW_UNTRAINED_MODEL` implemented at 3 refs, 6 honesty tests, the DOC-3
+prose guard, `FIXES.md` narrating "Round 4"), and by replaying this branch's two bookkeeping rules
+read-only over `main`'s blobs (all 14 `file::test` citations in §18.1 resolve, 0 `@known_bug`
+markers left, 0 open entries). That method is worth repeating whenever a merge is being verified
+from a sandbox that no longer holds the commits.
+
+Three defects survived that audit. Two are fixed here; the third is recorded and ratcheted.
+
+| Finding | Evidence | Change |
+| --- | --- | --- |
+| **§18.1 forked: `MIDI-5` appeared twice**, both `- [x]`, with different justifications (one pointing at `docs/reviews/2026-11-17-audit-remediation-plan.md`, the other at "`api.py` threads `hop_length`/`sample_rate`") — `abd261f:TODO.md:622` and `:625`. Round 3 had removed four duplicates of exactly this shape **by hand**, with nothing locking the repair, so two merges brought it back | duplicate-id scan over the section: 43 rows, 42 unique ids | rows merged into one carrying both justifications and naming both real guards (`test_zip_forwards_the_pipeline_grid_to_the_midi_writer`, `test_api_zip_uses_independent_midi_and_configured_sample_rate`), and the missing rule added: `test_181_lists_each_defect_id_exactly_once`. It was run against the unfixed `TODO.md` first and reported `{'MIDI-5': 2}` — a rule written after the repair would be untested folklore |
+| **`transcriber.content_floor` was not in any config**: the TRANS-1 gate is read as `float(tcfg.get("content_floor", 1e-3))`, so the key that every sibling decoding knob (`onset_threshold`, `pitch_threshold`, `min/max_note_seconds`) has was missing from all three `configs/model_config*.yaml`, and PR #24 had only *documented* the omission | 0 references for `content_floor` in each of the three yamls | key added at `0.001` in all three with the semantics in a comment; out-of-domain values now **raise** (`not 0.0 <= floor <= 1.0`) instead of silently returning an empty render — the same treatment `pitch_threshold` gets two dozen lines above; `_logits_to_midi`'s docstring rewritten to point at the now-real key; `API_DOCUMENTATION.md` → "MIDI export behaviour" gained the row. Two guards: the domain error, and yaml-value-vs-code-default pinned from **both** sides of the boundary (frames at 5e-3 of peak must survive, at 5e-5 must not) so a default drifting either way fails |
+| **`importorskip` on declared dependencies is still the suite's largest hole**: 65 calls in 29 files gate `torch`/`numpy`/`soundfile`/`mido`/`yaml`/`fastapi`/`httpx`/`librosa`, all of them in `requirements*.txt`, so a host with a broken install gets "skipped" where it should get "failed" — FAKE-1's defect in every file the audit did not own. Notably `tests/test_numerics.py`, which *this* branch had rewritten, still had two of them | count taken from the syntax tree, not from grep: the string `importorskip` appears 83 times in `tests/*.py`, and only 65 of those are calls outside the policed list | `tests/test_numerics.py` converted to `tests.honesty.require(...)` as the worked example and added to `OWNED` (zero tolerance there now); the rest capped by `test_importorskip_on_declared_deps_does_not_grow` at 65, a ratchet that only moves down. Recorded as **FAKE-2** (open) with its `No test lock:` reason — converting 29 files is mechanical and must not travel in a PR that changes behaviour |
+
+The honesty layer grew from 6 rules to 8 and the whole suite went **512 passed / 1 skipped /
+3 deselected** (87.3 s) against `main` @ `abd261f` measured at **508 / 1 / 3** (85.6 s) in a
+throwaway worktree on the same venv — +4 tests, no skips added, nothing silenced. `ruff check .`
+and `black --fast --check .` clean, SPDX sweep 0 missing, and all three verifiers exit 0:
+`verify_midi` (marker row, `tempo_us` at 500 000/1 000 000 µs, tempo map at 120 and 60 BPM),
+`verify_api` (refuses untrained, `ALLOW_UNTRAINED_MODEL` serves, RFC-8259 guard), `verify_numerics`
+(`softplus(dt_bias) 0.00100 … 0.09989`, all outputs finite, raw-head confidence spread across
+content classes 0.00051 — i.e. the head really is uninformative, which is why the tiers read
+`calibrated_confidence`). Those figures are from **torch 2.15.0+cu132**, which is what
+`requirements.txt` (`torch>=2.5.0,<3.0.0`) resolves to today; rounds 1–4 measured on 2.5.1, so the
+comparisons above are same-venv, not cross-version.
