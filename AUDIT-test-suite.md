@@ -67,8 +67,10 @@ numbers in §0-§5 are otherwise misleading to a reader who starts here.
 **Fixed upstream, markers deleted, tests kept as pass-today guards** (each of these
 turned into an XPASS-strict failure on the merged tree first — the mechanism this audit
 proposed, doing its job): `MIDI-1` (tick math: `ticks_per_beat * 1e6 / tempo_us`),
-`MIDI-2` (per-note timelines + sort by absolute tick), `MIDI-3` (confidence CC now rides
-immediately *with* its `note_on`, and moved off CC#127 onto CC#16 = General Purpose 1),
+`MIDI-2` (per-note timelines + sort by absolute tick), `MIDI-3` (confidence now rides
+immediately *with* its `note_on`, and moved off CC#127 onto CC#16 = General Purpose 1 —
+which the merge then superseded: a channel CC cannot differ between simultaneous notes,
+so the shipped lane is per-note Polyphonic Key Pressure and confidence writes no CC),
 `MIDI-6` (reader applies the parsed tempo), `STEM-1` (H-8 transcribes each stem,
 `midi_metadata = {guitar, bass, summary}`), `API-1` (`_stem_midi_data` selects per stem),
 `IO-1` (`models/mamba_separator.py:101-108` validates rank/channels/length and raises
@@ -117,6 +119,10 @@ One refinement the audit should have made: `MIDI-4` is not a one-line `int() -> 
 hands the writer an already-truncated `confidence_cc_value`, so rounding only the writer
 changes nothing for a model-produced event. The `xfail` reason now names both call sites.
 
+*Reconciled again in round 3:* both call sites have since converged on `round()` (MIDI-4 is
+closed) and the name `confidence_cc_value` no longer exists — PR #15 hands the writer a
+polytouch `confidence` value. Read that paragraph as the tree at audit time, not today.
+
 
 ### …and PR #14 landed during the reconciliation (same mechanism, second round)
 
@@ -126,7 +132,12 @@ against it produced 12 failures here, all of them *this suite's* fault, and one 
 finding worth the merge: `api.py`'s `processing_report.json` ships a `backend` key
 (M-7) that the "Processing Report Schema" table does not document (**DOC-2**), and
 `USER_GUIDE.md` / `API_DOCUMENTATION.md` still instruct users to filter notes on
-**CC#127** although #11 moved confidence to CC#16 (**DOC-1**). Both are now locked.
+**CC#127** although #11 had already moved confidence off CC#127 (onto CC#16, then note-specific
+**Polyphonic Key Pressure** in #15) (**DOC-1**). Both were locked; DOC-1 is
+now **resolved**, and its lock was replaced by
+`tests/test_api_zip.py::test_the_documented_confidence_lane_is_the_one_the_writer_emits`,
+which reads a rendered file and fails if any guide names a CC the writer does not emit.
+DOC-2 remains locked.
 
 Adaptations: `tests/doubles.py`'s `StubReport` and the report fixtures in
 `tests/test_api_zip.py` / `tests/test_quality_gate_adversarial.py` follow the renamed field
@@ -228,10 +239,12 @@ Findings locked there — each of these is invisible to any count-based assertio
   config shifts every note (2.75× at 16 kHz/hop 128).
 * **MIDI-6.** *(resolved by PR #11; the mid-file tempo map is still open as MIDI-7.)* `midi_to_targets` parses `set_tempo` and then `pass`es: non-120-BPM
   sources land on the wrong frames. Silent label corruption.
-* **EXPR-1.** the transcriber has `expression_heads: [bend, vibrato, slide]` and the
-  docs advertise expression, but `_forward_impl` discards the head and the writer
-  emits no pitch-bend/CC1. Verified: the only non-note messages in a render are
-  CC#127.
+* **EXPR-1.** *(resolved on `main` — the head is carried, named from
+  `transcriber.expression_heads`, labelled `source: expression_head (untrained;
+  ARCH-11.4.4)`, and written as pitch-wheel/CC1/CC74 only under
+  `include_expression=True`.)* The measurement that opened it: `_forward_impl` discarded
+  the head, the writer emitted no pitch-bend/CC1, and the only non-note messages in a
+  render were CC#127 — which the merged writer no longer emits either.
 
 ### 2.3 Quality-gate decisions
 

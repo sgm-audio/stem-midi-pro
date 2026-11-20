@@ -7,13 +7,16 @@ Run: ``python3 scripts/verify_numerics.py [configs/model_config.yaml]``
 Prints, for the separator and the transcriber:
 
 * the hidden-state RMS after each Mamba block (a stack that collapses shows a
-  ladder like 1.0 -> 1e-10; the healthy stack stays flat). Measured on this repo
-  (small CPU config): 1 -> 4.9e-2 -> 1.2e-3 -> 2.9e-5 -> 7.4e-7 -> 1.7e-8 ->
-  4.0e-10 — the collapse is REAL here and pinned as C-1 in
-  ``tests/test_numerics.py``,
+  ladder like 1.0 -> 1e-10; the healthy stack stays flat). The collapse main pinned as
+  C-1/SEP-2 measured 1 -> 4.9e-2 -> ... -> 4.0e-10 with each block applied directly;
+  this branch wraps every block in a LayerNorm and adds the residual (PR #13's C-1
+  fix), which is what the ladder printed below now shows. Guard:
+  ``tests/test_numerics.py::test_block_rms_ladder_stays_order_one``,
 * per-stem mask mean/std (a collapsing stack pins every mask at the same value),
-* mixture consistency ||guitar+bass+residual - mix|| / ||mix|| (independent
-  sigmoid masks do not partition the mix: ~0.5 on this repo, pinned as SEP-1),
+* mixture consistency ||guitar+bass+residual - mix|| / ||mix|| (independent sigmoid
+  masks gave ~0.5 — SEP-1; ``separator.mask_normalization: softmax`` makes the three
+  masks partition the mix and brings it to ~1e-7). Set it to "independent" in the
+  config to reproduce the defect,
 * ``dt_proj.bias`` range and chunked-vs-unchunked scan agreement.
 """
 
@@ -54,18 +57,27 @@ def main(config_path: str = "configs/model_config.yaml") -> None:
         )
         h = sep.input_proj(torch.abs(spec).transpose(1, 2))
         ladder = [_rms(h)]
-        for block in sep.mamba_blocks:  # no per-block norm / residual add here
-            h = block(h)
+        # Exactly forward()'s pre-norm residual stack; an RMS replay of a stack the
+        # model does not run would certify nothing.
+        for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
+            h = h + block(norm(h))
             ladder.append(_rms(h))
-        masks = torch.stack([head(h).sigmoid() for head in sep.mask_heads.values()], 0)
+        h = sep.final_norm(h)
+        stacked = torch.stack([head(h) for head in sep.mask_heads.values()], 0)
+        masks = (
+            torch.softmax(stacked, dim=0)
+            if sep.mask_normalization == "softmax"
+            else stacked.sigmoid()
+        )
 
         guitar, bass, residual, _, metrics = sep(x)
         mel = tr._mel_spectrogram(guitar.squeeze(1)).transpose(1, 2)
         ht = tr.input_proj(mel)
         tr_ladder = [_rms(ht)]
-        for block in tr.mamba:
-            ht = block(ht)
+        for norm, block in zip(tr.block_norms, tr.mamba, strict=True):
+            ht = ht + block(norm(ht))
             tr_ladder.append(_rms(ht))
+        tr_ladder.append(_rms(tr.final_norm(ht)))
         _, _, _, _, confidence = tr(guitar)
 
     print("separator block RMS :", " ".join(f"{v:.2e}" for v in ladder))

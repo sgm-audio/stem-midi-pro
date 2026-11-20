@@ -111,7 +111,12 @@ class PerceptualAudioLoss(nn.Module):
         # single-hot targets train via 128-way cross-entropy, unchanged.
         pitch_ce_loss = 0
         if pred_pitch_logits is not None and target_pitches is not None:
-            if target_pitches.dim() == 3:
+            # A multi-hot chord grid is (B, T, V); a class-index grid is (B, T).
+            # Both halves of this test matter: `dim() == 3` alone would push an
+            # unbatched (T, V) grid into cross-entropy, and a width test alone would
+            # read a (B, 128)-frame class-index target as multi-hot.
+            n_classes = pred_pitch_logits.shape[-1]
+            if target_pitches.dim() == 3 and target_pitches.shape[-1] == n_classes:
                 pitch_ce_loss = pitch_bce_loss_fn(pred_pitch_logits, target_pitches)
             else:
                 pitch_ce_loss = pitch_ce_loss_fn(pred_pitch_logits, target_pitches)
@@ -158,6 +163,7 @@ class PerceptualAudioLoss(nn.Module):
             "onset_bce": _scalar(onset_bce_loss),  # the optimised onset term
             "onset_f1": _scalar(onset_f1_metric),  # metric only (no gradient)
             "pitch": _scalar(pitch_ce_loss),  # CE (single-label) or BCE (chords)
+            "pitch_ce": _scalar(pitch_ce_loss),  # same number, PR #13's key name
             "velocity_mae": _scalar(velocity_mae_loss),
             "duration_iou": _scalar(duration_iou_loss),
             "alignment": _scalar(alignment_loss),

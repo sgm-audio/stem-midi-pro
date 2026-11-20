@@ -294,6 +294,24 @@ def load_model():
         m = load_from_checkpoint(checkpoint_path, config_path)
         m.eval()
         _model_trained = True
+        _log_backend_info()
+        return m
+
+    # PR #13's operator override, checked BEFORE main's refusal: a smoke test (this
+    # repo's own suite among them) must be able to boot the API on random weights and
+    # see `trained_weights: false` in /ready - not a process that dies at import.
+    env_allow = os.getenv("ALLOW_UNTRAINED_MODEL", "").lower() in ("1", "true", "yes")
+    cfg_allow = bool((model_config or {}).get("inference", {}).get("allow_untrained_model", False))
+    if env_allow or cfg_allow:
+        log_event(
+            "warning",
+            "untrained_model",
+            detail="serving a randomly initialised model; outputs are not usable audio/MIDI",
+        )
+        m = StemMidiModel(model_config)
+        m.eval()
+        _model_trained = bool(getattr(m, "weights_loaded", False))
+        _log_backend_info()
         return m
 
     # Demucs + Basic Pitch can be safe without a project state_dict because
@@ -306,7 +324,9 @@ def load_model():
             "No trained checkpoint is configured. Set MODEL_CHECKPOINT_PATH "
             "for the Mamba path, or explicitly configure the tested pretrained "
             "backend pair with weights_source: pretrained_dependencies. The API "
-            "will remain not ready rather than serving random model weights."
+            "will remain not ready rather than serving random model weights. "
+            "ALLOW_UNTRAINED_MODEL=1 (or inference.allow_untrained_model: true) "
+            "starts it on random weights for a smoke test only."
         )
     log_event("info", "loading_pretrained_backends", backends=backends)
     m = StemMidiModel(model_config)
@@ -316,6 +336,7 @@ def load_model():
             "Install the selected dependencies or provide MODEL_CHECKPOINT_PATH."
         )
     m.eval()
+    _model_trained = bool(getattr(m, "weights_loaded", False))
     _log_backend_info()
     return m
 
@@ -768,7 +789,13 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             # which is what a silent or non-finite render actually means.
             "separation_proxy": _safe(separation_proxy),
             # Deprecated compatibility alias. This value is not SI-SDR and
-            # must not be read as a reference-based dB certification.
+            # must not be read as a reference-based dB certification. PR #13 renamed
+            # the metric to `centroid_separation_db`; main's `separation_proxy` supersedes
+            # it (utils/quality_gates.py keeps `centroid_separation_db` as a deprecated
+            # *field*, so #13's Python consumers still read the number). The delivered
+            # JSON deliberately carries no third spelling: tests/test_api_zip.py asserts
+            # the shipped report equals the pipeline's report key-for-key, and every extra
+            # alias is a name a client could start depending on.
             "si_sdr": _safe(separation_proxy),
             "metric_semantics": "centroid_separation_proxy_not_si_sdr",
             "phase_coherence": _safe(report.phase_coherence),
@@ -1028,8 +1055,13 @@ async def get_model_info():
         # checkpoint flag; clients can distinguish random/native inference from
         # a validated checkpoint or backend-owned pretrained weights.
         "mamba_backend": getattr(model, "mamba_backend", None),
-        "weights_loaded": bool(getattr(model, "weights_loaded", False)),
-        "checkpoint_loaded": bool(getattr(model, "weights_loaded", False)),
+        # One answer, three spellings: `weights_loaded` (main's H-1 name),
+        # `checkpoint_loaded` (main's backend-attestation name) and `trained_weights`
+        # (PR #13's name, the one /ready reports). The repo ships no weights, so the
+        # honest default is False - a client must be able to tell a trained render
+        # from a random-weight one.
+        "weights_loaded": bool(getattr(model, "weights_loaded", _model_trained)),
+        "checkpoint_loaded": bool(getattr(model, "weights_loaded", _model_trained)),
         "trained_weights": _model_trained,
         "backends": cfg.get("backends", {}),
         "audio_config": cfg.get("audio", {}),

@@ -216,8 +216,8 @@ class StemMidiModel(nn.Module):
             "onset_logits": onset,
             "pitch_logits": pitch,
             "velocity": velocity,
-            "expression": expression,
             "confidence": confidence,
+            "expression": expression,
             "events": None,
         }
 
@@ -696,6 +696,18 @@ class StemMidiModel(nn.Module):
         ``onset_refractory_frames: 0`` disables the suppression entirely
         (every above-threshold frame fires - the pre-H-6 behavior).
 
+        Content gate (TRANS-1): when ``frame_energy`` is passed - it always is, from
+        :meth:`_enhance` - a candidate frame must also carry signal, defined as
+        ``energy >= transcriber.content_floor * peak`` (default ``1e-3`` of the loudest
+        frame in the stem). An onset head that fires on digital silence therefore cannot
+        become a note, which is the half of TRANS-1 the refractory window did not address:
+        before the gate, silence rendered 0 notes only because the untrained head happened
+        to sit under 0.5 (measured: avg_confidence 0.650 with 0 notes) - luck, not a
+        decision. A stem whose peak energy is 0 returns ``[]`` outright. Note the floor is
+        relative to the *loudest* frame, so a very quiet but real performance is not
+        gated away; it is deliberately a code default and appears in no
+        ``configs/model_config*.yaml``, so setting it there does nothing until someone adds it.
+
         Pitch decoding is CHORD-AWARE when ``transcriber.pitch_threshold``
         is set (production configs set 0.5): every pitch whose sigmoid
         probability exceeds it at the accepted onset frame emits its own
@@ -709,7 +721,12 @@ class StemMidiModel(nn.Module):
         Each event also carries ``duration_frames`` estimated from the spacing
         to the next onset (clamped to ``transcriber.min/max_note_seconds``), so
         the MIDI writer emits note lengths that follow the performance instead
-        of a fixed 1/16 note; the final note uses the median length.
+        of a fixed 1/16 note; the final note uses the median length. Length is
+        derived per ONSET frame, so every note of a chord shares one duration -
+        a chord is one event in the audio timeline and the refractory window is
+        what bounds the density. When ``expression`` is given (B, T, E), its
+        mean over the note (not just its onset frame) is attached per event and
+        labelled with its source, because the head is untrained (ARCH-11.4.4).
 
         B=1 only: a batch that produces any onset raises (BATCH-1), because the
         return value is ONE flat list whose frames cannot be attributed to an
@@ -731,9 +748,7 @@ class StemMidiModel(nn.Module):
             onset_prob > tcfg.get("onset_threshold", 0.5)
         )  # (N, 2): [batch_idx, frame], sorted by batch then frame
         pitches = torch.argmax(pitch_logits, dim=-1)
-        # Truncate (not round) like main, but keep the floor at 1: a note_on
-        # with velocity 0 is a note_off on the wire.
-        vel_values = (velocity.squeeze(-1).clamp(0, 1) * 127).long().clamp(1, 127)
+        vel_values = (velocity.squeeze(-1).clamp(0, 1) * 127).round().clamp(1, 127).long()
 
         # BATCH-1: this function returns ONE flat list whose events carry the raw
         # per-item `onset_frame`. For B>1 that merges separate recordings into a
@@ -780,8 +795,10 @@ class StemMidiModel(nn.Module):
             floor = float(tcfg.get("content_floor", 1e-3)) * peak
             content_ok = energy >= floor  # (N, T) bool
 
-        # Rising-edge selection: keep a candidate only when at least
+        # Rising-edge selection (H-6): keep a candidate only when at least
         # `refractory` below-threshold frames separate it from the previous one.
+        # Accepted frames are collected per batch FIRST, because note length is
+        # derived from the inter-onset spacing (PR #13) and a gap needs two onsets.
         frames_by_batch: dict[int, list[int]] = {}
         last_above: dict[int, int] = {}  # batch -> last candidate frame seen
         for b, t in candidates.tolist():
@@ -793,7 +810,7 @@ class StemMidiModel(nn.Module):
                 continue
             frames_by_batch.setdefault(b, []).append(t)
 
-        events = []
+        events: list[dict] = []
         for b, frames in frames_by_batch.items():
             # Duration follows the performance: the gap to the next onset,
             # clamped to min/max_note_seconds; the last note takes the median.
@@ -813,30 +830,38 @@ class StemMidiModel(nn.Module):
                     # disabled): fall back to the argmax pitch so a fired onset
                     # never produces an empty event set.
                     frame_notes = [int(pitches[b, t].item())]
+                expr = None
+                if expression is not None and expression.dim() == 3:
+                    # Mean over the note rather than the onset frame (PR #13), keyed by
+                    # the head's declared names so utils/midi.py can map bend ->
+                    # pitch-wheel, vibrato -> CC1, slide -> CC74. The head is sigmoid, so
+                    # each channel is already 0..1 with 0.5 neutral (the writer's
+                    # convention).
+                    window = expression[b, t : t + dur]
+                    if window.numel():
+                        values = window.mean(dim=0).detach().cpu().tolist()
+                        names = self.cfg["transcriber"].get(
+                            "expression_heads", ["bend", "vibrato", "slide"]
+                        )
+                        expr = {
+                            name: max(0.0, min(1.0, float(values[j])))
+                            for j, name in enumerate(names)
+                            if j < len(values)
+                        }
                 for note in frame_notes:
                     event = {
                         "note": int(note),
                         "onset_frame": t,
                         "duration_frames": int(dur),
-                        "velocity": vel_values[b, t].item(),
+                        "velocity": int(vel_values[b, t].item()),
                         "confidence": confidence[b, t].item(),
                     }
-                    if expression is not None:
-                        values = expression[b, t].detach().cpu().flatten().tolist()
-                        names = self.cfg["transcriber"].get(
-                            "expression_heads", ["bend", "vibrato", "slide"]
-                        )
-                        # The head is sigmoid, so every channel is already 0..1
-                        # with 0.5 neutral (the writer's convention). The value
-                        # is tagged with where it came from: an untrained head's
-                        # output must never pass for learned phrasing.
-                        event["expression"] = {
-                            name: max(0.0, min(1.0, float(values[j])))
-                            for j, name in enumerate(names)
-                            if j < len(values)
-                        }
-                        event["expression"]["source"] = _EXPRESSION_SOURCE
+                    if expr is not None:
+                        # Tagged with where it came from: an untrained head's output must
+                        # never pass for learned phrasing.
+                        event["expression"] = dict(expr, source=_EXPRESSION_SOURCE)
                     events.append(event)
+        # Deterministic order for a chord: frame, then pitch.
         events.sort(key=lambda e: (e["onset_frame"], e["note"]))
         return events
 
@@ -979,7 +1004,12 @@ class StemMidiModel(nn.Module):
                 merged[key] = None
             else:
                 merged[key] = torch.cat(tensors, dim=1)[:, : 1 + total // hop]
-        # Expression is not part of the dict returned by _transcribe; keep None.
+        # Per-segment `events` cannot be concatenated: their onset_frames are local
+        # to each segment, so merging them would silently mis-place every note after
+        # the first seam. Dropping them sends _enhance down the logits path, which
+        # rebuilds events on the merged timeline. Expression is carried explicitly
+        # for the same reason: a per-segment tensor concatenated frame-wise is only
+        # correct if the frames stay in order, which is what _transcribe returns.
         merged["events"] = None
         return merged
 
@@ -1042,8 +1072,8 @@ class StemMidiModel(nn.Module):
         Mirror of the ``_forward_impl`` tail used by the chunked file path, so a
         long upload and a short one produce the same shape of answer.
         """
-        guitar_tr = self._transcribe(guitar, "guitar")
-        bass_tr = self._transcribe(bass, "bass")
+        guitar_tr = self._transcribe_segmented(guitar, "guitar")
+        bass_tr = self._transcribe_segmented(bass, "bass")
         self._ensure_finite(guitar_tr, "guitar")
         self._ensure_finite(bass_tr, "bass")
         guitar_meta, _ = self._enhance(guitar_tr, guitar)

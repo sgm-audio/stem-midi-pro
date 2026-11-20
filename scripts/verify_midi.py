@@ -8,10 +8,14 @@ Checks the writer and the target builder against the audit's reproductions:
 
 * 3000 frames (~34.8 s at 44.1 kHz / hop 512) land at 34.8 s of MIDI time, not 60x that,
 * simultaneous onsets stay simultaneous,
-* the default confidence controller is CC#16 (CC#120-127 are Channel Mode),
-  CC#127 only via ``confidence_cc=127``, per-note values in the marker track,
+* confidence rides a per-note Polyphonic Key Pressure event (CC#120-127 are Channel
+  Mode, so they can neither carry per-note data nor appear at all), and
+  ``include_confidence_track=True`` adds a meta-only Marker track for DAWs that do not
+  show poly-pressure; no channel CC carries confidence,
 * ``duration_frames`` sets note length,
-* tempo maps put beat 2 at frame 86 @120 BPM and 172 @60 BPM.
+* ``tempo_us`` steers the writer (its ``set_tempo`` meta and its frame->tick divisor are
+  one promise: absolute seconds survive a tempo change),
+* the reader's tempo map puts beat 2 at frame 86 @120 BPM and 172 @60 BPM.
 """
 
 from __future__ import annotations
@@ -97,8 +101,17 @@ def check_confidence() -> None:
     track = mid.tracks[0]
     polytouch = {m.note: m.value for m in track if m.type == "polytouch"}
     controls = sorted({m.control for m in track if m.type == "control_change"})
-    expected = {60: round(0.9 * 127), 64: round(0.4 * 127)}
-    print(f"confidence  : polytouch per note {polytouch} (expected {expected})")
+    # MIDI-4 is closed: `_clamp_midi` and the injector both ROUND, so 0.9 -> 114 and
+    # 0.4 -> 51, and a confidence near 1.0 can actually reach 127 instead of stopping at
+    # 126. Both spellings are printed because the truncating mapping is what every
+    # pre-#15 render in the wild carries - a consumer that parses old files must know the
+    # difference is one byte, not a scale change.
+    rounded = {60: round(0.9 * 127), 64: round(0.4 * 127)}
+    truncated = {60: int(0.9 * 127), 64: int(0.4 * 127)}
+    assert polytouch == rounded, f"polytouch {polytouch} != rounded {rounded}"
+    print(
+        f"confidence  : polytouch per note {polytouch} (round(); the old int() map -> {truncated})"
+    )
     print(f"              CC lanes used {controls} (CC#120-127 are Channel Mode; none emitted)")
 
 
@@ -170,6 +183,62 @@ def check_durations() -> None:
         )
 
 
+def check_writer_params() -> None:
+    """Cover the two writer parameters PR #13 grafts onto main's lane.
+
+    ``tempo_us`` used to be hard-coded to 120 BPM in both the ``set_tempo`` meta and the
+    frame->tick divisor, so a 60 BPM render contradicted its own header by 2x. The guard
+    below is the round trip: the file must report the tempo it was given, and the note's
+    length in SECONDS must not move when the tempo does.
+    """
+    frames_per_second = SR / HOP
+    events = [
+        {
+            "note": 60,
+            "onset_frame": 0,
+            "duration_frames": round(2.0 * frames_per_second),
+            "velocity": 90,
+            "confidence": 0.9,
+        }
+    ]
+    for tempo_us in (500_000, 1_000_000):
+        raw = build_midi_from_events(
+            {"midi_events": events}, "guitar", hop_length=HOP, sample_rate=SR, tempo_us=tempo_us
+        )
+        mid = _parse(raw)
+        metas = [m for m in mid.tracks[0] if m.type == "set_tempo"]
+        ticks_per_second = mid.ticks_per_beat * 1_000_000 / tempo_us
+        onsets, offs = {}, {}
+        for tick, msg in _absolute(mid.tracks[0]):
+            if msg.type == "note_on" and msg.velocity > 0:
+                onsets[msg.note] = tick
+            elif msg.type == "note_off":
+                offs[msg.note] = tick
+        seconds = (offs[60] - onsets[60]) / ticks_per_second
+        assert len(metas) == 1 and metas[0].tempo == tempo_us, f"set_tempo = {metas}"
+        assert abs(seconds - 2.0) < 0.01, f"{tempo_us} us/beat -> note length {seconds:.3f}s"
+        print(
+            f"writer tempo  : tempo_us={tempo_us} -> set_tempo {metas[0].tempo}, "
+            f"{ticks_per_second:.0f} ticks/s, note = {seconds:.3f}s of MIDI time"
+        )
+
+    marked = _parse(
+        build_midi_from_events(
+            {"midi_events": events},
+            "guitar",
+            hop_length=HOP,
+            sample_rate=SR,
+            include_confidence_track=True,
+        )
+    )
+    rows = [m.text for m in marked.tracks[1] if m.type == "marker"]
+    plain = _parse(
+        build_midi_from_events({"midi_events": events}, "guitar", hop_length=HOP, sample_rate=SR)
+    )
+    assert len(marked.tracks) == 2 and len(plain.tracks) == 1, "marker track is not opt-in"
+    print(f"marker track  : {rows}")
+
+
 def check_tempo() -> None:
     for tempo_us, note_tick in ((500_000, 960), (1_000_000, 960)):
         mid = mido.MidiFile(ticks_per_beat=480)
@@ -207,4 +276,5 @@ if __name__ == "__main__":
     check_confidence()
     check_expression()
     check_durations()
+    check_writer_params()
     check_tempo()

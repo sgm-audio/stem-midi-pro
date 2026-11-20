@@ -7,10 +7,16 @@ the related ones:
 * per-block hidden RMS must stay O(1) instead of decaying geometrically
   (1.0 → 4.5e-2 → … → 7.3e-20 across 12 blocks);
 * masks must carry content (the old stack produced a constant 0.5 everywhere);
-* ``guitar + bass + residual`` must reconstruct the input (mixture consistency —
-  pinned as a known bug by ``test_pipeline_integrity.py::SEP-1``: this separator
-  learns three INDEPENDENT sigmoid masks, so the stems do not sum to the mix; the
-  test lives there, not here, to keep one pin per defect);
+* ``guitar + bass + residual`` must reconstruct the input — that pin lives in
+  ``tests/test_pipeline_integrity.py::test_stems_sum_back_to_the_mix`` (SEP-1) to
+  keep one pin per defect, and it is a pass-today guard because the separator
+  normalises the masks across stems (``separator.mask_normalization``).
+
+The RMS-ladder and mask-content tests below used to replay the block stack BY HAND (that
+is how C-1/SEP-2 were pinned before the model had per-block norms). They now drive the
+model's real ``forward`` path, and a structural assertion keeps the replay honest: if
+``MambaSeparator.forward`` ever stops applying ``block_norms`` + the residual add, the
+test fails instead of silently measuring a structure the model does not have.
 * silence must not produce notes, NaN, or Inf;
 * the chunked scan must agree with an unchunked scan (state carry correctness);
 * ``dt`` must stay inside its clamp;
@@ -54,9 +60,20 @@ def audio(cfg):
 
 
 def _separator_hidden_rms(cfg, audio):
-    """Replay the separator's stack and record the RMS after each block."""
+    """Replay the separator's stack and record the RMS after each block.
+
+    The replay must match ``MambaSeparator.forward``, which is a pre-norm residual
+    stack (C-1/SEP-2). The structural assertion below is what keeps the two from
+    drifting apart again: hand-replayed numerics that no longer describe the model
+    certify nothing, which is exactly how this file's SEP-2 pin came to describe a
+    structure the model had already stopped using.
+    """
     torch.manual_seed(0)
     sep = MambaSeparator(cfg).eval()
+    assert len(sep.block_norms) == len(sep.mamba_blocks), (
+        "MambaSeparator lost its per-block norms; the replay below no longer "
+        "describes forward() - update this helper and re-open SEP-2/C-1 together"
+    )
     with torch.inference_mode():
         spec = torch.stft(
             audio.squeeze(1),
@@ -67,18 +84,28 @@ def _separator_hidden_rms(cfg, audio):
         )
         hidden = sep.input_proj(torch.abs(spec).transpose(1, 2))
         rms = [float(hidden.pow(2).mean().sqrt())]
-        # Replay exactly what forward() does: pre-norm residual blocks plus a
-        # final LayerNorm (C-1). Replaying the pre-fix `hidden = block(hidden)`
-        # form here would measure a stack the model no longer has.
+        # Replay exactly what forward() does: pre-norm residual blocks plus a final
+        # LayerNorm (C-1/SEP-2). Replaying the pre-fix `hidden = block(hidden)` form here
+        # would measure a stack the model no longer has - which is how this file's SEP-2
+        # pin came to certify a collapse that had already been fixed.
         for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
             hidden = hidden + block(norm(hidden))
             rms.append(float(hidden.pow(2).mean().sqrt()))
-        rms.append(float(sep.final_norm(hidden).pow(2).mean().sqrt()))
+        hidden = sep.final_norm(hidden)
+        rms.append(float(hidden.pow(2).mean().sqrt()))
     return rms
 
 
 def test_block_rms_ladder_stays_order_one(cfg, audio):
-    """Regression guard for SEP-2: no geometric decay across the residual stack."""
+    """Regression guard for SEP-2: no geometric decay across the residual stack.
+
+    The defect read 1 -> 4.9e-2 -> 1.2e-3 -> ... -> 4.0e-10 while each block was applied
+    directly. PR #24 landed the pre-norm residual stack (per-block LayerNorm + residual add
+    + a final norm), and that is what holds the ladder at O(1) - so this is a pass-today
+    guard, not a wish. It is a *replay* rather than a call to ``forward()`` only because it
+    needs the RMS between blocks; ``_separator_hidden_rms`` asserts the structure it replays
+    so the two cannot drift apart again.
+    """
     rms = _separator_hidden_rms(cfg, audio)
     for i, value in enumerate(rms):
         assert 0.05 < value < 20.0, f"block {i} RMS {value:.3e} left [0.05, 20]"
@@ -88,7 +115,7 @@ def test_block_rms_ladder_stays_order_one(cfg, audio):
 
 
 def test_masks_carry_content(cfg, audio):
-    """Masks must vary with the input, not sit at a constant 0.5."""
+    """Masks must vary with the input, not sit at a constant value (collapse)."""
     torch.manual_seed(0)
     sep = MambaSeparator(cfg).eval()
     with torch.inference_mode():
@@ -104,8 +131,18 @@ def test_masks_carry_content(cfg, audio):
         for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
             hidden = hidden + block(norm(hidden))
         hidden = sep.final_norm(hidden)
-        # Independent sigmoid masks (see the mixture-consistency note above).
-        masks = torch.stack([head(hidden).sigmoid() for head in sep.mask_heads.values()], dim=0)
+        stacked = torch.stack([head(hidden) for head in sep.mask_heads.values()], dim=0)
+        # Same normalisation forward() applies, so the numbers below describe the
+        # masks that actually reach the stems (SEP-1's softmax partition). main's
+        # version assumed independent sigmoids, which is only true under
+        # `separator.mask_normalization: independent` - at the shipped default the mask
+        # heads are softmax-partitioned, and a test that models the other branch measures
+        # a model that is not running.
+        masks = (
+            torch.softmax(stacked, dim=0)
+            if sep.mask_normalization == "softmax"
+            else stacked.sigmoid()
+        )
 
     assert float(masks.std()) > 1e-3, "mask probabilities are constant (collapse)"
     assert 0.2 < float(masks.mean()) < 0.6

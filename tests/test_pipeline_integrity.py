@@ -524,7 +524,18 @@ def test_empty_render_is_never_offered_as_studio_or_draft(pipeline_config):
     assert out["routing_decision"]["badge"] == "No notes detected"
 
 
+@pytest.mark.real_mamba
 def test_stems_sum_back_to_the_mix(pipeline_config, synth):
+    """Regression guard for SEP-1, fixed by PR #13 (was a strict-xfail lock).
+
+    The separator used to learn three INDEPENDENT sigmoid masks, so guitar + bass +
+    residual accounted for only about half the mixture's energy (measured relative
+    error 0.46-0.51 across seeds 0-3): users heard holes in the reassembled mix and a
+    "sum to mix" check in a DAW failed. `separator.mask_normalization: softmax` makes
+    the masks complementary, which is what this asserts - 1.15e-07 measured on
+    `scripts/verify_numerics.py`. `"independent"` still restores the old behaviour, so
+    the key is a knob, not a hard-coded assumption.
+    """
     from main import StemMidiModel
 
     sig = synth.note_sequence(total_seconds=1.0, sr=SR)

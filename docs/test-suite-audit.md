@@ -223,9 +223,11 @@ open and **goes red the moment it is fixed** (forcing the marker's removal).
 "Fixed in" distinguishes the independent review pass that landed on `main`
 (PRs #11/#14: `H-*`/`M-*`/`C-*` items) from the work in this branch. Where both
 sides fixed the same defect, the upstream implementation is the one kept — it is
-strictly better (e.g. the confidence controller is CC#16, not CC#127, because
-120–127 are Channel Mode messages; same-pitch overlaps are resolved rather than
-only sorted). "Verified by" names the test that failed before the change.
+strictly better (e.g. confidence no longer rides a channel CC at all: CC#127 was wrong
+because 120–127 are Channel Mode messages and CC#16 was wrong because a channel message
+cannot differ between simultaneous notes, so the merged writer emits per-note
+Polyphonic Key Pressure and an opt-in Marker track; same-pitch overlaps are resolved
+rather than only sorted). "Verified by" names the test that failed before the change.
 
 | ID | Fixed in | Fix | Verified by |
 |---|---|---|---|

@@ -858,7 +858,11 @@ def test_chord_decoding_emits_all_pitches_above_threshold(mock_config):
         (52, 10),
     ], f"both chord members (45, 52) must fire once at frame 10; got {notes}"
     for e in events:
-        assert e["velocity"] == 63 and e["confidence"] == pytest.approx(0.9)
+        # 0.5 * 127 = 63.5. The merged writer rounds and clamps to [1, 127]
+        # (`velocity == 0` is a note_off, so a mapped-to-zero note_on must never ship),
+        # where main truncated with `.long()` -> 63. Same defect class as MIDI-4's
+        # double truncation; the assertion follows the stricter mapping.
+        assert e["velocity"] == 64 and e["confidence"] == pytest.approx(0.9)
 
 
 def test_chord_decoding_falls_back_to_argmax_when_nothing_crosses(mock_config):

@@ -161,8 +161,13 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 | `avg_confidence` | Mean of the emitted notes' confidence, exactly as the head produced it. Observability only — measured on the small CPU config the untrained head ranks a clipped square (0.52) and white noise (0.51) *above* clean music (0.30). |
 | `calibrated_confidence` | `avg_confidence` scaled by a content factor (stem tonality × crest factor, `main._content_factor`). **This is the only number the quality tier reads.** Silence and distortion-calibrated material land near 0; clean material is unchanged. |
 
-Both are `0.0` when no notes were emitted, and `notes_total` / `total_notes` say whether the render
-carried anything at all.
+Both are `0.0` when no notes were emitted, and `total_notes` / `note_count` (one number, two
+names — GATE-3) say whether the render carried anything at all.
+
+> Names in this file are a contract: every backticked identifier in a report or confidence
+> section must be a key the delivered JSON actually carries, and a test enforces it. That rule is
+> why an earlier revision's claim about a "notes_total" field is gone — no code path emits it, so
+> an integrator coding to it got a KeyError.
 
 ## Quality Tiers
 
@@ -170,6 +175,10 @@ carried anything at all.
 2. **Draft** — `avg_confidence ≥ 0.70` without artifacts or untrained weights, but below the studio conditions: refine low-confidence notes in your DAW.
 3. **Complex** — invalid metrics, `avg_confidence < 0.70`, artifact flags, or untrained weights: raw output plus manual review options.
 
+Every metric in `processing_report.json` is coerced to a finite number and serialised with
+`allow_nan=False`: a NaN would otherwise be written as bare `NaN`, which is not valid JSON and makes
+strict clients reject the whole download (silence, DC and non-finite input produce non-finite metrics
+often enough that this is a normal path, not a corner case).
 ## MIDI export behaviour
 
 | Setting (model config) | Default | Effect |
