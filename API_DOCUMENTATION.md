@@ -139,7 +139,7 @@ Every error response also carries a `request_id` field matching the `X-Request-I
 |---|---|---|
 | `separation_proxy` | float | Centroid-separation heuristic reported for observability; it is not used as a tier threshold, SI-SDR, or a dB certification |
 | `si_sdr` | float | Deprecated compatibility alias for `separation_proxy`; do not interpret as SI-SDR |
-| `metric_semantics` | string | `centroid_separation_proxy_not_si_sdr` |
+| `metric_semantics` | string | `mask_crosstalk_not_si_sdr` |
 | `phase_coherence` | float | Model-reported phase score, 0–1; not independent quality certification |
 | `avg_confidence` | float | Mean confidence over emitted guitar and bass notes, 0–1 |
 | `confidence_encoding` | string | `polyphonic_key_pressure`; JSON event metadata remains canonical |

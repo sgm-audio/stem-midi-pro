@@ -265,7 +265,7 @@ def test_report_in_the_zip_is_the_pipeline_report_not_a_rederivation(api_env, tm
     assert json.loads(zf.read("processing_report.json")) == {
         "separation_proxy": 6.5,
         "si_sdr": 6.5,
-        "metric_semantics": "centroid_separation_proxy_not_si_sdr",
+        "metric_semantics": "mask_crosstalk_not_si_sdr",
         "phase_coherence": 0.42,
         "avg_confidence": 0.55,
         "confidence_encoding": "polyphonic_key_pressure",
@@ -561,7 +561,7 @@ def test_field_names_named_around_the_schema_are_delivered_keys():
 
     Three tokens in the schema section are documented *values*, not keys, and are named
     here rather than excluded by a fuzzier rule: ``null`` is the JSON literal the
-    non-finite policy delivers, and ``centroid_separation_proxy_not_si_sdr`` /
+    non-finite policy delivers, and ``mask_crosstalk_not_si_sdr`` /
     ``polyphonic_key_pressure`` are the strings ``metric_semantics`` and
     ``confidence_encoding`` carry. A dotted name (``main._content_factor``,
     ``processing_report.json``) is a module or a file, and the token regex skips it.
@@ -571,7 +571,9 @@ def test_field_names_named_around_the_schema_are_delivered_keys():
     documented_table = set(re.findall(r"^\|\s*`([a-z_]+)`\s*\|", doc, re.M))
     values_not_keys = {
         "null",
-        "centroid_separation_proxy_not_si_sdr",
+        # The strings `metric_semantics` and `confidence_encoding` carry. Renaming
+        # the metric (GATE-4) renames this value, and the value is not a key.
+        "mask_crosstalk_not_si_sdr",
         "polyphonic_key_pressure",
     }
     stale: list[str] = []

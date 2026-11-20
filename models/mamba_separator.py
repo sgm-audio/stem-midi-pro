@@ -43,14 +43,33 @@ class MambaSeparator(nn.Module):
     reconstruct the mixture by construction; ``independent`` restores per-stem
     sigmoids.
 
-    Streaming (C-2.5): ``forward(audio, state=...)`` threads the real SSM
-    accumulator and the causal convolution's history between calls, which makes
-    a chunk-contiguous stream numerically identical to one long call
-    (``tests/test_streaming_state.py`` measures 4e-9). ``return_state=True``
-    hands the next state back in the fourth return slot. The default file path
-    still separates overlapping windows and crossfades them: with 50 % overlap
-    there is no single recurrence to continue, so state threading there would be
-    meaningless.
+    Streaming (C-2.5 / CPU-3): ``forward(audio, state=...)`` threads the real
+    SSM accumulator and the causal convolution's history between calls, and
+    ``return_state=True`` hands the next state back in the fourth return slot.
+
+    What that is and is not worth, measured on ``model_config.mamba.yaml``
+    (2 s chunks, 50 % overlap, 4 s and 6 s inputs):
+
+    * At the BLOCK level the state threading is exact: a two-call stream and one
+      long call agree to 0.0 relative error, so the mechanism works.
+    * At the SEPARATOR level it buys essentially nothing, because each chunk is
+      put through its own ``torch.stft`` and the transform's edge padding
+      dominates. Chunk-vs-whole error is 1.7e-02 both with and without the
+      carried state, and the two outputs differ by only 1.0e-03 of the
+      reference -- 17x smaller than the edge effect it is swamped by.
+    * In the PIPELINE (which overlap-adds and crossfades, H-4) the difference is
+      1.5e-04 and the accuracy improvement is 1.000x, i.e. none: the crossfade
+      already absorbs the boundary discontinuity.
+
+    So the default file path deliberately does NOT thread state. With 50 %
+    overlap there is no single recurrence to continue, and doing it anyway would
+    change every existing render by a measured-nonzero amount for a
+    measured-zero benefit. A caller that feeds genuinely contiguous,
+    non-overlapping pieces may thread it and will get the block-exact result.
+
+    (An earlier revision of this docstring claimed a 4e-9 equality and cited
+    ``tests/test_streaming_state.py``, which does not exist in this repository.
+    The numbers above are reproduced by ``scripts/verify_cpu3_state.py``.)
     """
 
     def __init__(self, cfg: dict):
@@ -244,6 +263,8 @@ class MambaSeparator(nn.Module):
         # spectrograms) instead of O(three masks + three magnitudes + spec).
         stems = {}
         centroids = {}
+        # GATE-4: measured while the masks are still live.
+        crosstalk = self._crosstalk(masks, spec)
         for name, mask in masks.items():
             # Only guitar and bass feed the centroid metric; the residual's
             # magnitude used to be computed and never read.
@@ -254,16 +275,30 @@ class MambaSeparator(nn.Module):
 
         phase_score = self.phase_head(hidden.mean(dim=1))  # (B, 1)
 
-        # Perceptual metric (spectral centroid separation proxy - NOT real SI-SDR).
-        # No additional STFT (C-2.6 / PERF-7.1).
+        # GATE-4: the reported separation number is CROSSTALK, not a centroid gap.
+        #
+        # `_centroid_separation` measured |centroid_guitar - centroid_bass| in
+        # FFT-bin units and mapped it through `10*log10(d) + 20`, clamped to
+        # [0, 30]. That is not a separation measure: it grows when the two stems
+        # are driven apart by DISTORTION. Measured on the shipped config, one
+        # 220 Hz tone clipped progressively harder scored 15.64 -> 23.97 ->
+        # 26.89 -> 27.80 -> 28.73 (0.30 -> 0.05 peak): the worse the signal, the
+        # better the "separation", and a hard-clipped square rated 30.00/30.
+        #
+        # Crosstalk is reference-free (it needs no ground truth, so it can be
+        # computed on real uploads) and cannot reward distortion: it is the
+        # share of stem energy that sits in bins the stem does not dominate.
+        # Perfect = 0.0; a flat one-third mask reads 0.667.
         centroid_metric = self._centroid_separation(centroids["guitar"], centroids["bass"])
-        # Gate by the input's tonality so distortion cannot earn a better score
-        # than the clean signal it came from (GATE-4). Cubed because the gate has
-        # to out-run the centroid term: a hard-clipped square wave saturates that
-        # term at its 30 dB clamp (measured 30.0 x tonality 0.64) while a clean
-        # sine sits near 12 dB, so a linear weight still ranked the square higher.
-        separation_metric = centroid_metric * tonality.pow(3)
-        metrics = torch.stack([separation_metric, phase_score.squeeze(-1)], dim=-1)
+        metrics = torch.stack([crosstalk, phase_score.squeeze(-1)], dim=-1)
+        self.last_centroid_proxy = centroid_metric.detach()
+        # Retained for comparison/reporting: upstream's tonality gate. The tier
+        # decision reads `crosstalk` (this file's docstring explains why the
+        # centroid term cannot serve as a separation measure at all), but keeping
+        # the tonality number costs one reduction and lets the two be measured
+        # against each other.
+        self.last_tonality = tonality.detach()
+        self.last_tonality_gated_proxy = (centroid_metric * tonality.pow(3)).detach()
 
         # ``new_state`` is None unless the caller asked for streaming: the
         # chunked file path overlaps 50% of the waveform, which makes a single
@@ -370,6 +405,42 @@ class MambaSeparator(nn.Module):
             if take_hi > take_lo:
                 out[:, out_lo + take_lo : out_lo + take_hi] = audio[:, take_lo:take_hi]
         return out
+
+    def _crosstalk(self, masks: dict[str, torch.Tensor], spec: torch.Tensor) -> torch.Tensor:
+        """Share of each stem's energy that sits in bins another stem dominates, (B,).
+
+        Returns ``1 - mean_score`` in [0, 1] so that **0 is perfect** and 1 is
+        the worst possible separation:
+
+        * for each stem, find the T-F bins where its mask is the argmax
+          (``dominant``) and the energy it is assigned there by definition;
+        * the energy the stem's mask actually captures, weighted by magnitude,
+          in the bins it does NOT dominate is crosstalk.
+
+        Computed windowed over frames, like every other stage, so peak memory
+        stays O(one window) rather than O(three full masks) at 600 s.
+
+        A separator that hands every stem the same flat mask (the failure SEP-2
+        produced) puts 2/3 of each stem's energy where that stem is not
+        dominant, so this reads 0.667 -- the honest description of "the residual
+        stem is decorative". A separator that carves disjoint bands reads ~0.
+        """
+        names = list(masks)
+        if len(names) < 2:
+            return torch.zeros(spec.shape[0], device=spec.real.device, dtype=spec.real.dtype)
+        total_cross = torch.zeros(spec.shape[0], device=spec.real.device, dtype=spec.real.dtype)
+        total_energy = torch.zeros_like(total_cross)
+        for start, stop in self._frame_windows(spec.shape[1]):
+            win = torch.stack([masks[n][:, start:stop] for n in names], dim=0)  # (S, B, t, F)
+            mag = torch.abs(spec[:, start:stop])  # (B, t, F)
+            dominant = win.argmax(dim=0)  # (B, t, F)
+            energy = mag.sum()
+            total_energy = total_energy + energy
+            for i in range(len(names)):
+                own = win[i] * mag  # energy this stem is assigned
+                not_mine = (dominant != i).to(own.dtype)
+                total_cross = total_cross + (own * not_mine).sum(dim=(1, 2))
+        return (total_cross / total_energy.clamp(min=1e-8)).clamp(0.0, 1.0)
 
     def _tonality(self, mag: torch.Tensor) -> torch.Tensor:
         """Per-batch tonality in [0, 1]: ``1 -`` Wiener entropy of the spectrum.

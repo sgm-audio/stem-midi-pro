@@ -75,6 +75,28 @@ def _marked_ids() -> dict[str, list[str]]:
     return found
 
 
+def _scan_self_check() -> bool:
+    """Prove the marker scan still works, without needing an open defect.
+
+    Writes a temporary test file containing a `known_bug("SENTINEL-0", ...)`
+    call into the tests/ directory tree that `_marked_ids` walks, runs the
+    scanner, and removes it. If the scan is intact it must see the sentinel.
+    """
+
+    target = Path(__file__).resolve().parent / "_scan_selfcheck_tmp.py"
+    try:
+        target.write_text(
+            "# SPDX-License-Identifier: Apache-2.0\n"
+            "def test_sentinel():\n"
+            "    known_bug = lambda *a, **k: (lambda f: f)  # noqa: E731\n"
+            '    known_bug("SENTINEL-0", "self-check")\n',
+            encoding="utf-8",
+        )
+        return "SENTINEL-0" in _marked_ids()
+    finally:
+        target.unlink(missing_ok=True)
+
+
 def _open_entry_ids() -> set[str]:
     return {i for ln in _todo_181() if ln.startswith("- [ ]") for i in _ids_on(ln)}
 
@@ -86,16 +108,20 @@ def _closed_entry_ids() -> set[str]:
 def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     """An xfail reason scrolls off a CI log; TODO.md 18.1 is the durable record."""
     marked = _marked_ids()
-    # No floor on the marker count: an empty backlog is a success, not a broken scan.
-    # There used to be one (the audit opened 65 locks, and a refactor moving the markers
-    # out of the files `_marked_ids` walks would otherwise pass with zero), but PR #24
-    # closed the last four and a floor that has to be lowered every time something is
-    # fixed measures the backlog, not the scan. `test_no_open_todo_entry_claims_a_guard_
-    # that_does_not_exist` below, plus this branch's
-    # `test_every_open_entry_is_locked_by_a_test_or_says_why_not`, are what catch a scan
-    # that silently stopped finding anything: they go the other way, from the TODO to the
-    # markers, so an empty TODO with an unexplained zero still fails.
-
+    # No floor on the marker count: an empty backlog is a success, not a broken
+    # scan. A floor that has to be lowered every time something is fixed measures
+    # the backlog, not the scan. The reverse checks below (TODO -> markers) catch
+    # an empty TODO with an unexplained zero.
+    #
+    # But they cannot catch the scan going blind while the TODO also happens to be
+    # empty -- the state this repo is now in -- because there is nothing to
+    # disagree with. So the scan proves it still works directly, by planting a
+    # sentinel marker in a file it walks and requiring that it be seen. That is
+    # the one assertion here that does not depend on any defect being open.
+    assert _scan_self_check(), (
+        "_marked_ids() no longer finds a known_bug marker placed in a scanned file; "
+        "the scan is broken, so 'no open defects' would be a false negative"
+    )
     missing = sorted(set(marked) - _open_entry_ids())
     assert not missing, (
         f"{missing} lock tests with @known_bug but are not open entries in TODO.md 18.1. "

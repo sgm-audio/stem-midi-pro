@@ -388,22 +388,30 @@ class StemMidiModel(nn.Module):
             "routing_decision": routing,
         }
 
-        # 4. Compute loss if targets provided (training mode). Pitch and
-        #    velocity targets are wired through (C-3); the expression and
-        #    confidence heads remain untrained — no dataset emits those
-        #    targets yet (see TODO ARCH-11.4.4 / ARCH-11.6).
+        # 4. Compute loss if targets provided (training mode). Pitch,
+        #    velocity and (CONF-1) confidence are wired through; the expression
+        #    head remains untrained — no dataset emits those targets yet (see
+        #    TODO ARCH-11.4.4 / ARCH-11.6).
         if target_guitar is not None and target_bass is not None:
+            onset_target = self._prepare_onset_target(target_onsets, guitar_tr["onset_logits"])
             loss, loss_dict = self.loss_fn(
                 pred_stems=[guitar_stem, bass_stem],
                 target_stems=[target_guitar, target_bass],
                 pred_onsets=guitar_tr["onset_logits"],
-                target_onsets=self._prepare_onset_target(target_onsets, guitar_tr["onset_logits"]),
+                target_onsets=onset_target,
                 pred_pitch_logits=guitar_tr["pitch_logits"],
                 target_pitches=self._prepare_pitch_target(target_pitch, guitar_tr["pitch_logits"]),
                 pred_velocities=guitar_tr["velocity"],
                 target_velocities=self._prepare_velocity_target(
                     target_velocity, guitar_tr["velocity"]
                 ),
+                # CONF-1: without these the confidence term is dead code and
+                # the head keeps its random initialisation forever. The target
+                # is the model's own per-frame onset correctness, which needs no
+                # label the dataset does not already carry.
+                pred_confidence=guitar_tr["confidence"],
+                pred_onsets_for_confidence=guitar_tr["onset_logits"],
+                target_onsets_for_confidence=onset_target,
             )
             outputs["loss"] = loss
             outputs["loss_dict"] = loss_dict
@@ -504,6 +512,20 @@ class StemMidiModel(nn.Module):
         if tr.get("events"):
             events = tr["events"][0]  # B=1 in production paths
         elif tr["onset_logits"] is not None:
+            # TRANS-1: content, not spacing, decides whether there is a note.
+            #
+            # The onset head has no "no-note" class and peak-picking only asks
+            # "is the activation above threshold?", so an above-threshold frame
+            # on a stem with no energy still became a note. Silence rendered 0
+            # notes only because the untrained head happened to sit under 0.5 --
+            # a property of the initialisation, not a decision the pipeline made.
+            #
+            # `energy` is the per-frame stem energy on the SAME grid the onset
+            # frames index (`_match_frame_grid` guarantees that), so a frame can
+            # be refused when nothing was there to measure. The floor is relative
+            # to the stem's own loudest frame, so it is level-independent: a quiet
+            # but real recording is not gated away, while a frame 60 dB below the
+            # stem's peak carries no note.
             events = self._logits_to_midi(
                 tr["onset_logits"],
                 tr["pitch_logits"],

@@ -797,7 +797,7 @@ def create_response_zip(outputs: dict) -> io.BytesIO:
             # the shipped report equals the pipeline's report key-for-key, and every extra
             # alias is a name a client could start depending on.
             "si_sdr": _safe(separation_proxy),
-            "metric_semantics": "centroid_separation_proxy_not_si_sdr",
+            "metric_semantics": "mask_crosstalk_not_si_sdr",
             "phase_coherence": _safe(report.phase_coherence),
             "avg_confidence": _safe(report.avg_confidence),
             "confidence_encoding": guitar_midi.get("summary", {}).get(

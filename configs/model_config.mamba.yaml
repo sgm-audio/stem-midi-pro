@@ -56,11 +56,18 @@ loss:
   pitch_ce_weight: 0.8
   velocity_mae_weight: 0.3
   cross_modal_alignment_weight: 0.5
+  # CONF-1: trains the confidence head against per-frame onset correctness.
+  # Without this the head is never updated from its random init.
+  confidence_share: 0.1
 
 quality_gates:
   studio_confidence_threshold: 0.85
   draft_confidence_threshold: 0.70
   min_confidence: 0.6
+  # GATE-4: reported separation is mask CROSSTALK (0 = perfect, 0.667 = a flat
+  # one-third mask that separates nothing). Lower is better, so this is a ceiling.
+  # `null` disables. min_separation_proxy below is legacy metadata only.
+  max_separation_crosstalk: 0.60
   min_separation_proxy: 20.0  # deprecated metadata only; proxy is not a tier gate or SI-SDR
   # min_centroid_separation_db / min_si_sdr remain accepted aliases
   # (utils/quality_gates.py:QualityGateConfig reads them in that order).
@@ -70,3 +77,8 @@ inference:
   segment_seconds: 60.0  # main._transcribe_segmented: bound peak memory on long input
   allow_untrained_model: false  # api.load_model refuses random weights unless this or
       # ALLOW_UNTRAINED_MODEL=1 is set (H-6); /ready reports trained_weights either way.
+
+# MIDI export (EXPR-1): the expression head is untrained, so exporting it is
+# opt-in. Stated explicitly here rather than relying on the code default.
+midi:
+  include_expression: false
