@@ -47,11 +47,7 @@ def check_untrained_provenance() -> None:
     print(
         f"untrained model : weights_loaded={model.weights_loaded} backend={model.mamba_backend!r}"
     )
-    if not model.weights_loaded:
-        print(
-            "                  service still SERVES it: provenance is disclosed, and there is no "
-            "hard gate (ALLOW_UNTRAINED_MODEL does not exist here)."
-        )
+    check_untrained_gate()
 
     path = os.path.join(tempfile.mkdtemp(), "ckpt.pt")
     torch.save({"state_dict": model.state_dict()}, path)
@@ -72,6 +68,47 @@ def check_untrained_provenance() -> None:
     assert body["weights_loaded"] is False, body
     assert body["mamba_backend"] == model.mamba_backend, body
     print(f"/model-info     : weights_loaded={body['weights_loaded']} backend={body['backend']!r}")
+
+
+def check_untrained_gate() -> None:
+    """The merge's stricter contract: the API refuses to *serve* random weights.
+
+    main discloses provenance (`weights_loaded: false`) and serves anyway; PR #13's
+    H-6 gate raises unless an operator opts in through ``ALLOW_UNTRAINED_MODEL=1`` or
+    ``inference.allow_untrained_model: true``. The merged api.py keeps the gate and the
+    override, so both halves are exercised here - a script that only printed the flag
+    would pass whether or not the gate existed.
+    """
+    gate_vars = ("MODEL_CONFIG_PATH", "MODEL_CHECKPOINT_PATH", "ALLOW_UNTRAINED_MODEL")
+    saved = {k: os.environ.get(k) for k in gate_vars}
+    os.environ["MODEL_CONFIG_PATH"] = "configs/model_config.yaml"
+    os.environ.pop("MODEL_CHECKPOINT_PATH", None)
+    os.environ.pop("ALLOW_UNTRAINED_MODEL", None)
+    try:
+        try:
+            api.load_model()
+            refused = False
+            detail = ""
+        except RuntimeError as exc:
+            refused = "No trained checkpoint is configured" in str(exc)
+            detail = str(exc).split(":")[0]
+        print(f"untrained gate  : refused={refused} ({detail})")
+        assert refused, "the API served a randomly initialised model"
+
+        os.environ["ALLOW_UNTRAINED_MODEL"] = "1"
+        served = api.load_model()
+        print(
+            "                -> ALLOW_UNTRAINED_MODEL=1 serves it, trained_weights="
+            f"{api._model_trained}, weights_loaded={served.weights_loaded}"
+        )
+        assert api._model_trained is False, "the override lied about training provenance"
+        assert not served.weights_loaded
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def check_oom_mapping() -> None:

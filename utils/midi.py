@@ -99,6 +99,7 @@ def build_midi_from_events(
     default_duration_beats: float | None = None,
     hop_length: int = HOP_LENGTH,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
+    include_confidence_track: bool = False,
     include_expression: bool = False,
     tempo_us: int | None = None,
 ) -> bytes:
@@ -107,9 +108,20 @@ def build_midi_from_events(
     Events are scheduled on an absolute tick timeline before being written as
     Mido delta times. This preserves chords and overlapping different-pitch
     notes, while truncating duplicate same-channel/pitch retriggers so ordinary
-    MIDI receivers do not see ambiguous overlapping note-ons. Audio-frame timing
-    uses ``ticks_per_beat * 1_000_000 / tempo_us``; at 120 BPM and 480 PPQ,
-    that is 960 ticks/sec.
+    MIDI receivers do not see ambiguous overlapping note-ons.
+
+    Audio-frame timing uses ``ticks_per_beat * 1_000_000 / tempo_us``; at 120 BPM and
+    480 PPQ that is 960 ticks/sec. ``tempo_us`` is a parameter (PR #13) rather than a
+    constant because the ``set_tempo`` meta and the frame->tick divisor are two halves
+    of one promise: while both were hard-coded to 120 BPM, a 60 BPM render played at
+    double speed against its own header. ``tempo_us <= 0`` raises instead of dividing.
+
+    Confidence rides a per-note Polyphonic Key Pressure event, so simultaneous notes can
+    each carry their own value (a channel CC cannot). ``include_confidence_track=True``
+    adds a second, meta-only track of ``Marker`` records
+    (``confidence note=<n> onset_tick=<t> value=<0..1>``) for DAWs that do not display
+    poly-pressure; it is off by default because one track per render is the contract
+    ``test_confidence_marker_track_is_opt_in`` in tests/test_midi_roundtrip.py pins.
 
     ``duration_frames`` is honored when available; otherwise the function
     falls back to ``default_duration_beats`` (environment variable
@@ -145,13 +157,17 @@ def build_midi_from_events(
     track.append(MetaMessage("instrument_name", name=instrument))
     track.append(MetaMessage("marker", text=f"{stem_type.capitalize()} - Stem+MIDI Pro"))
 
-    # tempo is microseconds per beat; no extra factor of 60 is needed.
+    # tempo is microseconds per beat; no extra factor of 60 is needed (MIDI-1).
+    # This divides by the CALLER's tempo - the same value written into the set_tempo
+    # meta above - or the file's own tempo map contradicts its tick rate.
     ticks_per_second = ticks_per_beat * 1_000_000.0 / tempo_us
 
     # Scheduled entries are (absolute_tick, priority, sequence, message).
     # Note-offs precede note-ons at the same tick; note-specific metadata and
     # expression follow the note-on at that tick.
     scheduled: list[tuple[int, int, int, Message]] = []
+    # (onset_tick, note, confidence 0..127) for the opt-in companion meta track.
+    confidence_markers: list[tuple[int, int, int]] = []
     sequence = 0
     active_until: dict[tuple[int, int], int] = {}
     last_onset: dict[tuple[int, int], int] = {}
@@ -236,6 +252,9 @@ def build_midi_from_events(
             )
         )
 
+        if include_confidence_track:
+            confidence_markers.append((onset_tick, note, _clamp_midi(confidence_value)))
+
         # Expression is off by default: the head is untrained (ARCH-11.4.4), so
         # writing it into every export would fabricate phrasing the model never
         # learned. Callers that want it ask for it.
@@ -265,6 +284,22 @@ def build_midi_from_events(
         current_tick = tick
 
     track.append(MetaMessage("end_of_track"))
+
+    if include_confidence_track and confidence_markers:
+        markers = MidiTrack()
+        mid.tracks.append(markers)
+        markers.append(MetaMessage("track_name", name=f"{stem_type} confidence"))
+        last = 0
+        for onset, note, value in sorted(confidence_markers):
+            markers.append(
+                MetaMessage(
+                    "marker",
+                    text=f"confidence note={note} onset_tick={onset} value={value / 127:.3f}",
+                    time=max(0, onset - last),
+                )
+            )
+            last = onset
+        markers.append(MetaMessage("end_of_track"))
 
     buf = io.BytesIO()
     mid.save(file=buf)

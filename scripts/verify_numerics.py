@@ -7,16 +7,19 @@ Run: ``python3 scripts/verify_numerics.py [configs/model_config.yaml]``
 Prints, for the separator and the transcriber:
 
 * the hidden-state RMS **through the real stack** — norm, mixer, residual add —
-  after every block. A stack without the residual/norm wrapper collapses as
-  ``1 -> 4.9e-2 -> ... -> 1e-18``; the shipped stack holds. Measuring the bare
-  ``mamba_blocks`` (what this script used to do, labelled "no per-block norm /
-  residual add here") reports the collapse for a model that does not have it,
-  which is how SEP-2 stayed on the open list after it was fixed,
+  after every block, plus the bare-mixer ladder as the control. A stack without
+  the residual/norm wrapper collapses as ``1 -> 4.9e-2 -> ... -> 1e-18``; the
+  shipped stack holds at order one. Measuring the bare ``mamba_blocks`` (what
+  this script used to do, labelled "no per-block norm / residual add here")
+  reports the collapse for a model that does not have it, which is how SEP-2
+  stayed on the open list after it was fixed. Guard:
+  ``tests/test_numerics.py::test_block_rms_ladder_stays_order_one``,
 * per-stem mask mean/std and the logit spread that produces them (a collapsed
   stack pins every mask at the same value because the logits are ~0),
 * mixture consistency ``||guitar+bass+residual - mix|| / ||mix||`` — 1e-7 with
   the default softmax masks (they partition the mixture by construction) and
-  ~0.5 with ``separator.mask_normalization: independent``,
+  ~0.5 with ``separator.mask_normalization: independent``, which reproduces
+  SEP-1 on request,
 * the separation proxy (NOT SI-SDR) against its saturation range, so a metric
   that cannot discriminate is visible as such,
 * confidence spread across content classes (a head that has never been
@@ -149,14 +152,24 @@ def main(config_path: str = "configs/model_config.yaml") -> None:
             window=sep.window,
             return_complex=True,
         )
+        # The mask values the report prints. The normalisation is taken from the
+        # config (`softmax` by default), not assumed: with `independent` these
+        # are the sigmoids that produced SEP-1, and the printed mixture
+        # consistency below reproduces ~0.5 instead of ~1e-7.
         hidden = sep.input_proj(torch.abs(spec).transpose(1, 2))
         for norm, block in zip(sep.block_norms, sep.mamba_blocks, strict=True):
             hidden = hidden + block(norm(hidden))
         hidden = sep.final_norm(hidden)
         logits = torch.stack([head(hidden) for head in sep.mask_heads.values()], 0)
-        probs = torch.softmax(logits, dim=0)
+        probs = (
+            torch.softmax(logits, dim=0)
+            if sep.mask_normalization == "softmax"
+            else logits.sigmoid()
+        )
         dt_bias = torch.nn.functional.softplus(sep.mamba_blocks[0].dt_proj.bias)
 
+    # Both ladders come from the shared helpers so the control and the real
+    # stack can never drift apart (that drift is what created SEP-2).
     stack = _separator_ladder(sep, cfg)
     bare = _bare_block_ladder(sep, cfg)
     tr_ladder = _transcriber_ladder(tr)

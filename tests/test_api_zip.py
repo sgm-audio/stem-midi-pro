@@ -296,6 +296,15 @@ def test_query_flags_reach_the_model(api_env, tmp_path, params, expected):
 
 
 def test_zip_report_is_strict_json(api_env, tmp_path):
+    """Regression guard for JSON-1, fixed by PR #13 (was a strict-xfail lock).
+
+    `json.dumps` with the default `allow_nan=True` wrote bare `NaN`, which RFC 8259
+    forbids, so a strict parser rejected the WHOLE download for a file with
+    non-finite metrics - the normal outcome for silence, DC and NaN input. The fix is
+    `_finite()` on every metric plus `allow_nan=False`, i.e. a bad number is now a
+    loud build failure instead of an unparseable artefact. An all-NaN render must
+    still parse.
+    """
     api, stub = api_env
 
     def process(path, quantize=False):
@@ -483,6 +492,105 @@ def _report_json_from_zip(api_env, tmp_path):
     return json.loads(zf.read("processing_report.json"))
 
 
+def test_the_documented_confidence_lane_is_the_one_the_writer_emits():
+    """Regression guard for DOC-1 (docs and writer reconciled by PR #15).
+
+    DOC-1 was: USER_GUIDE.md:11/:88 and API_DOCUMENTATION.md told users to read
+    confidence off CC#127, which PR #11 (H-5) had already moved off Channel Mode
+    controllers, and which the writer no longer emits at all - PR #15 replaced the CC
+    lane with note-specific Polyphonic Key Pressure. So the docs and the writer now
+    agree, and this test's job changed from "fail knowingly" to "never drift apart
+    again". It is deliberately not importing a controller constant any more: there is
+    no controller to configure, and a guard that only passes while it crashes is worse
+    than none.
+
+    Two halves, both cheap to keep true:
+      * the writer emits poly pressure per note and never touches CC#120-127;
+      * any user-facing doc that mentions CC#127 next to "confidence" must also say it
+        is not emitted (or that the key is a deprecated JSON alias).
+    """
+    import io
+
+    from mido import MidiFile
+
+    from utils.midi import build_midi_from_events
+
+    events = [
+        {"note": 60, "onset_frame": 0, "velocity": 90, "confidence": 0.9},
+        {"note": 61, "onset_frame": 86, "velocity": 90, "confidence": 0.5},
+    ]
+    mid = MidiFile(file=io.BytesIO(build_midi_from_events({"midi_events": events}, "guitar")))
+    track = mid.tracks[0]
+    # 0.9 -> round(114.3) = 114, 0.5 -> round(63.5) = 64 (MIDI-4: the writer rounds,
+    # so the top of the range is reachable).
+    assert [m.value for m in track if m.type == "polytouch"] == [114, 64]
+    channel_mode = [m.control for m in track if m.type == "control_change" and m.control >= 120]
+    assert not channel_mode, f"Channel Mode messages written as confidence: {channel_mode}"
+
+    offenders = []
+    for name in _DOC_FILES:
+        path = ROOT / name
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        mentions = [
+            ln.strip()
+            for ln in text.split("\n")
+            if re.search(r"CC\s*#?127", ln) and re.search(r"confidence", ln, re.I)
+        ]
+        if not mentions:
+            continue
+        if re.search(r"not emitted|never emitted|never serialized|deprecated", text, re.I):
+            continue  # the file mentions CC#127 only to say it is gone
+        offenders.append(f"{name}: {mentions[0][:110]}")
+    assert (
+        not offenders
+    ), "docs promise CC#127 for confidence, which the writer never emits:\n" + "\n".join(offenders)
+
+
+def test_field_names_named_around_the_schema_are_delivered_keys():
+    """DOC-3: a field name in prose is as much a contract as a row in the table.
+
+    PR #24's confidence section explained that ``avg_confidence`` and
+    ``calibrated_confidence`` are both 0.0 for an empty render "and ``notes_total`` /
+    ``total_notes`` say whether the render carried anything" - and ``notes_total`` is a
+    key no code path emits. The schema guard above could not see it: it parses the rows
+    under ``## Processing Report Schema`` only, so a field named in any other section was
+    free to be fictional. This closes that gap by treating every backticked
+    snake_case token in the report/confidence sections as a claimed key.
+
+    Three tokens in the schema section are documented *values*, not keys, and are named
+    here rather than excluded by a fuzzier rule: ``null`` is the JSON literal the
+    non-finite policy delivers, and ``mask_crosstalk_not_si_sdr`` /
+    ``polyphonic_key_pressure`` are the strings ``metric_semantics`` and
+    ``confidence_encoding`` carry. A dotted name (``main._content_factor``,
+    ``processing_report.json``) is a module or a file, and the token regex skips it.
+    """
+    doc = (ROOT / "API_DOCUMENTATION.md").read_text(encoding="utf-8")
+    emitted = set(_report().as_dict())
+    documented_table = set(re.findall(r"^\|\s*`([a-z_]+)`\s*\|", doc, re.M))
+    values_not_keys = {
+        "null",
+        # The strings `metric_semantics` and `confidence_encoding` carry. Renaming
+        # the metric (GATE-4) renames this value, and the value is not a key.
+        "mask_crosstalk_not_si_sdr",
+        "polyphonic_key_pressure",
+    }
+    stale: list[str] = []
+    for section in re.split(r"^## ", doc, flags=re.M):
+        title = section.splitlines()[0].strip() if section.strip() else ""
+        if not title or not any(w in title.lower() for w in ("report", "confidence")):
+            continue
+        for token in set(re.findall(r"`([a-z][a-z0-9_]*)`", section)):
+            if token in emitted | documented_table | values_not_keys:
+                continue
+            stale.append(f"## {title}: `{token}`")
+    assert not stale, (
+        "API_DOCUMENTATION.md names field(s) the report does not deliver - an integrator "
+        "that codes against this line gets a KeyError:\n" + "\n".join(sorted(stale))
+    )
+
+
 def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path, monkeypatch):
     """`processing_report.json` is a paid artefact; its key set is a contract.
 
@@ -490,6 +598,12 @@ def test_processing_report_json_matches_the_documented_schema(api_env, tmp_path,
     parses. Both directions are asserted in one place: no undocumented key ships, and no
     documented key is missing. The report is built with `backend` set, because that is what
     main.StemMidiModel does (M-7) - a stub that omitted it would hide exactly the drift above.
+
+    DOC-2 was the `backend` half of that contract: `create_response_zip` copied a key the
+    table did not list. `main` closed it by documenting the row (API_DOCUMENTATION.md) and
+    having `ProcessingReport.as_dict()` always emit the field, so the round-3 merge drops the
+    `@known_bug("DOC-2")` marker instead of XPASS-ing on a fixed defect; this test is the
+    guard, and `TODO.md` 18.1 keeps the id as `[x]`.
     """
     api, _ = api_env
     real = api.model.process_audio_file

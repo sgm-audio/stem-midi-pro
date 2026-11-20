@@ -108,12 +108,16 @@ def _closed_entry_ids() -> set[str]:
 def test_every_locked_defect_is_written_up_as_open_in_the_todo() -> None:
     """An xfail reason scrolls off a CI log; TODO.md 18.1 is the durable record."""
     marked = _marked_ids()
-    # Floor, not an exact count: the audit opened 65 locks and the remediation
-    # has retired every one of them, so there is nothing left to require. The
-    # assertion would be vacuous then, so it is replaced by the check that still
-    # means something: the scan must be able to SEE a marker. `_marked_ids`
-    # walking the wrong files is the failure this guards, and a self-test on a
-    # synthetic marker detects that without depending on any defect being open.
+    # No floor on the marker count: an empty backlog is a success, not a broken
+    # scan. A floor that has to be lowered every time something is fixed measures
+    # the backlog, not the scan. The reverse checks below (TODO -> markers) catch
+    # an empty TODO with an unexplained zero.
+    #
+    # But they cannot catch the scan going blind while the TODO also happens to be
+    # empty -- the state this repo is now in -- because there is nothing to
+    # disagree with. So the scan proves it still works directly, by planting a
+    # sentinel marker in a file it walks and requiring that it be seen. That is
+    # the one assertion here that does not depend on any defect being open.
     assert _scan_self_check(), (
         "_marked_ids() no longer finds a known_bug marker placed in a scanned file; "
         "the scan is broken, so 'no open defects' would be a false negative"
@@ -211,6 +215,57 @@ def test_no_escape_hatches_in_the_tests_i_own() -> None:
     ), f"only {checked}/{len(OWNED)} owned files found — list drifted"
     assert not hits, "escape hatch in a file this audit owns (see the docstring):\n" + "\n".join(
         hits
+    )
+
+
+def test_every_open_entry_is_locked_by_a_test_or_says_why_not() -> None:
+    """An open defect needs a test, an explicit "no test lock", or it is a rumour.
+
+    The weaker rule above only fires when an entry *claims* "Locked by N tests". That is
+    how PR #15 could delete the MIDI-5 and CKPT-1 markers, fix both defects, and leave
+    the entries sitting open in the index with nothing behind them: a reader cannot tell
+    "unfixed and untested" from "fixed and forgotten", and the next regression is free.
+
+    So each open entry must either have a `@known_bug` marker under one of its ids, or
+    carry the literal text `No test lock:` explaining why a test is not the right
+    instrument (analytic findings, e.g. the memory model, qualify).
+    """
+    marked = set(_marked_ids())
+    unaccounted: list[str] = []
+    for line in _todo_181():
+        if not line.startswith("- [ ]"):
+            continue
+        ids = _ids_on(line)
+        if not ids or (ids & marked) or "No test lock:" in line:
+            continue
+        unaccounted.append(f"{'/'.join(sorted(ids))}: {line.strip()[:90]}")
+    assert not unaccounted, (
+        "these open TODO.md 18.1 entries have no @known_bug marker and no 'No test lock:' "
+        "note — either lock the defect, land the fix and check the entry off, or say why a "
+        "test cannot carry it:\n" + "\n".join(unaccounted)
+    )
+
+
+def test_guards_cited_in_the_todo_still_exist() -> None:
+    """``tests/test_x.py::test_y`` in 18.1 must resolve here and now.
+
+    Resolved entries are kept on purpose (the id is the join key), and they name the
+    guard that replaced the marker. Guards get renamed by the next refactor, and then the
+    breadcrumb points at nothing — which reads like "this was fixed and tested" forever.
+    Checked by name only, so a line-number or parametrisation edit cannot break it.
+    """
+    known: set[str] = set()
+    for path in TESTS.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                known.add(node.name)
+    cited = set(re.findall(r"::(test_[a-z0-9_]+)", "\n".join(_todo_181())))
+    missing = sorted(cited - known)
+    assert not missing, (
+        f"TODO.md 18.1 cites guards that no longer exist: {missing}. Either the test was "
+        "renamed (update the citation) or the regression coverage was deleted (put it back "
+        "— a fixed defect without its guard is a defect on loan)"
     )
 
 
